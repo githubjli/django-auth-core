@@ -1,6 +1,41 @@
-.venv/
-.env
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+backend/db.sqlite3
+staticfiles/
+media/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+.vscode/
+.idea/
