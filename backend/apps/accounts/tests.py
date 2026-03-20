@@ -1,9 +1,15 @@
+import shutil
+import tempfile
+
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 User = get_user_model()
+TEST_MEDIA_ROOT = tempfile.mkdtemp()
 
 
 class AuthAPITestCase(APITestCase):
@@ -136,3 +142,88 @@ class AuthAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class VideoAPITestCase(APITestCase):
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(TEST_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
+    def create_user(self, email, password='strong-pass-123', **extra_fields):
+        return User.objects.create_user(email=email, password=password, **extra_fields)
+
+    def authenticate(self, email='owner@example.com', password='strong-pass-123'):
+        user = self.create_user(email=email, password=password)
+        self.client.force_authenticate(user=user)
+        return user
+
+    def test_video_endpoints_require_authentication(self):
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'demo',
+                'file': SimpleUploadedFile('demo.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_upload_list_detail_and_delete_own_video(self):
+        user = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'My first video',
+                'file': SimpleUploadedFile('first.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
+        video_id = upload_response.data['id']
+
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data[0]['title'], 'My first video')
+
+        detail_response = self.client.get(reverse('video-detail', args=[video_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['title'], 'My first video')
+        self.assertIn('/media/videos/', detail_response.data['file_url'])
+
+        delete_response = self.client.delete(reverse('video-detail', args=[video_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.assertEqual(user.videos.count(), 0)
+
+    def test_user_can_only_access_own_videos(self):
+        owner = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Private video',
+                'file': SimpleUploadedFile('private.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+
+        other_user = self.create_user(email='other@example.com')
+        self.client.force_authenticate(user=other_user)
+
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data, [])
+
+        detail_response = self.client.get(reverse('video-detail', args=[video_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        delete_response = self.client.delete(reverse('video-detail', args=[video_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.assertEqual(owner.videos.count(), 1)

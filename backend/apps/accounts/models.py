@@ -43,3 +43,20 @@ class User(AbstractUser):
 
     def __str__(self) -> str:
         return self.email
+
+
+class Video(models.Model):
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='videos',
+    )
+    title = models.CharField(max_length=255)
+    file = models.FileField(upload_to='videos/')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self) -> str:
+        return self.title

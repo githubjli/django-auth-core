@@ -165,6 +165,40 @@ curl -X POST http://127.0.0.1:8001/api/admin/users/2/activate/ \
   -H 'Authorization: Bearer <staff_access_token>'
 ```
 
+## Video Upload API
+
+These endpoints are for authenticated users only. Each user can only list, view, and delete their own uploaded videos.
+Files are stored locally for now under the Django media directory.
+
+- `POST /api/videos/` - upload a video file for the current user
+- `GET /api/videos/` - list the current user's videos
+- `GET /api/videos/<id>/` - retrieve one of the current user's videos
+- `DELETE /api/videos/<id>/` - delete one of the current user's videos
+
+Example video curl commands:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/videos/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -F 'title=My first video' \
+  -F 'file=@/path/to/video.mp4'
+```
+
+```bash
+curl http://127.0.0.1:8001/api/videos/ \
+  -H 'Authorization: Bearer <access_token>'
+```
+
+```bash
+curl http://127.0.0.1:8001/api/videos/1/ \
+  -H 'Authorization: Bearer <access_token>'
+```
+
+```bash
+curl -X DELETE http://127.0.0.1:8001/api/videos/1/ \
+  -H 'Authorization: Bearer <access_token>'
+```
+
 ## Django Admin
 
 Admin is enabled at `/admin/` for local verification and ops tasks.

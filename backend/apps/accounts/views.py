@@ -1,15 +1,18 @@
 from django.contrib.auth import get_user_model
 from rest_framework import generics, permissions, status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from apps.accounts.models import Video
 from apps.accounts.permissions import IsStaffOrSuperuser
 from apps.accounts.serializers import (
     AdminUserSerializer,
     EmailTokenObtainPairSerializer,
     RegisterSerializer,
     UserSerializer,
+    VideoSerializer,
 )
 
 User = get_user_model()
@@ -59,3 +62,23 @@ class AdminUserActivationAPIView(APIView):
         user.save(update_fields=['is_active'])
         serializer = AdminUserSerializer(user)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class VideoListCreateAPIView(generics.ListCreateAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        return Video.objects.filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class VideoDetailAPIView(generics.RetrieveDestroyAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Video.objects.filter(owner=self.request.user)

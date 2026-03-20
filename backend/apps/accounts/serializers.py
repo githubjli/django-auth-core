@@ -2,6 +2,8 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from apps.accounts.models import Video
+
 User = get_user_model()
 
 
@@ -44,3 +46,20 @@ class AdminUserSerializer(serializers.ModelSerializer):
             'date_joined',
         )
         read_only_fields = ('id', 'date_joined')
+
+
+class VideoSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Video
+        fields = ('id', 'title', 'file', 'file_url', 'created_at')
+        read_only_fields = ('id', 'file_url', 'created_at')
+
+    def get_file_url(self, obj):
+        request = self.context.get('request')
+        if not obj.file:
+            return None
+        if request is None:
+            return obj.file.url
+        return request.build_absolute_uri(obj.file.url)
