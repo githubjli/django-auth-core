@@ -5,6 +5,7 @@ PIP := $(VENV_PYTHON) -m pip
 MANAGE := $(VENV_PYTHON) backend/manage.py
 APP_HOST ?= 127.0.0.1
 APP_PORT ?= 8001
+TEST_APPS ?= apps.accounts
 
 .PHONY: venv install migrate run test check
 
@@ -22,7 +23,7 @@ run:
 	$(MANAGE) runserver $(APP_HOST):$(APP_PORT)
 
 test:
-	$(MANAGE) test
+	$(MANAGE) test $(TEST_APPS)
 
 check:
 	$(MANAGE) check

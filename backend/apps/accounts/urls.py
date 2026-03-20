@@ -1,6 +1,11 @@
 from django.urls import path
 
-from apps.accounts.views import LoginAPIView, MeAPIView, RefreshAPIView, RegisterAPIView
+from apps.accounts.views import (
+    LoginAPIView,
+    MeAPIView,
+    RefreshAPIView,
+    RegisterAPIView,
+)
 
 urlpatterns = [
     path('register', RegisterAPIView.as_view(), name='auth-register'),

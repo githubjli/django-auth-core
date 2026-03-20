@@ -80,7 +80,7 @@ REDIS_URL=redis://127.0.0.1:6379/0
 - `make migrate` - run migrations
 - `make run` - start development server
 - Override the bind address if needed: `APP_PORT=8010 make run` or `APP_HOST=0.0.0.0 APP_PORT=8010 make run`
-- `make test` - run test suite
+- `make test` - run the current auth/accounts test suite (`apps.accounts`)
 - `make check` - run Django system checks
 
 ## Auth Core APIs (JWT)
@@ -123,6 +123,46 @@ Current user profile:
 ```bash
 curl http://127.0.0.1:8001/api/auth/me \
   -H 'Authorization: Bearer <access_token>'
+```
+
+## Admin User Control API
+
+These endpoints are for staff or superusers only and are intended for future frontend admin pages.
+Deactivating a user sets `is_active=False`, which blocks that user from logging in via the existing JWT auth endpoint.
+
+- `GET /api/admin/users/` - list users
+- `GET /api/admin/users/<id>/` - retrieve a user
+- `PATCH /api/admin/users/<id>/` - update user fields such as `first_name`, `last_name`, `is_staff`, or `is_active`
+- `POST /api/admin/users/<id>/activate/` - set `is_active=true`
+- `POST /api/admin/users/<id>/deactivate/` - set `is_active=false`
+
+Example admin curl commands:
+
+```bash
+curl http://127.0.0.1:8001/api/admin/users/ \
+  -H 'Authorization: Bearer <staff_access_token>'
+```
+
+```bash
+curl http://127.0.0.1:8001/api/admin/users/2/ \
+  -H 'Authorization: Bearer <staff_access_token>'
+```
+
+```bash
+curl -X PATCH http://127.0.0.1:8001/api/admin/users/2/ \
+  -H 'Authorization: Bearer <staff_access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"first_name":"Updated","last_name":"User","is_staff":false}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/admin/users/2/deactivate/ \
+  -H 'Authorization: Bearer <staff_access_token>'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/admin/users/2/activate/ \
+  -H 'Authorization: Bearer <staff_access_token>'
 ```
 
 ## Django Admin
