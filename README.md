@@ -125,6 +125,22 @@ curl http://127.0.0.1:8001/api/auth/me \
   -H 'Authorization: Bearer <access_token>'
 ```
 
+## Django Admin
+
+Admin is enabled at `/admin/` for local verification and ops tasks.
+
+Create a superuser:
+
+```bash
+.venv/bin/python backend/manage.py createsuperuser
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8001/admin/
+```
+
 ## Project structure
 
 ```text
