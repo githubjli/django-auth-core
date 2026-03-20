@@ -1,6 +1,6 @@
 # Django Auth Core API Starter
 
-API-first Django starter for front-end/back-end separation. The Django project root remains in `backend/`, and future domain apps can live under `backend/apps/`.
+API-first Django starter for front-end/back-end separation. The Django project root remains in `backend/`, and domain apps live under `backend/apps/`.
 
 ## Requirements
 
@@ -8,7 +8,7 @@ API-first Django starter for front-end/back-end separation. The Django project r
 - Python 3.11+
 - Homebrew
 
-## Quick start (one command flow)
+## Quick start
 
 ```bash
 make install
@@ -17,7 +17,7 @@ make migrate
 make run
 ```
 
-Server runs at `http://127.0.0.1:8000/`.
+By default, `make run` starts the server at `http://127.0.0.1:8001/` so it does not collide with another process already using port 8000.
 
 ## Dependency management
 
@@ -37,15 +37,24 @@ cp .env.example .env
 
 2. Adjust as needed.
 
-Minimum supported fields:
+Minimum fields:
 
 - `DEBUG`
 - `SECRET_KEY`
 - `ALLOWED_HOSTS`
 - `DATABASE_URL` or `DB_ENGINE`/`DB_NAME`/`DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`
 - `REDIS_URL`
+- `APP_HOST`
+- `APP_PORT`
 
-By default, SQLite is used for local bootstrapping. Set `DATABASE_URL` (or `DB_*`) to switch to Postgres.
+Optional API fields:
+
+- `CORS_ALLOWED_ORIGINS`
+- `CORS_ALLOW_ALL_ORIGINS` (defaults to `DEBUG` behavior)
+- `JWT_ACCESS_MINUTES`
+- `JWT_REFRESH_DAYS`
+
+By default SQLite is used. Set `DATABASE_URL` (or `DB_*`) to switch to Postgres.
 
 ## macOS + Homebrew: minimal Postgres/Redis setup
 
@@ -70,8 +79,51 @@ REDIS_URL=redis://127.0.0.1:6379/0
 - `make install` - create venv and install dependencies
 - `make migrate` - run migrations
 - `make run` - start development server
+- Override the bind address if needed: `APP_PORT=8010 make run` or `APP_HOST=0.0.0.0 APP_PORT=8010 make run`
 - `make test` - run test suite
 - `make check` - run Django system checks
+
+## Auth Core APIs (JWT)
+
+Base path: `/api/auth`
+
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `GET /api/auth/me` (Bearer access token required)
+
+### Curl examples
+
+Register:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@example.com","password":"strong-pass-123","first_name":"Demo","last_name":"User"}'
+```
+
+Login (get access + refresh):
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@example.com","password":"strong-pass-123"}'
+```
+
+Refresh access token:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/auth/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"refresh":"<refresh_token>"}'
+```
+
+Current user profile:
+
+```bash
+curl http://127.0.0.1:8001/api/auth/me \
+  -H 'Authorization: Bearer <access_token>'
+```
 
 ## Project structure
 
@@ -80,9 +132,10 @@ backend/
   manage.py
   config/
   apps/
+    accounts/
 ```
 
 ## Notes
 
-- `.venv/` and `.env` are ignored by git and must stay local only.
-- This starter includes DRF, SimpleJWT, CORS, dotenv support, and psycopg for Postgres.
+- `.venv/` and `.env` are ignored by git and must stay local.
+- Starter stack includes DRF, SimpleJWT, CORS, dotenv, and psycopg.
