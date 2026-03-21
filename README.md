@@ -171,9 +171,20 @@ These endpoints are for authenticated users only. Each user can only list, view,
 Files are stored locally for now under the Django media directory.
 
 - `POST /api/videos/` - upload a video file for the current user
-- `GET /api/videos/` - list the current user's videos
+- `GET /api/videos/` - list the current user's videos with optional filtering/search/sorting/pagination
 - `GET /api/videos/<id>/` - retrieve one of the current user's videos
 - `DELETE /api/videos/<id>/` - delete one of the current user's videos
+
+Optional upload/list fields and query params:
+
+- Upload fields: `title`, optional `description`, optional `category`, `file`
+- Categories: `education`, `entertainment`, `gaming`, `tech`, `other`
+- List query params:
+  - `category=tech`
+  - `search=demo`
+  - `ordering=created_at` or `ordering=-created_at`
+  - `page=1`
+  - `page_size=10`
 
 Example video curl commands:
 
@@ -197,6 +208,30 @@ curl http://127.0.0.1:8001/api/videos/1/ \
 ```bash
 curl -X DELETE http://127.0.0.1:8001/api/videos/1/ \
   -H 'Authorization: Bearer <access_token>'
+```
+
+Filter/search/paginate your own videos:
+
+```bash
+curl "http://127.0.0.1:8001/api/videos/?category=tech&search=demo&ordering=-created_at&page=1&page_size=10" \
+  -H 'Authorization: Bearer <access_token>'
+```
+
+## Public Video API
+
+These endpoints are read-only and do not require authentication.
+
+- `GET /api/public/videos/`
+- `GET /api/public/videos/<id>/`
+
+The public list also supports the same `category`, `search`, `ordering`, `page`, and `page_size` query params.
+
+```bash
+curl "http://127.0.0.1:8001/api/public/videos/?category=education&search=tutorial&ordering=-created_at"
+```
+
+```bash
+curl http://127.0.0.1:8001/api/public/videos/1/
 ```
 
 ## Django Admin

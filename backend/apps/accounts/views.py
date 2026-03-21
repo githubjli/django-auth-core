@@ -1,5 +1,7 @@
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from rest_framework import generics, permissions, status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -16,6 +18,12 @@ from apps.accounts.serializers import (
 )
 
 User = get_user_model()
+
+
+class VideoPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 class RegisterAPIView(generics.CreateAPIView):
@@ -68,12 +76,27 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+    pagination_class = VideoPagination
 
     def get_queryset(self):
-        return Video.objects.filter(owner=self.request.user)
+        queryset = Video.objects.filter(owner=self.request.user)
+        return self.filter_videos(queryset)
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+    def filter_videos(self, queryset):
+        category = self.request.query_params.get('category')
+        search = self.request.query_params.get('search')
+        ordering = self.request.query_params.get('ordering')
+
+        if category:
+            queryset = queryset.filter(category=category)
+        if search:
+            queryset = queryset.filter(Q(title__icontains=search))
+        if ordering in {'created_at', '-created_at'}:
+            queryset = queryset.order_by(ordering)
+        return queryset
 
 
 class VideoDetailAPIView(generics.RetrieveDestroyAPIView):
@@ -82,3 +105,29 @@ class VideoDetailAPIView(generics.RetrieveDestroyAPIView):
 
     def get_queryset(self):
         return Video.objects.filter(owner=self.request.user)
+
+
+class PublicVideoListAPIView(generics.ListAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        queryset = Video.objects.all()
+        category = self.request.query_params.get('category')
+        search = self.request.query_params.get('search')
+        ordering = self.request.query_params.get('ordering')
+
+        if category:
+            queryset = queryset.filter(category=category)
+        if search:
+            queryset = queryset.filter(Q(title__icontains=search))
+        if ordering in {'created_at', '-created_at'}:
+            queryset = queryset.order_by(ordering)
+        return queryset
+
+
+class PublicVideoDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.AllowAny]
+    queryset = Video.objects.all()

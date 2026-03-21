@@ -50,11 +50,21 @@ class AdminUserSerializer(serializers.ModelSerializer):
 
 class VideoSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
 
     class Meta:
         model = Video
-        fields = ('id', 'title', 'file', 'file_url', 'created_at')
-        read_only_fields = ('id', 'file_url', 'created_at')
+        fields = (
+            'id',
+            'title',
+            'description',
+            'category',
+            'category_display',
+            'file',
+            'file_url',
+            'created_at',
+        )
+        read_only_fields = ('id', 'category_display', 'file_url', 'created_at')
 
     def get_file_url(self, obj):
         request = self.context.get('request')

@@ -179,21 +179,27 @@ class VideoAPITestCase(APITestCase):
             reverse('video-list-create'),
             {
                 'title': 'My first video',
+                'description': 'My video description',
+                'category': 'tech',
                 'file': SimpleUploadedFile('first.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
         )
         self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
         video_id = upload_response.data['id']
+        self.assertEqual(upload_response.data['description'], 'My video description')
+        self.assertEqual(upload_response.data['category'], 'tech')
 
         list_response = self.client.get(reverse('video-list-create'))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(list_response.data), 1)
-        self.assertEqual(list_response.data[0]['title'], 'My first video')
+        self.assertEqual(list_response.data['count'], 1)
+        self.assertEqual(len(list_response.data['results']), 1)
+        self.assertEqual(list_response.data['results'][0]['title'], 'My first video')
 
         detail_response = self.client.get(reverse('video-detail', args=[video_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['title'], 'My first video')
+        self.assertEqual(detail_response.data['category_display'], 'Tech')
         self.assertIn('/media/videos/', detail_response.data['file_url'])
 
         delete_response = self.client.delete(reverse('video-detail', args=[video_id]))
@@ -207,6 +213,7 @@ class VideoAPITestCase(APITestCase):
             reverse('video-list-create'),
             {
                 'title': 'Private video',
+                'category': 'education',
                 'file': SimpleUploadedFile('private.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
@@ -218,12 +225,91 @@ class VideoAPITestCase(APITestCase):
 
         list_response = self.client.get(reverse('video-list-create'))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(list_response.data, [])
+        self.assertEqual(list_response.data['results'], [])
 
         detail_response = self.client.get(reverse('video-detail', args=[video_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)
 
         delete_response = self.client.delete(reverse('video-detail', args=[video_id]))
         self.assertEqual(delete_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.assertEqual(owner.videos.count(), 1)
+
+    def test_video_list_supports_filter_search_ordering_and_pagination(self):
+        self.authenticate()
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Zeta clip',
+                'description': 'last one',
+                'category': 'gaming',
+                'file': SimpleUploadedFile('zeta.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Alpha tutorial',
+                'description': 'first one',
+                'category': 'education',
+                'file': SimpleUploadedFile('alpha.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+
+        category_response = self.client.get(reverse('video-list-create'), {'category': 'education'})
+        self.assertEqual(category_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(category_response.data['count'], 1)
+        self.assertEqual(category_response.data['results'][0]['title'], 'Alpha tutorial')
+
+        search_response = self.client.get(reverse('video-list-create'), {'search': 'zeta'})
+        self.assertEqual(search_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(search_response.data['count'], 1)
+        self.assertEqual(search_response.data['results'][0]['category'], 'gaming')
+
+        ordered_response = self.client.get(reverse('video-list-create'), {'ordering': 'created_at'})
+        self.assertEqual(ordered_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(ordered_response.data['results'][0]['title'], 'Zeta clip')
+
+        paginated_response = self.client.get(reverse('video-list-create'), {'page_size': 1})
+        self.assertEqual(paginated_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(paginated_response.data['count'], 2)
+        self.assertEqual(len(paginated_response.data['results']), 1)
+        self.assertIsNotNone(paginated_response.data['next'])
+
+    def test_public_video_listing_and_detail_are_read_only(self):
+        owner = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public tech video',
+                'description': 'visible to all',
+                'category': 'tech',
+                'file': SimpleUploadedFile('public.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+        self.client.force_authenticate(user=None)
+
+        list_response = self.client.get(reverse('public-video-list'), {'search': 'tech'})
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data['count'], 1)
+        self.assertEqual(list_response.data['results'][0]['title'], 'Public tech video')
+
+        detail_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['description'], 'visible to all')
+
+        create_response = self.client.post(
+            reverse('public-video-list'),
+            {
+                'title': 'Nope',
+                'file': SimpleUploadedFile('nope.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
         self.assertEqual(owner.videos.count(), 1)

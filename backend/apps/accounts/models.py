@@ -46,12 +46,28 @@ class User(AbstractUser):
 
 
 class Video(models.Model):
+    CATEGORY_EDUCATION = 'education'
+    CATEGORY_ENTERTAINMENT = 'entertainment'
+    CATEGORY_GAMING = 'gaming'
+    CATEGORY_TECH = 'tech'
+    CATEGORY_OTHER = 'other'
+
+    CATEGORY_CHOICES = [
+        (CATEGORY_EDUCATION, 'Education'),
+        (CATEGORY_ENTERTAINMENT, 'Entertainment'),
+        (CATEGORY_GAMING, 'Gaming'),
+        (CATEGORY_TECH, 'Tech'),
+        (CATEGORY_OTHER, 'Other'),
+    ]
+
     owner = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
         related_name='videos',
     )
     title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    category = models.CharField(max_length=32, blank=True, choices=CATEGORY_CHOICES)
     file = models.FileField(upload_to='videos/')
     created_at = models.DateTimeField(auto_now_add=True)
 
