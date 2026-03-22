@@ -45,21 +45,20 @@ class User(AbstractUser):
         return self.email
 
 
+class Category(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(max_length=100, unique=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Video(models.Model):
-    CATEGORY_EDUCATION = 'education'
-    CATEGORY_ENTERTAINMENT = 'entertainment'
-    CATEGORY_GAMING = 'gaming'
-    CATEGORY_TECH = 'tech'
-    CATEGORY_OTHER = 'other'
-
-    CATEGORY_CHOICES = [
-        (CATEGORY_EDUCATION, 'Education'),
-        (CATEGORY_ENTERTAINMENT, 'Entertainment'),
-        (CATEGORY_GAMING, 'Gaming'),
-        (CATEGORY_TECH, 'Tech'),
-        (CATEGORY_OTHER, 'Other'),
-    ]
-
     owner = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -67,7 +66,7 @@ class Video(models.Model):
     )
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
-    category = models.CharField(max_length=32, blank=True, choices=CATEGORY_CHOICES)
+    category = models.CharField(max_length=100, blank=True)
     file = models.FileField(upload_to='videos/')
     thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -77,3 +76,12 @@ class Video(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+    @property
+    def category_name(self) -> str:
+        if not self.category:
+            return ''
+        category = Category.objects.filter(slug=self.category).only('name').first()
+        if category:
+            return category.name
+        return self.category.replace('-', ' ').title()

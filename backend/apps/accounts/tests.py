@@ -8,6 +8,8 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.accounts.models import Category
+
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
 
@@ -202,7 +204,8 @@ class VideoAPITestCase(APITestCase):
         detail_response = self.client.get(reverse('video-detail', args=[video_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['title'], 'My first video')
-        self.assertEqual(detail_response.data['category_display'], 'Tech')
+        self.assertEqual(detail_response.data['category_name'], 'Tech')
+        self.assertEqual(detail_response.data['category_slug'], 'tech')
         self.assertIn('/media/videos/', detail_response.data['file_url'])
         self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
 
@@ -348,7 +351,8 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(patch_response.data['title'], 'After update')
         self.assertEqual(patch_response.data['description'], 'New description')
         self.assertEqual(patch_response.data['category'], 'education')
-        self.assertEqual(patch_response.data['category_display'], 'Education')
+        self.assertEqual(patch_response.data['category_name'], 'Education')
+        self.assertEqual(patch_response.data['category_slug'], 'education')
         self.assertIn('manual', patch_response.data['thumbnail'])
 
     def test_owner_can_regenerate_thumbnail(self):
@@ -403,3 +407,45 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(regenerate_response.status_code, status.HTTP_404_NOT_FOUND)
 
         self.assertEqual(owner.videos.count(), 1)
+
+    def test_public_categories_include_empty_categories_and_video_counts(self):
+        self.authenticate()
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Tech video',
+                'category': 'tech',
+                'file': SimpleUploadedFile('tech.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse('public-category-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        slugs_to_counts = {item['slug']: item['video_count'] for item in response.data}
+        self.assertIn('tech', slugs_to_counts)
+        self.assertEqual(slugs_to_counts['tech'], 1)
+        self.assertIn('entertainment', slugs_to_counts)
+        self.assertEqual(slugs_to_counts['entertainment'], 0)
+
+    def test_inactive_category_is_hidden_and_rejected_for_video_write(self):
+        self.authenticate()
+        category = Category.objects.create(name='Secret', slug='secret', is_active=False)
+
+        list_response = self.client.get(reverse('public-category-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(category.slug, [item['slug'] for item in list_response.data])
+
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Secret upload',
+                'category': 'secret',
+                'file': SimpleUploadedFile('secret.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('category', upload_response.data)

@@ -258,6 +258,28 @@ curl "http://127.0.0.1:8001/api/public/videos/?category=education&search=tutoria
 curl http://127.0.0.1:8001/api/public/videos/1/
 ```
 
+## Public Categories API
+
+This backend now exposes frontend-ready categories so a separate UI can render dynamic sidebar links, homepage chips, and category browse pages from backend-managed data instead of hardcoded labels.
+
+- `GET /api/public/categories/`
+
+Response fields:
+
+- `name` - display label for the UI
+- `slug` - stable routing/filtering key
+- `video_count` - public video count for the category
+
+Notes:
+
+- only active categories are returned
+- categories with zero videos are still returned so the frontend can render empty states cleanly
+- videos continue to store and filter by category slug
+
+```bash
+curl http://127.0.0.1:8001/api/public/categories/
+```
+
 ## Django Admin
 
 Admin is enabled at `/admin/` for local verification and ops tasks.

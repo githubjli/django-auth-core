@@ -7,12 +7,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from apps.accounts.models import Video
+from apps.accounts.models import Category, Video
 from apps.accounts.permissions import IsStaffOrSuperuser
 from apps.accounts.services import generate_video_thumbnail
 from apps.accounts.serializers import (
     AdminUserSerializer,
     EmailTokenObtainPairSerializer,
+    PublicCategorySerializer,
     RegisterSerializer,
     UserSerializer,
     VideoMetadataSerializer,
@@ -162,3 +163,12 @@ class PublicVideoDetailAPIView(generics.RetrieveAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.AllowAny]
     queryset = Video.objects.all()
+
+
+class PublicCategoryListAPIView(generics.ListAPIView):
+    serializer_class = PublicCategorySerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+
+    def get_queryset(self):
+        return Category.objects.filter(is_active=True)

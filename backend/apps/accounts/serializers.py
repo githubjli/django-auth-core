@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from apps.accounts.models import Video
+from apps.accounts.models import Category, Video
 
 User = get_user_model()
 
@@ -48,10 +48,22 @@ class AdminUserSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'date_joined')
 
 
+class PublicCategorySerializer(serializers.ModelSerializer):
+    video_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Category
+        fields = ('id', 'name', 'slug', 'video_count')
+
+    def get_video_count(self, obj):
+        return Video.objects.filter(category=obj.slug).count()
+
+
 class VideoSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
-    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    category_name = serializers.CharField(read_only=True)
+    category_slug = serializers.CharField(source='category', read_only=True)
 
     class Meta:
         model = Video
@@ -60,14 +72,29 @@ class VideoSerializer(serializers.ModelSerializer):
             'title',
             'description',
             'category',
-            'category_display',
+            'category_name',
+            'category_slug',
             'file',
             'file_url',
             'thumbnail',
             'thumbnail_url',
             'created_at',
         )
-        read_only_fields = ('id', 'category_display', 'file_url', 'thumbnail_url', 'created_at')
+        read_only_fields = (
+            'id',
+            'category_name',
+            'category_slug',
+            'file_url',
+            'thumbnail_url',
+            'created_at',
+        )
+
+    def validate_category(self, value):
+        if not value:
+            return ''
+        if not Category.objects.filter(slug=value, is_active=True).exists():
+            raise serializers.ValidationError('Category slug does not exist or is inactive.')
+        return value
 
     def get_file_url(self, obj):
         return self._build_absolute_file_url(obj.file)
@@ -90,7 +117,8 @@ class VideoMetadataSerializer(VideoSerializer):
             'id',
             'file',
             'file_url',
-            'category_display',
+            'category_name',
+            'category_slug',
             'thumbnail_url',
             'created_at',
         )
