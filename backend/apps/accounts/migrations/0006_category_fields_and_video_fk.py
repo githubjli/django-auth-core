@@ -3,12 +3,42 @@ import django.db.models.deletion
 
 
 DEFAULT_CATEGORIES = [
-    ('Technology', 'technology', 10),
-    ('Education', 'education', 20),
-    ('Gaming', 'gaming', 30),
-    ('News', 'news', 40),
-    ('Entertainment', 'entertainment', 50),
-    ('Other', 'other', 60),
+    (
+        'Technology',
+        'technology',
+        1,
+        'Tech demos, software, infrastructure, AI, and engineering content.',
+    ),
+    (
+        'Education',
+        'education',
+        2,
+        'Learning materials, tutorials, lectures, explainers, and academic content.',
+    ),
+    (
+        'Gaming',
+        'gaming',
+        3,
+        'Gameplay, game streams, highlights, reviews, and related content.',
+    ),
+    (
+        'News',
+        'news',
+        4,
+        'Updates, reports, announcements, commentary, and current events.',
+    ),
+    (
+        'Entertainment',
+        'entertainment',
+        5,
+        'General entertainment, shows, fun content, lifestyle, and casual viewing.',
+    ),
+    (
+        'Other',
+        'other',
+        99,
+        'Uncategorized or miscellaneous videos that do not fit a primary channel yet.',
+    ),
 ]
 
 
@@ -27,33 +57,33 @@ def migrate_video_categories(apps, schema_editor):
     }
 
     existing = set(Category.objects.values_list('slug', flat=True))
-    for name, slug, sort_order in DEFAULT_CATEGORIES:
+    for name, slug, sort_order, description in DEFAULT_CATEGORIES:
         if slug not in existing:
             Category.objects.create(
                 name=name,
                 slug=slug,
                 sort_order=sort_order,
+                description=description,
                 is_active=True,
             )
             existing.add(slug)
         else:
-            Category.objects.filter(slug=slug).update(sort_order=sort_order)
+            Category.objects.filter(slug=slug).update(
+                name=name,
+                sort_order=sort_order,
+                description=description,
+                is_active=True,
+            )
 
     categories_by_slug = {category.slug: category for category in Category.objects.all()}
 
     for video in Video.objects.all():
         if not video.category:
             continue
-        normalized_slug = slug_map.get(video.category, video.category)
+        normalized_slug = slug_map.get(video.category, 'other')
         category = categories_by_slug.get(normalized_slug)
         if category is None:
-            category = Category.objects.create(
-                name=normalized_slug.replace('-', ' ').title(),
-                slug=normalized_slug,
-                sort_order=999,
-                is_active=True,
-            )
-            categories_by_slug[normalized_slug] = category
+            category = categories_by_slug['other']
 
         video.category_ref_id = category.id
         video.save(update_fields=['category_ref'])

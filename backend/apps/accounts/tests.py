@@ -408,7 +408,7 @@ class VideoAPITestCase(APITestCase):
 
         self.assertEqual(owner.videos.count(), 1)
 
-    def test_public_categories_include_empty_categories_and_video_counts(self):
+    def test_public_categories_include_seeded_metadata_and_empty_categories(self):
         self.authenticate()
         self.client.post(
             reverse('video-list-create'),
@@ -427,9 +427,17 @@ class VideoAPITestCase(APITestCase):
         category_payload = {item['slug']: item for item in response.data}
         self.assertIn('technology', category_payload)
         self.assertEqual(category_payload['technology']['name'], 'Technology')
-        self.assertEqual(category_payload['technology']['sort_order'], 10)
+        self.assertEqual(category_payload['technology']['sort_order'], 1)
+        self.assertEqual(
+            category_payload['technology']['description'],
+            'Tech demos, software, infrastructure, AI, and engineering content.',
+        )
         self.assertIn('entertainment', category_payload)
-        self.assertEqual(category_payload['entertainment']['description'], '')
+        self.assertEqual(category_payload['entertainment']['sort_order'], 5)
+        self.assertEqual(
+            category_payload['entertainment']['description'],
+            'General entertainment, shows, fun content, lifestyle, and casual viewing.',
+        )
 
     def test_inactive_category_is_hidden_and_rejected_for_video_write(self):
         self.authenticate()
