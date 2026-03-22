@@ -48,11 +48,13 @@ class User(AbstractUser):
 class Category(models.Model):
     name = models.CharField(max_length=100, unique=True)
     slug = models.SlugField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['name']
+        ordering = ['sort_order', 'name']
 
     def __str__(self) -> str:
         return self.name
@@ -66,7 +68,13 @@ class Video(models.Model):
     )
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
-    category = models.CharField(max_length=100, blank=True)
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='videos',
+    )
     file = models.FileField(upload_to='videos/')
     thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -81,7 +89,10 @@ class Video(models.Model):
     def category_name(self) -> str:
         if not self.category:
             return ''
-        category = Category.objects.filter(slug=self.category).only('name').first()
-        if category:
-            return category.name
-        return self.category.replace('-', ' ').title()
+        return self.category.name
+
+    @property
+    def category_slug(self) -> str:
+        if not self.category:
+            return ''
+        return self.category.slug

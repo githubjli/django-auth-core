@@ -182,9 +182,9 @@ Optional upload/list fields and query params:
 
 - Upload fields: `title`, optional `description`, optional `category`, `file`
 - Detail/PATCH response fields also include `thumbnail` and `thumbnail_url`
-- Categories: `education`, `entertainment`, `gaming`, `tech`, `other`
+- Categories: `technology`, `education`, `gaming`, `news`, `entertainment`, `other`
 - List query params:
-  - `category=tech`
+  - `category=technology`
   - `search=demo`
   - `ordering=created_at` or `ordering=-created_at`
   - `page=1`
@@ -217,7 +217,7 @@ curl -X DELETE http://127.0.0.1:8001/api/videos/1/ \
 Filter/search/paginate your own videos:
 
 ```bash
-curl "http://127.0.0.1:8001/api/videos/?category=tech&search=demo&ordering=-created_at&page=1&page_size=10" \
+curl "http://127.0.0.1:8001/api/videos/?category=technology&search=demo&ordering=-created_at&page=1&page_size=10" \
   -H 'Authorization: Bearer <access_token>'
 ```
 
@@ -266,9 +266,11 @@ This backend now exposes frontend-ready categories so a separate UI can render d
 
 Response fields:
 
+- `id`
 - `name` - display label for the UI
 - `slug` - stable routing/filtering key
-- `video_count` - public video count for the category
+- `description`
+- `sort_order`
 
 Notes:
 

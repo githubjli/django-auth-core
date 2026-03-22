@@ -7,6 +7,13 @@ from apps.accounts.models import Category, Video
 User = get_user_model()
 
 
+class OptionalSlugRelatedField(serializers.SlugRelatedField):
+    def to_internal_value(self, data):
+        if data in (None, ''):
+            return None
+        return super().to_internal_value(data)
+
+
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -49,21 +56,22 @@ class AdminUserSerializer(serializers.ModelSerializer):
 
 
 class PublicCategorySerializer(serializers.ModelSerializer):
-    video_count = serializers.SerializerMethodField()
-
     class Meta:
         model = Category
-        fields = ('id', 'name', 'slug', 'video_count')
-
-    def get_video_count(self, obj):
-        return Video.objects.filter(category=obj.slug).count()
+        fields = ('id', 'name', 'slug', 'description', 'sort_order')
 
 
 class VideoSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     category_name = serializers.CharField(read_only=True)
-    category_slug = serializers.CharField(source='category', read_only=True)
+    category_slug = serializers.CharField(source='category.slug', read_only=True)
+    category = OptionalSlugRelatedField(
+        slug_field='slug',
+        queryset=Category.objects.filter(is_active=True),
+        allow_null=True,
+        required=False,
+    )
 
     class Meta:
         model = Video
@@ -88,13 +96,6 @@ class VideoSerializer(serializers.ModelSerializer):
             'thumbnail_url',
             'created_at',
         )
-
-    def validate_category(self, value):
-        if not value:
-            return ''
-        if not Category.objects.filter(slug=value, is_active=True).exists():
-            raise serializers.ValidationError('Category slug does not exist or is inactive.')
-        return value
 
     def get_file_url(self, obj):
         return self._build_absolute_file_url(obj.file)

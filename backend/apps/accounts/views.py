@@ -82,7 +82,7 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
     pagination_class = VideoPagination
 
     def get_queryset(self):
-        queryset = Video.objects.filter(owner=self.request.user)
+        queryset = Video.objects.filter(owner=self.request.user).select_related('category')
         return self.filter_videos(queryset)
 
     def perform_create(self, serializer):
@@ -96,7 +96,7 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
         ordering = self.request.query_params.get('ordering')
 
         if category:
-            queryset = queryset.filter(category=category)
+            queryset = queryset.filter(category__slug=category)
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
         if ordering in {'created_at', '-created_at'}:
@@ -114,7 +114,7 @@ class VideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         return VideoSerializer
 
     def get_queryset(self):
-        return Video.objects.filter(owner=self.request.user)
+        return Video.objects.filter(owner=self.request.user).select_related('category')
 
 
 class VideoRegenerateThumbnailAPIView(APIView):
@@ -145,13 +145,13 @@ class PublicVideoListAPIView(generics.ListAPIView):
     pagination_class = VideoPagination
 
     def get_queryset(self):
-        queryset = Video.objects.all()
+        queryset = Video.objects.select_related('category').all()
         category = self.request.query_params.get('category')
         search = self.request.query_params.get('search')
         ordering = self.request.query_params.get('ordering')
 
         if category:
-            queryset = queryset.filter(category=category)
+            queryset = queryset.filter(category__slug=category)
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
         if ordering in {'created_at', '-created_at'}:
@@ -162,7 +162,7 @@ class PublicVideoListAPIView(generics.ListAPIView):
 class PublicVideoDetailAPIView(generics.RetrieveAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.AllowAny]
-    queryset = Video.objects.all()
+    queryset = Video.objects.select_related('category').all()
 
 
 class PublicCategoryListAPIView(generics.ListAPIView):
@@ -171,4 +171,4 @@ class PublicCategoryListAPIView(generics.ListAPIView):
     pagination_class = None
 
     def get_queryset(self):
-        return Category.objects.filter(is_active=True)
+        return Category.objects.filter(is_active=True).order_by('sort_order', 'name')

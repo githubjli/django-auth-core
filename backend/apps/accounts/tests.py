@@ -182,7 +182,7 @@ class VideoAPITestCase(APITestCase):
             {
                 'title': 'My first video',
                 'description': 'My video description',
-                'category': 'tech',
+                'category': 'technology',
                 'file': SimpleUploadedFile('first.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
@@ -190,7 +190,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
         video_id = upload_response.data['id']
         self.assertEqual(upload_response.data['description'], 'My video description')
-        self.assertEqual(upload_response.data['category'], 'tech')
+        self.assertEqual(upload_response.data['category'], 'technology')
         self.assertTrue(upload_response.data['thumbnail'])
         self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
 
@@ -204,8 +204,8 @@ class VideoAPITestCase(APITestCase):
         detail_response = self.client.get(reverse('video-detail', args=[video_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['title'], 'My first video')
-        self.assertEqual(detail_response.data['category_name'], 'Tech')
-        self.assertEqual(detail_response.data['category_slug'], 'tech')
+        self.assertEqual(detail_response.data['category_name'], 'Technology')
+        self.assertEqual(detail_response.data['category_slug'], 'technology')
         self.assertIn('/media/videos/', detail_response.data['file_url'])
         self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
 
@@ -292,7 +292,7 @@ class VideoAPITestCase(APITestCase):
             {
                 'title': 'Public tech video',
                 'description': 'visible to all',
-                'category': 'tech',
+                'category': 'technology',
                 'file': SimpleUploadedFile('public.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
@@ -414,7 +414,7 @@ class VideoAPITestCase(APITestCase):
             reverse('video-list-create'),
             {
                 'title': 'Tech video',
-                'category': 'tech',
+                'category': 'technology',
                 'file': SimpleUploadedFile('tech.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
@@ -424,11 +424,12 @@ class VideoAPITestCase(APITestCase):
         response = self.client.get(reverse('public-category-list'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        slugs_to_counts = {item['slug']: item['video_count'] for item in response.data}
-        self.assertIn('tech', slugs_to_counts)
-        self.assertEqual(slugs_to_counts['tech'], 1)
-        self.assertIn('entertainment', slugs_to_counts)
-        self.assertEqual(slugs_to_counts['entertainment'], 0)
+        category_payload = {item['slug']: item for item in response.data}
+        self.assertIn('technology', category_payload)
+        self.assertEqual(category_payload['technology']['name'], 'Technology')
+        self.assertEqual(category_payload['technology']['sort_order'], 10)
+        self.assertIn('entertainment', category_payload)
+        self.assertEqual(category_payload['entertainment']['description'], '')
 
     def test_inactive_category_is_hidden_and_rejected_for_video_write(self):
         self.authenticate()
