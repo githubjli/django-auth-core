@@ -1,0 +1,451 @@
+import shutil
+import tempfile
+
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.urls import reverse
+from django.test import override_settings
+from rest_framework import status
+from rest_framework.test import APITestCase
+
+from apps.accounts.models import Category
+
+User = get_user_model()
+TEST_MEDIA_ROOT = tempfile.mkdtemp()
+
+
+class AuthAPITestCase(APITestCase):
+    def create_user(self, email, password='strong-pass-123', **extra_fields):
+        defaults = {
+            'first_name': 'Test',
+            'last_name': 'User',
+        }
+        defaults.update(extra_fields)
+        return User.objects.create_user(email=email, password=password, **defaults)
+
+    def test_register_login_me_and_refresh(self):
+        register_response = self.client.post(
+            reverse('auth-register'),
+            {
+                'email': 'user@example.com',
+                'password': 'strong-pass-123',
+                'first_name': 'Test',
+                'last_name': 'User',
+            },
+            format='json',
+        )
+        self.assertEqual(register_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(register_response.data['email'], 'user@example.com')
+
+        login_response = self.client.post(
+            reverse('auth-login'),
+            {
+                'email': 'user@example.com',
+                'password': 'strong-pass-123',
+            },
+            format='json',
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', login_response.data)
+        self.assertIn('refresh', login_response.data)
+
+        access = login_response.data['access']
+        refresh = login_response.data['refresh']
+
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {access}')
+        me_response = self.client.get(reverse('auth-me'))
+        self.assertEqual(me_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(me_response.data['email'], 'user@example.com')
+
+        refresh_response = self.client.post(
+            reverse('auth-refresh'),
+            {'refresh': refresh},
+            format='json',
+        )
+        self.assertEqual(refresh_response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', refresh_response.data)
+
+    def test_me_requires_authentication(self):
+        response = self.client.get(reverse('auth-me'))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_admin_login_with_custom_user(self):
+        user = self.create_user(
+            'admin@example.com',
+            first_name='Admin',
+            last_name='User',
+        )
+        user.is_staff = True
+        user.is_superuser = True
+        user.save(update_fields=['is_staff', 'is_superuser'])
+
+        login_success = self.client.login(
+            email='admin@example.com',
+            password='strong-pass-123',
+        )
+        self.assertTrue(login_success)
+
+        response = self.client.get('/admin/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_admin_user_management_requires_staff_or_superuser(self):
+        user = self.create_user('member@example.com')
+        self.client.force_authenticate(user=user)
+
+        list_response = self.client.get(reverse('admin-user-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        detail_response = self.client.get(reverse('admin-user-detail', args=[user.id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        activate_response = self.client.post(reverse('admin-user-activate', args=[user.id]))
+        self.assertEqual(activate_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        deactivate_response = self.client.post(reverse('admin-user-deactivate', args=[user.id]))
+        self.assertEqual(deactivate_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_admin_user_management_and_activation_flow(self):
+        admin_user = self.create_user('staff@example.com', is_staff=True)
+        target_user = self.create_user('target@example.com')
+        self.client.force_authenticate(user=admin_user)
+
+        list_response = self.client.get(reverse('admin-user-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            any(item['email'] == 'target@example.com' for item in list_response.data)
+        )
+
+        detail_response = self.client.patch(
+            reverse('admin-user-detail', args=[target_user.id]),
+            {'first_name': 'Updated', 'last_name': 'Person'},
+            format='json',
+        )
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['first_name'], 'Updated')
+
+        deactivate_response = self.client.post(reverse('admin-user-deactivate', args=[target_user.id]))
+        self.assertEqual(deactivate_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(deactivate_response.data['is_active'])
+
+        login_response = self.client.post(
+            reverse('auth-login'),
+            {'email': 'target@example.com', 'password': 'strong-pass-123'},
+            format='json',
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        activate_response = self.client.post(reverse('admin-user-activate', args=[target_user.id]))
+        self.assertEqual(activate_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(activate_response.data['is_active'])
+
+        login_response = self.client.post(
+            reverse('auth-login'),
+            {'email': 'target@example.com', 'password': 'strong-pass-123'},
+            format='json',
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class VideoAPITestCase(APITestCase):
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(TEST_MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
+    def create_user(self, email, password='strong-pass-123', **extra_fields):
+        return User.objects.create_user(email=email, password=password, **extra_fields)
+
+    def authenticate(self, email='owner@example.com', password='strong-pass-123'):
+        user = self.create_user(email=email, password=password)
+        self.client.force_authenticate(user=user)
+        return user
+
+    def test_video_endpoints_require_authentication(self):
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'demo',
+                'file': SimpleUploadedFile('demo.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_upload_list_detail_and_delete_own_video(self):
+        user = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'My first video',
+                'description': 'My video description',
+                'category': 'tech',
+                'file': SimpleUploadedFile('first.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
+        video_id = upload_response.data['id']
+        self.assertEqual(upload_response.data['description'], 'My video description')
+        self.assertEqual(upload_response.data['category'], 'tech')
+        self.assertTrue(upload_response.data['thumbnail'])
+        self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
+
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data['count'], 1)
+        self.assertEqual(len(list_response.data['results']), 1)
+        self.assertEqual(list_response.data['results'][0]['title'], 'My first video')
+        self.assertIn('/media/thumbnails/', list_response.data['results'][0]['thumbnail_url'])
+
+        detail_response = self.client.get(reverse('video-detail', args=[video_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['title'], 'My first video')
+        self.assertEqual(detail_response.data['category_name'], 'Tech')
+        self.assertEqual(detail_response.data['category_slug'], 'tech')
+        self.assertIn('/media/videos/', detail_response.data['file_url'])
+        self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
+
+        delete_response = self.client.delete(reverse('video-detail', args=[video_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.assertEqual(user.videos.count(), 0)
+
+    def test_user_can_only_access_own_videos(self):
+        owner = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Private video',
+                'category': 'education',
+                'file': SimpleUploadedFile('private.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+
+        other_user = self.create_user(email='other@example.com')
+        self.client.force_authenticate(user=other_user)
+
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data['results'], [])
+
+        detail_response = self.client.get(reverse('video-detail', args=[video_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        delete_response = self.client.delete(reverse('video-detail', args=[video_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.assertEqual(owner.videos.count(), 1)
+
+    def test_video_list_supports_filter_search_ordering_and_pagination(self):
+        self.authenticate()
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Zeta clip',
+                'description': 'last one',
+                'category': 'gaming',
+                'file': SimpleUploadedFile('zeta.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Alpha tutorial',
+                'description': 'first one',
+                'category': 'education',
+                'file': SimpleUploadedFile('alpha.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+
+        category_response = self.client.get(reverse('video-list-create'), {'category': 'education'})
+        self.assertEqual(category_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(category_response.data['count'], 1)
+        self.assertEqual(category_response.data['results'][0]['title'], 'Alpha tutorial')
+
+        search_response = self.client.get(reverse('video-list-create'), {'search': 'zeta'})
+        self.assertEqual(search_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(search_response.data['count'], 1)
+        self.assertEqual(search_response.data['results'][0]['category'], 'gaming')
+
+        ordered_response = self.client.get(reverse('video-list-create'), {'ordering': 'created_at'})
+        self.assertEqual(ordered_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(ordered_response.data['results'][0]['title'], 'Zeta clip')
+
+        paginated_response = self.client.get(reverse('video-list-create'), {'page_size': 1})
+        self.assertEqual(paginated_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(paginated_response.data['count'], 2)
+        self.assertEqual(len(paginated_response.data['results']), 1)
+        self.assertIsNotNone(paginated_response.data['next'])
+
+    def test_public_video_listing_and_detail_are_read_only(self):
+        owner = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public tech video',
+                'description': 'visible to all',
+                'category': 'tech',
+                'file': SimpleUploadedFile('public.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+        self.client.force_authenticate(user=None)
+
+        list_response = self.client.get(reverse('public-video-list'), {'search': 'tech'})
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data['count'], 1)
+        self.assertEqual(list_response.data['results'][0]['title'], 'Public tech video')
+        self.assertIn('/media/thumbnails/', list_response.data['results'][0]['thumbnail_url'])
+
+        detail_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['description'], 'visible to all')
+        self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
+
+        create_response = self.client.post(
+            reverse('public-video-list'),
+            {
+                'title': 'Nope',
+                'file': SimpleUploadedFile('nope.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+        self.assertEqual(owner.videos.count(), 1)
+
+    def test_owner_can_patch_video_metadata_and_manual_thumbnail(self):
+        self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Before update',
+                'description': 'Old description',
+                'category': 'gaming',
+                'file': SimpleUploadedFile('before.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+
+        patch_response = self.client.patch(
+            reverse('video-detail', args=[video_id]),
+            {
+                'title': 'After update',
+                'description': 'New description',
+                'category': 'education',
+                'thumbnail': SimpleUploadedFile('manual.png', b'manual-image', content_type='image/png'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['title'], 'After update')
+        self.assertEqual(patch_response.data['description'], 'New description')
+        self.assertEqual(patch_response.data['category'], 'education')
+        self.assertEqual(patch_response.data['category_name'], 'Education')
+        self.assertEqual(patch_response.data['category_slug'], 'education')
+        self.assertIn('manual', patch_response.data['thumbnail'])
+
+    def test_owner_can_regenerate_thumbnail(self):
+        self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Regenerate me',
+                'file': SimpleUploadedFile('regen.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+        original_thumbnail = upload_response.data['thumbnail']
+
+        regenerate_response = self.client.post(
+            reverse('video-regenerate-thumbnail', args=[video_id]),
+            {'time_offset': 2},
+            format='json',
+        )
+        self.assertEqual(regenerate_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(regenerate_response.data['thumbnail'])
+        self.assertNotEqual(regenerate_response.data['thumbnail'], original_thumbnail)
+
+    def test_non_owner_cannot_patch_or_regenerate_thumbnail(self):
+        owner = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Owner video',
+                'file': SimpleUploadedFile('owner.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+
+        other_user = self.create_user(email='other-owner@example.com')
+        self.client.force_authenticate(user=other_user)
+
+        patch_response = self.client.patch(
+            reverse('video-detail', args=[video_id]),
+            {'title': 'Hacked'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        regenerate_response = self.client.post(
+            reverse('video-regenerate-thumbnail', args=[video_id]),
+            {'time_offset': 0.5},
+            format='json',
+        )
+        self.assertEqual(regenerate_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.assertEqual(owner.videos.count(), 1)
+
+    def test_public_categories_include_empty_categories_and_video_counts(self):
+        self.authenticate()
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Tech video',
+                'category': 'tech',
+                'file': SimpleUploadedFile('tech.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse('public-category-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        slugs_to_counts = {item['slug']: item['video_count'] for item in response.data}
+        self.assertIn('tech', slugs_to_counts)
+        self.assertEqual(slugs_to_counts['tech'], 1)
+        self.assertIn('entertainment', slugs_to_counts)
+        self.assertEqual(slugs_to_counts['entertainment'], 0)
+
+    def test_inactive_category_is_hidden_and_rejected_for_video_write(self):
+        self.authenticate()
+        category = Category.objects.create(name='Secret', slug='secret', is_active=False)
+
+        list_response = self.client.get(reverse('public-category-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(category.slug, [item['slug'] for item in list_response.data])
+
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Secret upload',
+                'category': 'secret',
+                'file': SimpleUploadedFile('secret.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('category', upload_response.data)
