@@ -169,15 +169,19 @@ curl -X POST http://127.0.0.1:8001/api/admin/users/2/activate/ \
 
 These endpoints are for authenticated users only. Each user can only list, view, and delete their own uploaded videos.
 Files are stored locally for now under the Django media directory.
+Uploaded videos also receive a default thumbnail automatically. The backend will try to extract a frame around 1 second using `ffmpeg` when available, and fall back to a minimal placeholder thumbnail when extraction is not possible.
 
 - `POST /api/videos/` - upload a video file for the current user
 - `GET /api/videos/` - list the current user's videos with optional filtering/search/sorting/pagination
 - `GET /api/videos/<id>/` - retrieve one of the current user's videos
+- `PATCH /api/videos/<id>/` - update the owner's `title`, `description`, `category`, or manually replace `thumbnail`
 - `DELETE /api/videos/<id>/` - delete one of the current user's videos
+- `POST /api/videos/<id>/regenerate-thumbnail/` - regenerate the thumbnail from the stored video file
 
 Optional upload/list fields and query params:
 
 - Upload fields: `title`, optional `description`, optional `category`, `file`
+- Detail/PATCH response fields also include `thumbnail` and `thumbnail_url`
 - Categories: `education`, `entertainment`, `gaming`, `tech`, `other`
 - List query params:
   - `category=tech`
@@ -215,6 +219,26 @@ Filter/search/paginate your own videos:
 ```bash
 curl "http://127.0.0.1:8001/api/videos/?category=tech&search=demo&ordering=-created_at&page=1&page_size=10" \
   -H 'Authorization: Bearer <access_token>'
+```
+
+Update metadata or manually replace the thumbnail:
+
+```bash
+curl -X PATCH http://127.0.0.1:8001/api/videos/1/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -F 'title=Better title' \
+  -F 'description=Updated description' \
+  -F 'category=education' \
+  -F 'thumbnail=@/path/to/manual-thumbnail.png'
+```
+
+Regenerate the thumbnail from the uploaded video:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/videos/1/regenerate-thumbnail/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"time_offset": 1.0}'
 ```
 
 ## Public Video API

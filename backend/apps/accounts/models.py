@@ -69,6 +69,7 @@ class Video(models.Model):
     description = models.TextField(blank=True)
     category = models.CharField(max_length=32, blank=True, choices=CATEGORY_CHOICES)
     file = models.FileField(upload_to='videos/')
+    thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

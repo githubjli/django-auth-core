@@ -50,6 +50,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
 
 class VideoSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
     category_display = serializers.CharField(source='get_category_display', read_only=True)
 
     class Meta:
@@ -62,14 +63,34 @@ class VideoSerializer(serializers.ModelSerializer):
             'category_display',
             'file',
             'file_url',
+            'thumbnail',
+            'thumbnail_url',
             'created_at',
         )
-        read_only_fields = ('id', 'category_display', 'file_url', 'created_at')
+        read_only_fields = ('id', 'category_display', 'file_url', 'thumbnail_url', 'created_at')
 
     def get_file_url(self, obj):
+        return self._build_absolute_file_url(obj.file)
+
+    def get_thumbnail_url(self, obj):
+        return self._build_absolute_file_url(obj.thumbnail)
+
+    def _build_absolute_file_url(self, field_file):
         request = self.context.get('request')
-        if not obj.file:
+        if not field_file:
             return None
         if request is None:
-            return obj.file.url
-        return request.build_absolute_uri(obj.file.url)
+            return field_file.url
+        return request.build_absolute_uri(field_file.url)
+
+
+class VideoMetadataSerializer(VideoSerializer):
+    class Meta(VideoSerializer.Meta):
+        read_only_fields = (
+            'id',
+            'file',
+            'file_url',
+            'category_display',
+            'thumbnail_url',
+            'created_at',
+        )

@@ -189,18 +189,22 @@ class VideoAPITestCase(APITestCase):
         video_id = upload_response.data['id']
         self.assertEqual(upload_response.data['description'], 'My video description')
         self.assertEqual(upload_response.data['category'], 'tech')
+        self.assertTrue(upload_response.data['thumbnail'])
+        self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
 
         list_response = self.client.get(reverse('video-list-create'))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(len(list_response.data['results']), 1)
         self.assertEqual(list_response.data['results'][0]['title'], 'My first video')
+        self.assertIn('/media/thumbnails/', list_response.data['results'][0]['thumbnail_url'])
 
         detail_response = self.client.get(reverse('video-detail', args=[video_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['title'], 'My first video')
         self.assertEqual(detail_response.data['category_display'], 'Tech')
         self.assertIn('/media/videos/', detail_response.data['file_url'])
+        self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
 
         delete_response = self.client.delete(reverse('video-detail', args=[video_id]))
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
@@ -297,10 +301,12 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(list_response.data['results'][0]['title'], 'Public tech video')
+        self.assertIn('/media/thumbnails/', list_response.data['results'][0]['thumbnail_url'])
 
         detail_response = self.client.get(reverse('public-video-detail', args=[video_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['description'], 'visible to all')
+        self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
 
         create_response = self.client.post(
             reverse('public-video-list'),
@@ -311,5 +317,89 @@ class VideoAPITestCase(APITestCase):
             format='multipart',
         )
         self.assertEqual(create_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+        self.assertEqual(owner.videos.count(), 1)
+
+    def test_owner_can_patch_video_metadata_and_manual_thumbnail(self):
+        self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Before update',
+                'description': 'Old description',
+                'category': 'gaming',
+                'file': SimpleUploadedFile('before.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+
+        patch_response = self.client.patch(
+            reverse('video-detail', args=[video_id]),
+            {
+                'title': 'After update',
+                'description': 'New description',
+                'category': 'education',
+                'thumbnail': SimpleUploadedFile('manual.png', b'manual-image', content_type='image/png'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['title'], 'After update')
+        self.assertEqual(patch_response.data['description'], 'New description')
+        self.assertEqual(patch_response.data['category'], 'education')
+        self.assertEqual(patch_response.data['category_display'], 'Education')
+        self.assertIn('manual', patch_response.data['thumbnail'])
+
+    def test_owner_can_regenerate_thumbnail(self):
+        self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Regenerate me',
+                'file': SimpleUploadedFile('regen.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+        original_thumbnail = upload_response.data['thumbnail']
+
+        regenerate_response = self.client.post(
+            reverse('video-regenerate-thumbnail', args=[video_id]),
+            {'time_offset': 2},
+            format='json',
+        )
+        self.assertEqual(regenerate_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(regenerate_response.data['thumbnail'])
+        self.assertNotEqual(regenerate_response.data['thumbnail'], original_thumbnail)
+
+    def test_non_owner_cannot_patch_or_regenerate_thumbnail(self):
+        owner = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Owner video',
+                'file': SimpleUploadedFile('owner.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+
+        other_user = self.create_user(email='other-owner@example.com')
+        self.client.force_authenticate(user=other_user)
+
+        patch_response = self.client.patch(
+            reverse('video-detail', args=[video_id]),
+            {'title': 'Hacked'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        regenerate_response = self.client.post(
+            reverse('video-regenerate-thumbnail', args=[video_id]),
+            {'time_offset': 0.5},
+            format='json',
+        )
+        self.assertEqual(regenerate_response.status_code, status.HTTP_404_NOT_FOUND)
 
         self.assertEqual(owner.videos.count(), 1)
