@@ -165,6 +165,29 @@ class PublicVideoDetailAPIView(generics.RetrieveAPIView):
     queryset = Video.objects.select_related('category').all()
 
 
+class PublicRelatedVideoListAPIView(generics.ListAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+
+    def get_queryset(self):
+        current_video = generics.get_object_or_404(
+            Video.objects.select_related('category'),
+            pk=self.kwargs['pk'],
+        )
+        limit = self.request.query_params.get('limit', 8)
+
+        try:
+            limit = max(1, min(int(limit), 20))
+        except (TypeError, ValueError):
+            limit = 8
+
+        queryset = Video.objects.select_related('category').exclude(pk=current_video.pk)
+        if current_video.category_id:
+            queryset = queryset.filter(category=current_video.category_id)
+        return queryset.order_by('-created_at', '-id')[:limit]
+
+
 class PublicCategoryListAPIView(generics.ListAPIView):
     serializer_class = PublicCategorySerializer
     permission_classes = [permissions.AllowAny]

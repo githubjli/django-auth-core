@@ -190,9 +190,15 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
         video_id = upload_response.data['id']
         self.assertEqual(upload_response.data['description'], 'My video description')
+        self.assertEqual(upload_response.data['description_preview'], 'My video description')
         self.assertEqual(upload_response.data['category'], 'technology')
         self.assertTrue(upload_response.data['thumbnail'])
         self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
+
+        created_video = user.videos.get(pk=video_id)
+        self.assertEqual(created_video.description, 'My video description')
+        self.assertIsNotNone(created_video.category)
+        self.assertEqual(created_video.category.slug, 'technology')
 
         list_response = self.client.get(reverse('video-list-create'))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
@@ -206,6 +212,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['title'], 'My first video')
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['category_slug'], 'technology')
+        self.assertEqual(detail_response.data['description_preview'], 'My video description')
         self.assertIn('/media/videos/', detail_response.data['file_url'])
         self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
 
@@ -304,11 +311,13 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(list_response.data['results'][0]['title'], 'Public tech video')
+        self.assertEqual(list_response.data['results'][0]['description_preview'], 'visible to all')
         self.assertIn('/media/thumbnails/', list_response.data['results'][0]['thumbnail_url'])
 
         detail_response = self.client.get(reverse('public-video-detail', args=[video_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['description'], 'visible to all')
+        self.assertEqual(detail_response.data['description_preview'], 'visible to all')
         self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
 
         create_response = self.client.post(
@@ -458,3 +467,44 @@ class VideoAPITestCase(APITestCase):
         )
         self.assertEqual(upload_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('category', upload_response.data)
+
+    def test_public_related_videos_prefers_same_category_and_excludes_current(self):
+        owner = self.authenticate()
+        current_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Current tech video',
+                'category': 'technology',
+                'file': SimpleUploadedFile('current.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Related tech video',
+                'category': 'technology',
+                'description': 'A' * 160,
+                'file': SimpleUploadedFile('related.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Education video',
+                'category': 'education',
+                'file': SimpleUploadedFile('education.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse('public-video-related', args=[current_video['id']]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['title'], 'Related tech video')
+        self.assertEqual(response.data[0]['category_slug'], 'technology')
+        self.assertTrue(response.data[0]['description_preview'].endswith('...'))
+
+        self.assertEqual(owner.videos.count(), 3)

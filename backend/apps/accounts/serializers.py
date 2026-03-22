@@ -64,6 +64,7 @@ class PublicCategorySerializer(serializers.ModelSerializer):
 class VideoSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
+    description_preview = serializers.SerializerMethodField()
     category_name = serializers.CharField(read_only=True)
     category_slug = serializers.CharField(source='category.slug', read_only=True)
     category = OptionalSlugRelatedField(
@@ -79,6 +80,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'id',
             'title',
             'description',
+            'description_preview',
             'category',
             'category_name',
             'category_slug',
@@ -102,6 +104,14 @@ class VideoSerializer(serializers.ModelSerializer):
 
     def get_thumbnail_url(self, obj):
         return self._build_absolute_file_url(obj.thumbnail)
+
+    def get_description_preview(self, obj):
+        if not obj.description:
+            return ''
+        preview = obj.description.strip()
+        if len(preview) <= 140:
+            return preview
+        return f'{preview[:137].rstrip()}...'
 
     def _build_absolute_file_url(self, field_file):
         request = self.context.get('request')
