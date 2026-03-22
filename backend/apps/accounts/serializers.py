@@ -5,12 +5,16 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.accounts.models import Category, Video
 
 User = get_user_model()
+LEGACY_CATEGORY_SLUG_ALIASES = {
+    'tech': 'technology',
+}
 
 
 class OptionalSlugRelatedField(serializers.SlugRelatedField):
     def to_internal_value(self, data):
         if data in (None, ''):
             return None
+        data = LEGACY_CATEGORY_SLUG_ALIASES.get(data, data)
         return super().to_internal_value(data)
 
 
@@ -58,7 +62,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
 class PublicCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
-        fields = ('id', 'name', 'slug', 'description', 'sort_order')
+        fields = ('name', 'slug', 'description', 'sort_order', 'show_on_homepage')
 
 
 class VideoSerializer(serializers.ModelSerializer):

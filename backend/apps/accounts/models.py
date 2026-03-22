@@ -51,6 +51,7 @@ class Category(models.Model):
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
     sort_order = models.PositiveIntegerField(default=0)
+    show_on_homepage = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

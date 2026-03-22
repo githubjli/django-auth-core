@@ -272,15 +272,16 @@ This backend now exposes frontend-ready categories so a separate UI can render d
 
 Response fields:
 
-- `id`
 - `name` - display label for the UI
 - `slug` - stable routing/filtering key
 - `description`
 - `sort_order`
+- `show_on_homepage`
 
 Notes:
 
 - only active categories are returned
+- legacy duplicate variants such as `tech` are normalized to the canonical `technology` channel
 - categories with zero videos are still returned so the frontend can render empty states cleanly
 - videos continue to store and filter by category slug
 

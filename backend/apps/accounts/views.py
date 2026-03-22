@@ -21,6 +21,9 @@ from apps.accounts.serializers import (
 )
 
 User = get_user_model()
+LEGACY_CATEGORY_SLUG_ALIASES = {
+    'tech': 'technology',
+}
 
 
 class VideoPagination(PageNumberPagination):
@@ -95,6 +98,7 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
         search = self.request.query_params.get('search')
         ordering = self.request.query_params.get('ordering')
 
+        category = LEGACY_CATEGORY_SLUG_ALIASES.get(category, category)
         if category:
             queryset = queryset.filter(category__slug=category)
         if search:
@@ -150,6 +154,7 @@ class PublicVideoListAPIView(generics.ListAPIView):
         search = self.request.query_params.get('search')
         ordering = self.request.query_params.get('ordering')
 
+        category = LEGACY_CATEGORY_SLUG_ALIASES.get(category, category)
         if category:
             queryset = queryset.filter(category__slug=category)
         if search:
@@ -194,4 +199,6 @@ class PublicCategoryListAPIView(generics.ListAPIView):
     pagination_class = None
 
     def get_queryset(self):
-        return Category.objects.filter(is_active=True).order_by('sort_order', 'name')
+        return Category.objects.filter(is_active=True).exclude(
+            slug__in=LEGACY_CATEGORY_SLUG_ALIASES.keys()
+        ).order_by('sort_order', 'name')

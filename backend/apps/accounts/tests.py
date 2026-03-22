@@ -221,6 +221,25 @@ class VideoAPITestCase(APITestCase):
 
         self.assertEqual(user.videos.count(), 0)
 
+    def test_legacy_category_alias_is_normalized_to_canonical_slug(self):
+        user = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Alias tech video',
+                'category': 'tech',
+                'file': SimpleUploadedFile('alias.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(upload_response.data['category'], 'technology')
+        self.assertEqual(upload_response.data['category_slug'], 'technology')
+
+        created_video = user.videos.get(pk=upload_response.data['id'])
+        self.assertIsNotNone(created_video.category)
+        self.assertEqual(created_video.category.slug, 'technology')
+
     def test_user_can_only_access_own_videos(self):
         owner = self.authenticate()
         upload_response = self.client.post(
@@ -281,6 +300,10 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(search_response.status_code, status.HTTP_200_OK)
         self.assertEqual(search_response.data['count'], 1)
         self.assertEqual(search_response.data['results'][0]['category'], 'gaming')
+
+        alias_filter_response = self.client.get(reverse('video-list-create'), {'category': 'tech'})
+        self.assertEqual(alias_filter_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(alias_filter_response.data['count'], 0)
 
         ordered_response = self.client.get(reverse('video-list-create'), {'ordering': 'created_at'})
         self.assertEqual(ordered_response.status_code, status.HTTP_200_OK)
@@ -435,18 +458,22 @@ class VideoAPITestCase(APITestCase):
 
         category_payload = {item['slug']: item for item in response.data}
         self.assertIn('technology', category_payload)
+        self.assertNotIn('tech', category_payload)
         self.assertEqual(category_payload['technology']['name'], 'Technology')
         self.assertEqual(category_payload['technology']['sort_order'], 1)
+        self.assertTrue(category_payload['technology']['show_on_homepage'])
         self.assertEqual(
             category_payload['technology']['description'],
             'Tech demos, software, infrastructure, AI, and engineering content.',
         )
         self.assertIn('entertainment', category_payload)
         self.assertEqual(category_payload['entertainment']['sort_order'], 5)
+        self.assertTrue(category_payload['entertainment']['show_on_homepage'])
         self.assertEqual(
             category_payload['entertainment']['description'],
             'General entertainment, shows, fun content, lifestyle, and casual viewing.',
         )
+        self.assertFalse(category_payload['other']['show_on_homepage'])
 
     def test_inactive_category_is_hidden_and_rejected_for_video_write(self):
         self.authenticate()

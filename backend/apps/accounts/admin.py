@@ -6,8 +6,8 @@ from apps.accounts.models import Category, User
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'slug', 'sort_order', 'is_active', 'created_at')
-    list_filter = ('is_active',)
+    list_display = ('name', 'slug', 'sort_order', 'show_on_homepage', 'is_active', 'created_at')
+    list_filter = ('is_active', 'show_on_homepage')
     search_fields = ('name', 'slug')
     ordering = ('sort_order', 'name')
 
