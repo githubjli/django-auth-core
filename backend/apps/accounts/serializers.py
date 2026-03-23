@@ -37,7 +37,7 @@ class EngagementUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'name', 'avatar_url', 'subscriber_count')
+        fields = ('id', 'name', 'avatar_url')
         read_only_fields = fields
 
     def get_avatar_url(self, obj):
@@ -213,25 +213,46 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
 
 
 class VideoCommentSerializer(serializers.ModelSerializer):
-    author = EngagementUserSerializer(read_only=True)
-    like_count = serializers.SerializerMethodField()
+    video_id = serializers.IntegerField(source='video.id', read_only=True)
+    parent_id = serializers.IntegerField(source='parent.id', allow_null=True, read_only=True)
+    viewer_has_liked = serializers.SerializerMethodField()
+    user = EngagementUserSerializer(read_only=True)
 
     class Meta:
         model = VideoComment
-        fields = ('id', 'video', 'author', 'content', 'like_count', 'created_at', 'updated_at')
+        fields = (
+            'id',
+            'video_id',
+            'parent_id',
+            'content',
+            'created_at',
+            'updated_at',
+            'like_count',
+            'reply_count',
+            'viewer_has_liked',
+            'user',
+        )
         read_only_fields = fields
 
-    def get_like_count(self, obj):
-        prefetched = getattr(obj, 'like_count', None)
+    def get_viewer_has_liked(self, obj):
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return False
+        prefetched = getattr(obj, 'viewer_has_liked_value', None)
         if prefetched is not None:
-            return prefetched
-        return obj.likes.count()
+            return bool(prefetched)
+        return obj.likes.filter(user=request.user).exists()
 
 
-class VideoCommentCreateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = VideoComment
-        fields = ('content',)
+class VideoCommentCreateSerializer(serializers.Serializer):
+    content = serializers.CharField(max_length=500)
+    parent_id = serializers.IntegerField(required=False, allow_null=True)
+
+    def validate_content(self, value):
+        trimmed = value.strip()
+        if not trimmed:
+            raise serializers.ValidationError('content cannot be blank.')
+        return trimmed
 
 
 class VideoMetadataSerializer(VideoSerializer):

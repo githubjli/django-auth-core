@@ -575,8 +575,11 @@ class VideoAPITestCase(APITestCase):
         )
         self.assertEqual(comment_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(comment_response.data['content'], 'Great upload!')
-        self.assertEqual(comment_response.data['author']['name'], 'Sub User')
+        self.assertEqual(comment_response.data['video_id'], video_id)
+        self.assertIsNone(comment_response.data['parent_id'])
+        self.assertEqual(comment_response.data['user']['name'], 'Sub User')
         self.assertEqual(comment_response.data['like_count'], 0)
+        self.assertEqual(comment_response.data['reply_count'], 0)
 
         summary_response = self.client.get(reverse('public-video-interaction-summary', args=[video_id]))
         self.assertEqual(summary_response.status_code, status.HTTP_200_OK)
@@ -590,13 +593,113 @@ class VideoAPITestCase(APITestCase):
 
         public_comments_response = self.client.get(reverse('public-video-comments', args=[video_id]))
         self.assertEqual(public_comments_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(public_comments_response.data), 1)
-        self.assertEqual(public_comments_response.data[0]['content'], 'Great upload!')
+        self.assertEqual(public_comments_response.data['count'], 1)
+        self.assertEqual(len(public_comments_response.data['results']), 1)
+        self.assertEqual(public_comments_response.data['results'][0]['content'], 'Great upload!')
 
         unsubscribe_response = self.client.delete(reverse('channel-subscribe', args=[channel_owner.id]))
         self.assertEqual(unsubscribe_response.status_code, status.HTTP_200_OK)
         self.assertFalse(unsubscribe_response.data['viewer_is_subscribed'])
         self.assertEqual(unsubscribe_response.data['subscriber_count'], 0)
+
+
+    def test_comment_create_requires_auth_and_increments_comment_count(self):
+        self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Comments video',
+                'file': SimpleUploadedFile('comments.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+        self.client.force_authenticate(user=None)
+
+        unauthenticated_response = self.client.post(
+            reverse('video-comment-create', args=[video_id]),
+            {'content': 'Blocked'},
+            format='json',
+        )
+        self.assertEqual(unauthenticated_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        commenter = self.create_user(email='commenter@example.com', first_name='Comment', last_name='User')
+        self.client.force_authenticate(user=commenter)
+        create_response = self.client.post(
+            reverse('video-comment-create', args=[video_id]),
+            {'content': '  Real comment body  '},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['content'], 'Real comment body')
+
+        summary_response = self.client.get(reverse('public-video-interaction-summary', args=[video_id]))
+        self.assertEqual(summary_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary_response.data['comment_count'], 1)
+
+    def test_comment_parent_must_belong_to_same_video(self):
+        self.authenticate()
+        first_video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'First video',
+                'file': SimpleUploadedFile('first-parent.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+        second_video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Second video',
+                'file': SimpleUploadedFile('second-parent.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        parent_response = self.client.post(
+            reverse('video-comment-create', args=[first_video_id]),
+            {'content': 'Parent comment'},
+            format='json',
+        )
+        self.assertEqual(parent_response.status_code, status.HTTP_201_CREATED)
+
+        invalid_reply_response = self.client.post(
+            reverse('video-comment-create', args=[second_video_id]),
+            {'content': 'Reply on wrong video', 'parent_id': parent_response.data['id']},
+            format='json',
+        )
+        self.assertEqual(invalid_reply_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('parent_id', invalid_reply_response.data)
+
+    def test_deleted_comments_are_hidden_from_public_list(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Hide deleted comments',
+                'file': SimpleUploadedFile('deleted-comments.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+        visible_comment = self.client.post(
+            reverse('video-comment-create', args=[video_id]),
+            {'content': 'Visible comment'},
+            format='json',
+        ).data
+        hidden_comment = self.client.post(
+            reverse('video-comment-create', args=[video_id]),
+            {'content': 'Hidden comment'},
+            format='json',
+        ).data
+
+        from apps.accounts.models import VideoComment
+        VideoComment.objects.filter(pk=hidden_comment['id']).update(is_deleted=True)
+
+        self.client.force_authenticate(user=None)
+        response = self.client.get(reverse('public-video-comments', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['id'], visible_comment['id'])
 
     def test_public_related_videos_prefers_same_category_and_excludes_current(self):
         owner = self.authenticate()

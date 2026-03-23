@@ -176,17 +176,27 @@ class VideoComment(models.Model):
         on_delete=models.CASCADE,
         related_name='comments',
     )
-    author = models.ForeignKey(
+    user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='video_comments',
     )
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='replies',
+    )
     content = models.TextField()
+    like_count = models.PositiveIntegerField(default=0)
+    reply_count = models.PositiveIntegerField(default=0)
+    is_deleted = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['created_at', 'id']
+        ordering = ['-created_at', '-id']
 
 
 class CommentLike(models.Model):

@@ -179,7 +179,7 @@ Uploaded videos also receive a default thumbnail automatically. The backend will
 - `POST /api/videos/<id>/regenerate-thumbnail/` - regenerate the thumbnail from the stored video file
 - `POST /api/videos/<id>/like/` - like a video as the current authenticated user
 - `DELETE /api/videos/<id>/like/` - remove the current user's like from a video
-- `POST /api/videos/<id>/comments/` - create a comment on a video as the current authenticated user
+- `POST /api/videos/<id>/comments/` - create a comment on a video as the current authenticated user (`content`, optional `parent_id`)
 
 Optional upload/list fields and query params:
 
@@ -252,7 +252,7 @@ These endpoints are read-only and do not require authentication.
 - `GET /api/public/videos/<id>/`
 - `GET /api/public/videos/<id>/related/`
 - `GET /api/public/videos/<id>/interaction-summary/` returns `video_id`, `like_count`, `comment_count`, `viewer_has_liked`, `viewer_is_subscribed`, `channel_id`, and `subscriber_count`
-- `GET /api/public/videos/<id>/comments/`
+- `GET /api/public/videos/<id>/comments/` - paginated top-level non-deleted comments ordered newest first
 - `POST /api/public/videos/<id>/view/` - record a lightweight view event and return the updated video payload
 
 The public list also supports the same `category`, `search`, `ordering`, `page`, and `page_size` query params.

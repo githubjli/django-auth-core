@@ -10,6 +10,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from apps.accounts.models import (
     Category,
     ChannelSubscription,
+    CommentLike,
     Video,
     VideoComment,
     VideoLike,
@@ -53,12 +54,26 @@ def annotate_videos_for_request(queryset, request):
     return queryset
 
 
-def annotate_comments(queryset):
-    return queryset.select_related('author').annotate(like_count=Count('likes', distinct=True))
+def annotate_comments(queryset, request):
+    queryset = queryset.select_related('user').annotate()
+    user = getattr(request, 'user', None)
+    if user and user.is_authenticated:
+        queryset = queryset.annotate(
+            viewer_has_liked_value=Exists(
+                CommentLike.objects.filter(comment_id=OuterRef('pk'), user=user)
+            )
+        )
+    return queryset
 
 
 class VideoPagination(PageNumberPagination):
     page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class CommentPagination(PageNumberPagination):
+    page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
 
@@ -303,10 +318,20 @@ class ChannelSubscriptionAPIView(APIView):
 class PublicVideoCommentListAPIView(generics.ListAPIView):
     serializer_class = VideoCommentSerializer
     permission_classes = [permissions.AllowAny]
-    pagination_class = None
+    pagination_class = CommentPagination
 
     def get_queryset(self):
-        return annotate_comments(VideoComment.objects.filter(video_id=self.kwargs['pk']))
+        video = generics.get_object_or_404(Video, pk=self.kwargs['pk'])
+        parent_id = self.request.query_params.get('parent_id')
+        queryset = VideoComment.objects.filter(video=video, is_deleted=False)
+
+        if parent_id is None:
+            queryset = queryset.filter(parent__isnull=True)
+        else:
+            queryset = queryset.filter(parent_id=parent_id)
+
+        queryset = annotate_comments(queryset, self.request)
+        return queryset.order_by('-created_at', '-id')
 
 
 class VideoCommentCreateAPIView(APIView):
@@ -316,10 +341,28 @@ class VideoCommentCreateAPIView(APIView):
         video = generics.get_object_or_404(Video.objects.select_related('owner'), pk=pk)
         serializer = VideoCommentCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        comment = serializer.save(video=video, author=request.user)
+
+        parent = None
+        parent_id = serializer.validated_data.get('parent_id')
+        if parent_id is not None:
+            parent = generics.get_object_or_404(VideoComment, pk=parent_id)
+            if parent.video_id != video.pk:
+                return Response(
+                    {'parent_id': ['parent comment must belong to the same video.']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        comment = VideoComment.objects.create(
+            video=video,
+            user=request.user,
+            parent=parent,
+            content=serializer.validated_data['content'],
+        )
         Video.objects.filter(pk=video.pk).update(comment_count=F('comment_count') + 1)
-        video.refresh_from_db(fields=['comment_count'])
-        comment = annotate_comments(VideoComment.objects.filter(pk=comment.pk)).get()
+        if parent is not None:
+            VideoComment.objects.filter(pk=parent.pk).update(reply_count=F('reply_count') + 1)
+
+        comment = annotate_comments(VideoComment.objects.filter(pk=comment.pk), request).get()
         response_serializer = VideoCommentSerializer(comment, context={'request': request})
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
