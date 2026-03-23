@@ -1,11 +1,11 @@
 from django.urls import path
 
 from apps.accounts.views import (
+    VideoCommentCreateAPIView,
     VideoDetailAPIView,
     VideoLikeAPIView,
     VideoListCreateAPIView,
     VideoRegenerateThumbnailAPIView,
-    VideoUnlikeAPIView,
 )
 
 urlpatterns = [
@@ -17,5 +17,5 @@ urlpatterns = [
         name='video-regenerate-thumbnail',
     ),
     path('<int:pk>/like/', VideoLikeAPIView.as_view(), name='video-like'),
-    path('<int:pk>/unlike/', VideoUnlikeAPIView.as_view(), name='video-unlike'),
+    path('<int:pk>/comments/', VideoCommentCreateAPIView.as_view(), name='video-comment-create'),
 ]

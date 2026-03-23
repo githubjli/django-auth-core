@@ -190,6 +190,10 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
         video_id = upload_response.data['id']
         self.assertEqual(upload_response.data['description'], 'My video description')
+        self.assertEqual(upload_response.data['owner_id'], user.id)
+        self.assertEqual(upload_response.data['owner_name'], 'owner@example.com')
+        self.assertEqual(upload_response.data['like_count'], 0)
+        self.assertEqual(upload_response.data['comment_count'], 0)
         self.assertEqual(upload_response.data['description_preview'], 'My video description')
         self.assertEqual(upload_response.data['category'], 'technology')
         self.assertTrue(upload_response.data['thumbnail'])
@@ -213,6 +217,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['category_slug'], 'technology')
         self.assertEqual(detail_response.data['description_preview'], 'My video description')
+        self.assertEqual(detail_response.data['owner_id'], user.id)
         self.assertIn('/media/videos/', detail_response.data['file_url'])
         self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
 
@@ -496,7 +501,7 @@ class VideoAPITestCase(APITestCase):
         self.assertIn('category', upload_response.data)
 
 
-    def test_video_like_unlike_and_public_view_tracking(self):
+    def test_video_like_delete_and_public_view_tracking(self):
         owner = self.authenticate()
         upload_response = self.client.post(
             reverse('video-list-create'),
@@ -535,10 +540,61 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['like_count'], 1)
         self.assertTrue(detail_response.data['is_liked'])
 
-        unlike_response = self.client.post(reverse('video-unlike', args=[video_id]))
+        unlike_response = self.client.delete(reverse('video-like', args=[video_id]))
         self.assertEqual(unlike_response.status_code, status.HTTP_200_OK)
         self.assertEqual(unlike_response.data['like_count'], 0)
         self.assertFalse(unlike_response.data['is_liked'])
+
+
+    def test_public_interaction_summary_comments_and_channel_subscription(self):
+        channel_owner = self.authenticate(email='channel@example.com')
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Commentable video',
+                'category': 'education',
+                'file': SimpleUploadedFile('commentable.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+
+        subscriber = self.create_user(email='subscriber@example.com', first_name='Sub', last_name='User')
+        self.client.force_authenticate(user=subscriber)
+
+        subscribe_response = self.client.post(reverse('channel-subscribe', args=[channel_owner.id]))
+        self.assertEqual(subscribe_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(subscribe_response.data['is_subscribed'])
+        self.assertEqual(subscribe_response.data['subscriber_count'], 1)
+
+        comment_response = self.client.post(
+            reverse('video-comment-create', args=[video_id]),
+            {'content': 'Great upload!'},
+            format='json',
+        )
+        self.assertEqual(comment_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(comment_response.data['content'], 'Great upload!')
+        self.assertEqual(comment_response.data['author']['name'], 'Sub User')
+        self.assertEqual(comment_response.data['like_count'], 0)
+
+        summary_response = self.client.get(reverse('public-video-interaction-summary', args=[video_id]))
+        self.assertEqual(summary_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary_response.data['video_id'], video_id)
+        self.assertEqual(summary_response.data['like_count'], 0)
+        self.assertEqual(summary_response.data['comment_count'], 1)
+        self.assertTrue(summary_response.data['is_subscribed'])
+        self.assertEqual(summary_response.data['channel']['id'], channel_owner.id)
+        self.assertEqual(summary_response.data['channel']['subscriber_count'], 1)
+
+        public_comments_response = self.client.get(reverse('public-video-comments', args=[video_id]))
+        self.assertEqual(public_comments_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(public_comments_response.data), 1)
+        self.assertEqual(public_comments_response.data[0]['content'], 'Great upload!')
+
+        unsubscribe_response = self.client.delete(reverse('channel-subscribe', args=[channel_owner.id]))
+        self.assertEqual(unsubscribe_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(unsubscribe_response.data['is_subscribed'])
+        self.assertEqual(unsubscribe_response.data['subscriber_count'], 0)
 
     def test_public_related_videos_prefers_same_category_and_excludes_current(self):
         owner = self.authenticate()
