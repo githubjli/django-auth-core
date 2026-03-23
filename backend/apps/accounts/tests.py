@@ -680,6 +680,34 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(unsubscribe_response.data['subscriber_count'], 0)
 
 
+
+    def test_comment_create_explicitly_accepts_json_and_rejects_text_plain(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Parser video',
+                'file': SimpleUploadedFile('parser.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        json_response = self.client.post(
+            reverse('video-comment-create', args=[video_id]),
+            {'content': 'JSON comment body'},
+            format='json',
+        )
+        self.assertEqual(json_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(json_response.data['content'], 'JSON comment body')
+
+        text_plain_response = self.client.generic(
+            'POST',
+            reverse('video-comment-create', args=[video_id]),
+            'raw text body',
+            content_type='text/plain',
+        )
+        self.assertEqual(text_plain_response.status_code, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+
     def test_comment_create_requires_auth_and_increments_comment_count(self):
         self.authenticate()
         upload_response = self.client.post(

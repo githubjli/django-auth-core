@@ -395,6 +395,7 @@ class PublicVideoCommentListAPIView(generics.ListAPIView):
 
 class VideoCommentCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def post(self, request, pk):
         video = generics.get_object_or_404(Video.objects.select_related('owner'), pk=pk)
