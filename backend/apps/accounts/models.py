@@ -108,7 +108,7 @@ class Video(models.Model):
     file = models.FileField(upload_to='videos/')
     thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at', '-id']
@@ -214,7 +214,7 @@ class VideoComment(models.Model):
     reply_count = models.PositiveIntegerField(default=0)
     is_deleted = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at', '-id']

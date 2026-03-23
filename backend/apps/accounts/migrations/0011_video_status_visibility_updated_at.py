@@ -20,8 +20,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='video',
             name='updated_at',
-            field=models.DateTimeField(auto_now=True, default=None),
-            preserve_default=False,
+            field=models.DateTimeField(auto_now=True, null=True, blank=True),
         ),
         migrations.AddField(
             model_name='video',
