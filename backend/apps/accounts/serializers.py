@@ -203,6 +203,10 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     )
     rtmp_url = serializers.SerializerMethodField()
     playback_url = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    preview_image_url = serializers.SerializerMethodField()
+    snapshot_url = serializers.SerializerMethodField()
     status_source = serializers.SerializerMethodField()
 
     class Meta:
@@ -221,6 +225,9 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'stream_key',
             'rtmp_url',
             'playback_url',
+            'thumbnail_url',
+            'preview_image_url',
+            'snapshot_url',
             'viewer_count',
             'started_at',
             'ended_at',
@@ -236,6 +243,9 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'stream_key',
             'rtmp_url',
             'playback_url',
+            'thumbnail_url',
+            'preview_image_url',
+            'snapshot_url',
             'viewer_count',
             'started_at',
             'ended_at',
@@ -264,8 +274,32 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             return None
         return f"{playback_base}/{obj.stream_key}.m3u8"
 
+    def get_thumbnail_url(self, obj):
+        return self._build_preview_image_url(obj)
+
+    def get_preview_image_url(self, obj):
+        return self._build_preview_image_url(obj)
+
+    def get_snapshot_url(self, obj):
+        return self._build_preview_image_url(obj)
+
     def get_status_source(self, obj):
         return getattr(obj, '_status_source', 'django_control')
+
+    def get_status(self, obj):
+        ant_media_status = getattr(obj, '_ant_media_status', None)
+        if ant_media_status is not None:
+            if ant_media_status == 'broadcasting':
+                return LiveStream.STATUS_LIVE
+            if ant_media_status == 'finished':
+                return LiveStream.STATUS_ENDED
+            return 'waiting_for_signal'
+
+        if obj.status == LiveStream.STATUS_LIVE:
+            return LiveStream.STATUS_LIVE
+        if obj.status == LiveStream.STATUS_ENDED:
+            return LiveStream.STATUS_ENDED
+        return 'ready'
 
     def _sync_status_from_ant_media(self, obj):
         if getattr(obj, '_ant_media_sync_attempted', False):
@@ -280,11 +314,14 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             return obj
 
         stream_status = self._fetch_ant_media_status(obj.stream_key)
-        mapped_status = self.ANT_MEDIA_STATUS_MAP.get(stream_status)
-        if not mapped_status:
+        if stream_status is None:
             return obj
 
         obj._status_source = 'ant_media'
+        obj._ant_media_status = stream_status
+        mapped_status = self.ANT_MEDIA_STATUS_MAP.get(stream_status)
+        if not mapped_status:
+            return obj
         if obj.status != mapped_status:
             obj.status = mapped_status
             obj.save(update_fields=['status'])
@@ -303,6 +340,11 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         if not isinstance(payload, dict):
             return None
         return payload.get('status')
+
+    def _build_preview_image_url(self, obj):
+        if not settings.ANT_MEDIA_PREVIEW_BASE:
+            return None
+        return f"{settings.ANT_MEDIA_PREVIEW_BASE}/{obj.stream_key}.png"
 
 
 class AdminVideoSerializer(VideoSerializer):

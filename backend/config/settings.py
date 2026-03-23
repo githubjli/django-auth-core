@@ -134,6 +134,7 @@ ANT_MEDIA_BASE_URL = os.getenv('ANT_MEDIA_BASE_URL', 'https://streaming-api-live
 ANT_MEDIA_APP_NAME = os.getenv('ANT_MEDIA_APP_NAME', 'live')
 ANT_MEDIA_RTMP_BASE = os.getenv('ANT_MEDIA_RTMP_BASE', 'rtmp://streaming-api-live.pttblockchain.online/live').rstrip('/')
 ANT_MEDIA_PLAYBACK_BASE = os.getenv('ANT_MEDIA_PLAYBACK_BASE', 'https://streaming-api-live.pttblockchain.online/live/streams').rstrip('/')
+ANT_MEDIA_PREVIEW_BASE = os.getenv('ANT_MEDIA_PREVIEW_BASE', '').rstrip('/')
 ANT_MEDIA_APPLICATION = ANT_MEDIA_APP_NAME
 ANT_MEDIA_REST_APP_NAME = os.getenv('ANT_MEDIA_REST_APP_NAME', ANT_MEDIA_APPLICATION)
 ANT_MEDIA_SYNC_STATUS = env_bool('ANT_MEDIA_SYNC_STATUS', False)

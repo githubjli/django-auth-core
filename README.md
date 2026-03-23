@@ -53,6 +53,7 @@ Optional live-stream fields:
 - `ANT_MEDIA_APP_NAME`
 - `ANT_MEDIA_RTMP_BASE`
 - `ANT_MEDIA_PLAYBACK_BASE`
+- `ANT_MEDIA_PREVIEW_BASE`
 - `ANT_MEDIA_REST_APP_NAME`
 - `ANT_MEDIA_SYNC_STATUS`
 
@@ -200,7 +201,7 @@ Create payload fields:
 - optional `category`
 - optional `visibility` (`public`, `unlisted`, or `private`)
 
-Response fields include `id`, `owner_id`, `owner_name`, `title`, `description`, `category`, `category_name`, `visibility`, `status`, `status_source`, `stream_key`, `rtmp_url`, and `playback_url`. `rtmp_url` is returned as the OBS-friendly RTMP server/app base, while `stream_key` stays separate for encoder configuration. When `ANT_MEDIA_SYNC_STATUS=True`, Django can query `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_REST_APP_NAME` at `/rest/v2/broadcasts/<stream_key>` and map Ant Media `broadcasting` to `live` and `finished` to `ended`, returning `status_source="ant_media"` when sync succeeds. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
+Response fields include `id`, `owner_id`, `owner_name`, `title`, `description`, `category`, `category_name`, `visibility`, `status`, `status_source`, `stream_key`, `rtmp_url`, `playback_url`, `thumbnail_url`, `preview_image_url`, and `snapshot_url`. `rtmp_url` is returned as the OBS-friendly RTMP server/app base, while `stream_key` stays separate for encoder configuration. Without external sync, Django exposes `ready`, `live`, and `ended` semantics from its control state. When `ANT_MEDIA_SYNC_STATUS=True`, Django can query `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_REST_APP_NAME` at `/rest/v2/broadcasts/<stream_key>` and expose `live` for Ant Media `broadcasting`, `ended` for `finished`, and `waiting_for_signal` when the Ant Media session exists but no live signal is present yet, returning `status_source="ant_media"` when sync succeeds. `thumbnail_url`, `preview_image_url`, and `snapshot_url` stay nullable unless `ANT_MEDIA_PREVIEW_BASE` is configured. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/live/create/ \

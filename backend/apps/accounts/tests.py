@@ -888,7 +888,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.data['description'], 'Camera and encoder ready')
         self.assertEqual(create_response.data['category_name'], 'Technology')
         self.assertEqual(create_response.data['visibility'], 'unlisted')
-        self.assertEqual(create_response.data['status'], 'idle')
+        self.assertEqual(create_response.data['status'], 'ready')
         self.assertEqual(create_response.data['status_source'], 'django_control')
         self.assertTrue(create_response.data['stream_key'])
         self.assertEqual(create_response.data['rtmp_url'], 'rtmp://streaming-api-live.pttblockchain.online/live')
@@ -897,6 +897,9 @@ class LiveStreamAPITestCase(APITestCase):
                 f"/live/streams/{create_response.data['stream_key']}.m3u8"
             )
         )
+        self.assertIsNone(create_response.data['thumbnail_url'])
+        self.assertIsNone(create_response.data['preview_image_url'])
+        self.assertIsNone(create_response.data['snapshot_url'])
 
         detail_response = self.client.get(reverse('live-stream-detail', args=[stream_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
@@ -906,6 +909,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['owner_id'], user.id)
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['status_source'], 'django_control')
+        self.assertEqual(detail_response.data['status'], 'ready')
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
@@ -945,7 +949,11 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(list_response.data[0]['owner_id'], owner.id)
         self.assertEqual(list_response.data[0]['owner_name'], owner.email)
         self.assertEqual(list_response.data[0]['visibility'], LiveStream.VISIBILITY_PUBLIC)
+        self.assertEqual(list_response.data[0]['status'], 'ready')
         self.assertEqual(list_response.data[0]['status_source'], 'django_control')
+        self.assertIsNone(list_response.data[0]['thumbnail_url'])
+        self.assertIsNone(list_response.data[0]['preview_image_url'])
+        self.assertIsNone(list_response.data[0]['snapshot_url'])
 
         detail_response = self.client.get(reverse('live-stream-detail', args=[public_stream.id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
@@ -1017,6 +1025,49 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_ENDED)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    def test_live_stream_status_waits_for_signal_when_ant_media_session_exists(self, mock_urlopen):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Waiting stream',
+            status=LiveStream.STATUS_IDLE,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"created"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'waiting_for_signal')
+        self.assertEqual(response.data['status_source'], 'ant_media')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
+    @override_settings(
+        ANT_MEDIA_PREVIEW_BASE='https://ant.example.com/live/previews',
+    )
+    def test_live_stream_returns_preview_urls_when_configured(self):
+        self.authenticate()
+        create_response = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Preview stream'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        expected_preview_url = (
+            f"https://ant.example.com/live/previews/{create_response.data['stream_key']}.png"
+        )
+        self.assertEqual(create_response.data['thumbnail_url'], expected_preview_url)
+        self.assertEqual(create_response.data['preview_image_url'], expected_preview_url)
+        self.assertEqual(create_response.data['snapshot_url'], expected_preview_url)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
