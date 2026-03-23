@@ -280,8 +280,8 @@ curl -X POST http://127.0.0.1:8001/api/public/videos/1/view/
 
 These endpoints are for authenticated users and provide a first-pass channel follow skeleton.
 
-- `POST /api/channels/<id>/subscribe/`
-- `DELETE /api/channels/<id>/subscribe/`
+- `POST /api/channels/<id>/subscribe/` returns `channel_id`, `subscriber_count`, and `viewer_is_subscribed`
+- `DELETE /api/channels/<id>/subscribe/` returns `channel_id`, `subscriber_count`, and `viewer_is_subscribed`
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/channels/2/subscribe/ \

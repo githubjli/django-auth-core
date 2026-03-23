@@ -275,7 +275,14 @@ class ChannelSubscriptionAPIView(APIView):
         if created:
             User.objects.filter(pk=channel.pk).update(subscriber_count=F('subscriber_count') + 1)
         channel.refresh_from_db(fields=['subscriber_count'])
-        return Response({'channel_id': channel.pk, 'subscriber_count': channel.subscriber_count, 'is_subscribed': True}, status=status.HTTP_200_OK)
+        return Response(
+            {
+                'channel_id': channel.pk,
+                'subscriber_count': channel.subscriber_count,
+                'viewer_is_subscribed': True,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def delete(self, request, pk):
         channel = generics.get_object_or_404(User, pk=pk)
@@ -283,7 +290,14 @@ class ChannelSubscriptionAPIView(APIView):
         if deleted_count:
             User.objects.filter(pk=channel.pk, subscriber_count__gt=0).update(subscriber_count=F('subscriber_count') - 1)
         channel.refresh_from_db(fields=['subscriber_count'])
-        return Response({'channel_id': channel.pk, 'subscriber_count': channel.subscriber_count, 'is_subscribed': False}, status=status.HTTP_200_OK)
+        return Response(
+            {
+                'channel_id': channel.pk,
+                'subscriber_count': channel.subscriber_count,
+                'viewer_is_subscribed': False,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class PublicVideoCommentListAPIView(generics.ListAPIView):

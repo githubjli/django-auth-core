@@ -565,7 +565,7 @@ class VideoAPITestCase(APITestCase):
 
         subscribe_response = self.client.post(reverse('channel-subscribe', args=[channel_owner.id]))
         self.assertEqual(subscribe_response.status_code, status.HTTP_200_OK)
-        self.assertTrue(subscribe_response.data['is_subscribed'])
+        self.assertTrue(subscribe_response.data['viewer_is_subscribed'])
         self.assertEqual(subscribe_response.data['subscriber_count'], 1)
 
         comment_response = self.client.post(
@@ -595,7 +595,7 @@ class VideoAPITestCase(APITestCase):
 
         unsubscribe_response = self.client.delete(reverse('channel-subscribe', args=[channel_owner.id]))
         self.assertEqual(unsubscribe_response.status_code, status.HTTP_200_OK)
-        self.assertFalse(unsubscribe_response.data['is_subscribed'])
+        self.assertFalse(unsubscribe_response.data['viewer_is_subscribed'])
         self.assertEqual(unsubscribe_response.data['subscriber_count'], 0)
 
     def test_public_related_videos_prefers_same_category_and_excludes_current(self):
