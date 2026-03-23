@@ -50,7 +50,7 @@ Minimum fields:
 Optional live-stream fields:
 
 - `ANT_MEDIA_BASE_URL`
-- `ANT_MEDIA_APPLICATION`
+- `ANT_MEDIA_APP_NAME`
 - `ANT_MEDIA_RTMP_BASE`
 - `ANT_MEDIA_PLAYBACK_BASE`
 
@@ -187,7 +187,7 @@ These endpoints are for authenticated users and provide a first-pass live stream
 - `GET /api/live/`
 - `GET /api/live/<id>/`
 
-Response fields include `id`, `title`, `status`, `stream_key`, `rtmp_url`, and `playback_url`. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL`) for HLS playback.
+Response fields include `id`, `title`, `status`, `stream_key`, `rtmp_url`, and `playback_url`. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/live/create/ \

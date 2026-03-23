@@ -878,8 +878,8 @@ class LiveStreamAPITestCase(APITestCase):
         stream_id = create_response.data['id']
         self.assertEqual(create_response.data['status'], 'idle')
         self.assertTrue(create_response.data['stream_key'])
-        self.assertIsNone(create_response.data['rtmp_url'])
-        self.assertIsNone(create_response.data['playback_url'])
+        self.assertTrue(create_response.data['rtmp_url'].startswith('rtmp://streaming-api-live.pttblockchain.online/live/'))
+        self.assertIn('/live/streams/', create_response.data['playback_url'])
 
         detail_response = self.client.get(reverse('live-stream-detail', args=[stream_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
@@ -902,9 +902,9 @@ class LiveStreamAPITestCase(APITestCase):
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
-        ANT_MEDIA_APPLICATION='LiveApp',
-        ANT_MEDIA_RTMP_BASE='rtmp://ant.example.com/LiveApp',
-        ANT_MEDIA_PLAYBACK_BASE='https://ant.example.com/LiveApp/streams',
+        ANT_MEDIA_APP_NAME='live',
+        ANT_MEDIA_RTMP_BASE='rtmp://ant.example.com/live',
+        ANT_MEDIA_PLAYBACK_BASE='https://ant.example.com/live/streams',
     )
     def test_live_stream_returns_ant_media_connection_urls(self):
         self.authenticate()
@@ -914,8 +914,8 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(create_response.data['rtmp_url'].startswith('rtmp://ant.example.com/LiveApp/'))
-        self.assertIn('/LiveApp/streams/', create_response.data['playback_url'])
+        self.assertTrue(create_response.data['rtmp_url'].startswith('rtmp://ant.example.com/live/'))
+        self.assertIn('/live/streams/', create_response.data['playback_url'])
         self.assertTrue(create_response.data['playback_url'].endswith('.m3u8'))
 
     def test_non_owner_cannot_start_or_end_stream(self):

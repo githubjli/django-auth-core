@@ -236,7 +236,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
 
         playback_base = settings.ANT_MEDIA_PLAYBACK_BASE
         if not playback_base and settings.ANT_MEDIA_BASE_URL:
-            playback_base = f"{settings.ANT_MEDIA_BASE_URL}/{settings.ANT_MEDIA_APPLICATION}/streams"
+            playback_base = f"{settings.ANT_MEDIA_BASE_URL}/{settings.ANT_MEDIA_APP_NAME}/streams"
         if not playback_base:
             return None
         return f"{playback_base}/{obj.stream_key}.m3u8"
