@@ -5,6 +5,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.accounts.models import (
     Category,
     ChannelSubscription,
+    LiveStream,
     Video,
     VideoComment,
     VideoLike,
@@ -183,6 +184,49 @@ class VideoSerializer(serializers.ModelSerializer):
             return field_file.url
         return request.build_absolute_uri(field_file.url)
 
+
+
+
+class LiveStreamSerializer(serializers.ModelSerializer):
+    category = OptionalSlugRelatedField(
+        slug_field='slug',
+        queryset=Category.objects.filter(is_active=True),
+        allow_null=True,
+        required=False,
+    )
+    playback_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LiveStream
+        fields = (
+            'id',
+            'title',
+            'category',
+            'status',
+            'stream_key',
+            'viewer_count',
+            'started_at',
+            'ended_at',
+            'created_at',
+            'playback_url',
+        )
+        read_only_fields = (
+            'id',
+            'status',
+            'stream_key',
+            'viewer_count',
+            'started_at',
+            'ended_at',
+            'created_at',
+            'playback_url',
+        )
+
+    def get_playback_url(self, obj):
+        from django.conf import settings
+
+        if not settings.ANT_MEDIA_BASE_URL:
+            return None
+        return f"{settings.ANT_MEDIA_BASE_URL}/{settings.ANT_MEDIA_APPLICATION}/streams/{obj.stream_key}.m3u8"
 
 
 class AdminVideoSerializer(VideoSerializer):

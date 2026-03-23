@@ -47,6 +47,11 @@ Minimum fields:
 - `APP_HOST`
 - `APP_PORT`
 
+Optional live-stream fields:
+
+- `ANT_MEDIA_BASE_URL`
+- `ANT_MEDIA_APPLICATION`
+
 Optional API fields:
 
 - `CORS_ALLOWED_ORIGINS`
@@ -167,6 +172,26 @@ curl -X POST http://127.0.0.1:8001/api/admin/users/2/deactivate/ \
 ```bash
 curl -X POST http://127.0.0.1:8001/api/admin/users/2/activate/ \
   -H 'Authorization: Bearer <staff_access_token>'
+```
+
+
+## Live Stream API
+
+These endpoints are for authenticated users and provide a first-pass live streaming backend that is compatible with Ant Media style stream keys and playback URLs.
+
+- `POST /api/live/create/`
+- `POST /api/live/<id>/start/`
+- `POST /api/live/<id>/end/`
+- `GET /api/live/`
+- `GET /api/live/<id>/`
+
+Response fields include `id`, `title`, `status`, `stream_key`, and `playback_url` (when `ANT_MEDIA_BASE_URL` is configured).
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/live/create/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"My live stream","category":"technology"}'
 ```
 
 ## Video Upload API

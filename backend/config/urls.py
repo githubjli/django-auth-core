@@ -9,6 +9,7 @@ urlpatterns = [
     path('api/admin/', include('apps.accounts.admin_urls')),
     path('api/videos/', include('apps.accounts.video_urls')),
     path('api/channels/', include('apps.accounts.channel_urls')),
+    path('api/live/', include('apps.accounts.live_urls')),
     path('api/public/categories/', include('apps.accounts.public_category_urls')),
     path('api/public/videos/', include('apps.accounts.public_video_urls')),
 ]

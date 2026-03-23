@@ -846,3 +846,84 @@ class VideoAPITestCase(APITestCase):
         self.assertTrue(response.data[0]['description_preview'].endswith('...'))
 
         self.assertEqual(owner.videos.count(), 3)
+
+class LiveStreamAPITestCase(APITestCase):
+    def create_user(self, email, password='strong-pass-123', **extra_fields):
+        return User.objects.create_user(email=email, password=password, **extra_fields)
+
+    def authenticate(self, email='streamer@example.com'):
+        user = self.create_user(email=email)
+        self.client.force_authenticate(user=user)
+        return user
+
+    def test_live_stream_endpoints_require_authentication(self):
+        list_response = self.client.get(reverse('live-stream-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        create_response = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Unauth stream'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_owner_can_create_start_end_and_list_live_streams(self):
+        self.authenticate()
+        create_response = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'My live stream', 'category': 'technology'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        stream_id = create_response.data['id']
+        self.assertEqual(create_response.data['status'], 'idle')
+        self.assertTrue(create_response.data['stream_key'])
+        self.assertIsNone(create_response.data['playback_url'])
+
+        detail_response = self.client.get(reverse('live-stream-detail', args=[stream_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['title'], 'My live stream')
+
+        start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        self.assertEqual(start_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(start_response.data['status'], 'live')
+        self.assertIsNotNone(start_response.data['started_at'])
+
+        end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        self.assertEqual(end_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(end_response.data['status'], 'ended')
+        self.assertIsNotNone(end_response.data['ended_at'])
+
+        list_response = self.client.get(reverse('live-stream-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data[0]['id'], stream_id)
+
+    @override_settings(ANT_MEDIA_BASE_URL='https://ant.example.com', ANT_MEDIA_APPLICATION='LiveApp')
+    def test_live_stream_returns_ant_media_playback_url(self):
+        self.authenticate()
+        create_response = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Playback stream'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('/LiveApp/streams/', create_response.data['playback_url'])
+        self.assertTrue(create_response.data['playback_url'].endswith('.m3u8'))
+
+    def test_non_owner_cannot_start_or_end_stream(self):
+        owner = self.authenticate()
+        stream_id = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Owner stream'},
+            format='json',
+        ).data['id']
+
+        other_user = self.create_user('other-streamer@example.com')
+        self.client.force_authenticate(user=other_user)
+
+        start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        self.assertEqual(start_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        self.assertEqual(end_response.status_code, status.HTTP_404_NOT_FOUND)

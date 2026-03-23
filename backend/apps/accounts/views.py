@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from django.db.models import Count, Exists, F, OuterRef, Q
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
@@ -11,6 +12,7 @@ from apps.accounts.models import (
     Category,
     ChannelSubscription,
     CommentLike,
+    LiveStream,
     Video,
     VideoComment,
     VideoLike,
@@ -20,6 +22,7 @@ from apps.accounts.permissions import IsStaffOrSuperuser
 from apps.accounts.serializers import (
     AdminUserSerializer,
     AdminVideoSerializer,
+    LiveStreamSerializer,
     EmailTokenObtainPairSerializer,
     PublicCategorySerializer,
     RegisterSerializer,
@@ -181,6 +184,57 @@ class AdminVideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return annotate_videos_for_request(Video.objects.all(), self.request)
+
+
+
+class LiveStreamListAPIView(generics.ListAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return LiveStream.objects.filter(owner=self.request.user).select_related('category')
+
+
+class LiveStreamCreateAPIView(generics.CreateAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class LiveStreamDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return LiveStream.objects.filter(owner=self.request.user).select_related('category')
+
+
+class LiveStreamStatusAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    new_status = LiveStream.STATUS_IDLE
+
+    def post(self, request, pk):
+        stream = generics.get_object_or_404(LiveStream.objects.select_related('category'), pk=pk, owner=request.user)
+        now = timezone.now()
+
+        if self.new_status == LiveStream.STATUS_LIVE:
+            stream.status = LiveStream.STATUS_LIVE
+            stream.started_at = now
+            stream.ended_at = None
+            stream.save(update_fields=['status', 'started_at', 'ended_at'])
+        elif self.new_status == LiveStream.STATUS_ENDED:
+            stream.status = LiveStream.STATUS_ENDED
+            if stream.started_at is None:
+                stream.started_at = now
+            stream.ended_at = now
+            stream.save(update_fields=['status', 'started_at', 'ended_at'])
+
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class VideoListCreateAPIView(generics.ListCreateAPIView):

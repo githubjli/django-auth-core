@@ -1,7 +1,13 @@
+import secrets
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 
+
+
+
+def generate_stream_key() -> str:
+    return secrets.token_urlsafe(24)
 
 class UserManager(BaseUserManager):
     use_in_migrations = True
@@ -238,3 +244,40 @@ class CommentLike(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['comment', 'user'], name='unique_comment_like_per_user')
         ]
+
+
+class LiveStream(models.Model):
+    STATUS_IDLE = 'idle'
+    STATUS_LIVE = 'live'
+    STATUS_ENDED = 'ended'
+    STATUS_CHOICES = [
+        (STATUS_IDLE, 'Idle'),
+        (STATUS_LIVE, 'Live'),
+        (STATUS_ENDED, 'Ended'),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='live_streams',
+    )
+    title = models.CharField(max_length=255)
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='live_streams',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_IDLE)
+    stream_key = models.CharField(max_length=255, unique=True, default=generate_stream_key)
+    viewer_count = models.PositiveIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self) -> str:
+        return self.title
