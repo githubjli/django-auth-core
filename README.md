@@ -51,6 +51,8 @@ Optional live-stream fields:
 
 - `ANT_MEDIA_BASE_URL`
 - `ANT_MEDIA_APPLICATION`
+- `ANT_MEDIA_RTMP_BASE`
+- `ANT_MEDIA_PLAYBACK_BASE`
 
 Optional API fields:
 
@@ -177,7 +179,7 @@ curl -X POST http://127.0.0.1:8001/api/admin/users/2/activate/ \
 
 ## Live Stream API
 
-These endpoints are for authenticated users and provide a first-pass live streaming backend that is compatible with Ant Media style stream keys and playback URLs.
+These endpoints are for authenticated users and provide a first-pass live streaming backend that is compatible with Ant Media style stream keys, RTMP ingest URLs, and HLS playback URLs.
 
 - `POST /api/live/create/`
 - `POST /api/live/<id>/start/`
@@ -185,7 +187,7 @@ These endpoints are for authenticated users and provide a first-pass live stream
 - `GET /api/live/`
 - `GET /api/live/<id>/`
 
-Response fields include `id`, `title`, `status`, `stream_key`, and `playback_url` (when `ANT_MEDIA_BASE_URL` is configured).
+Response fields include `id`, `title`, `status`, `stream_key`, `rtmp_url`, and `playback_url`. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL`) for HLS playback.
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/live/create/ \

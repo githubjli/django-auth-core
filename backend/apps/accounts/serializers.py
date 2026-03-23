@@ -194,6 +194,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         allow_null=True,
         required=False,
     )
+    rtmp_url = serializers.SerializerMethodField()
     playback_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -204,29 +205,41 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'category',
             'status',
             'stream_key',
+            'rtmp_url',
+            'playback_url',
             'viewer_count',
             'started_at',
             'ended_at',
             'created_at',
-            'playback_url',
         )
         read_only_fields = (
             'id',
             'status',
             'stream_key',
+            'rtmp_url',
+            'playback_url',
             'viewer_count',
             'started_at',
             'ended_at',
             'created_at',
-            'playback_url',
         )
+
+    def get_rtmp_url(self, obj):
+        from django.conf import settings
+
+        if not settings.ANT_MEDIA_RTMP_BASE:
+            return None
+        return f"{settings.ANT_MEDIA_RTMP_BASE}/{obj.stream_key}"
 
     def get_playback_url(self, obj):
         from django.conf import settings
 
-        if not settings.ANT_MEDIA_BASE_URL:
+        playback_base = settings.ANT_MEDIA_PLAYBACK_BASE
+        if not playback_base and settings.ANT_MEDIA_BASE_URL:
+            playback_base = f"{settings.ANT_MEDIA_BASE_URL}/{settings.ANT_MEDIA_APPLICATION}/streams"
+        if not playback_base:
             return None
-        return f"{settings.ANT_MEDIA_BASE_URL}/{settings.ANT_MEDIA_APPLICATION}/streams/{obj.stream_key}.m3u8"
+        return f"{playback_base}/{obj.stream_key}.m3u8"
 
 
 class AdminVideoSerializer(VideoSerializer):

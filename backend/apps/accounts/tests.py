@@ -878,6 +878,7 @@ class LiveStreamAPITestCase(APITestCase):
         stream_id = create_response.data['id']
         self.assertEqual(create_response.data['status'], 'idle')
         self.assertTrue(create_response.data['stream_key'])
+        self.assertIsNone(create_response.data['rtmp_url'])
         self.assertIsNone(create_response.data['playback_url'])
 
         detail_response = self.client.get(reverse('live-stream-detail', args=[stream_id]))
@@ -899,8 +900,13 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(len(list_response.data), 1)
         self.assertEqual(list_response.data[0]['id'], stream_id)
 
-    @override_settings(ANT_MEDIA_BASE_URL='https://ant.example.com', ANT_MEDIA_APPLICATION='LiveApp')
-    def test_live_stream_returns_ant_media_playback_url(self):
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_APPLICATION='LiveApp',
+        ANT_MEDIA_RTMP_BASE='rtmp://ant.example.com/LiveApp',
+        ANT_MEDIA_PLAYBACK_BASE='https://ant.example.com/LiveApp/streams',
+    )
+    def test_live_stream_returns_ant_media_connection_urls(self):
         self.authenticate()
         create_response = self.client.post(
             reverse('live-stream-create'),
@@ -908,6 +914,7 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(create_response.data['rtmp_url'].startswith('rtmp://ant.example.com/LiveApp/'))
         self.assertIn('/LiveApp/streams/', create_response.data['playback_url'])
         self.assertTrue(create_response.data['playback_url'].endswith('.m3u8'))
 
