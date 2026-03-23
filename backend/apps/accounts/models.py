@@ -1,4 +1,5 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.conf import settings
 from django.db import models
 
 
@@ -97,3 +98,43 @@ class Video(models.Model):
         if not self.category:
             return ''
         return self.category.slug
+
+
+
+class VideoView(models.Model):
+    video = models.ForeignKey(
+        Video,
+        on_delete=models.CASCADE,
+        related_name='views',
+    )
+    viewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='video_views',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class VideoLike(models.Model):
+    video = models.ForeignKey(
+        Video,
+        on_delete=models.CASCADE,
+        related_name='likes',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='liked_videos',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['video', 'user'], name='unique_video_like_per_user')
+        ]

@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from apps.accounts.models import Category, Video
+from apps.accounts.models import Category, Video, VideoLike
 
 User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
@@ -71,6 +71,9 @@ class VideoSerializer(serializers.ModelSerializer):
     description_preview = serializers.SerializerMethodField()
     category_name = serializers.CharField(read_only=True)
     category_slug = serializers.CharField(source='category.slug', read_only=True)
+    like_count = serializers.SerializerMethodField()
+    view_count = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
     category = OptionalSlugRelatedField(
         slug_field='slug',
         queryset=Category.objects.filter(is_active=True),
@@ -86,6 +89,9 @@ class VideoSerializer(serializers.ModelSerializer):
             'description',
             'description_preview',
             'category',
+            'like_count',
+            'view_count',
+            'is_liked',
             'category_name',
             'category_slug',
             'file',
@@ -108,6 +114,27 @@ class VideoSerializer(serializers.ModelSerializer):
 
     def get_thumbnail_url(self, obj):
         return self._build_absolute_file_url(obj.thumbnail)
+
+    def get_like_count(self, obj):
+        prefetched = getattr(obj, 'like_count', None)
+        if prefetched is not None:
+            return prefetched
+        return obj.likes.count()
+
+    def get_view_count(self, obj):
+        prefetched = getattr(obj, 'view_count', None)
+        if prefetched is not None:
+            return prefetched
+        return obj.views.count()
+
+    def get_is_liked(self, obj):
+        request = self.context.get('request')
+        if request is None or not getattr(request, 'user', None) or not request.user.is_authenticated:
+            return False
+        prefetched = getattr(obj, 'is_liked_value', None)
+        if prefetched is not None:
+            return bool(prefetched)
+        return VideoLike.objects.filter(video=obj, user=request.user).exists()
 
     def get_description_preview(self, obj):
         if not obj.description:

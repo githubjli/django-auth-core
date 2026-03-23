@@ -495,6 +495,51 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('category', upload_response.data)
 
+
+    def test_video_like_unlike_and_public_view_tracking(self):
+        owner = self.authenticate()
+        upload_response = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Engagement video',
+                'category': 'technology',
+                'file': SimpleUploadedFile('engagement.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        video_id = upload_response.data['id']
+        self.assertEqual(upload_response.data['like_count'], 0)
+        self.assertEqual(upload_response.data['view_count'], 0)
+        self.assertFalse(upload_response.data['is_liked'])
+
+        like_response = self.client.post(reverse('video-like', args=[video_id]))
+        self.assertEqual(like_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(like_response.data['like_count'], 1)
+        self.assertTrue(like_response.data['is_liked'])
+
+        duplicate_like_response = self.client.post(reverse('video-like', args=[video_id]))
+        self.assertEqual(duplicate_like_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate_like_response.data['like_count'], 1)
+
+        self.client.force_authenticate(user=None)
+        public_view_response = self.client.post(reverse('public-video-view', args=[video_id]))
+        self.assertEqual(public_view_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(public_view_response.data['view_count'], 1)
+        self.assertEqual(public_view_response.data['like_count'], 1)
+        self.assertFalse(public_view_response.data['is_liked'])
+
+        self.client.force_authenticate(user=owner)
+        detail_response = self.client.get(reverse('video-detail', args=[video_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['view_count'], 1)
+        self.assertEqual(detail_response.data['like_count'], 1)
+        self.assertTrue(detail_response.data['is_liked'])
+
+        unlike_response = self.client.post(reverse('video-unlike', args=[video_id]))
+        self.assertEqual(unlike_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(unlike_response.data['like_count'], 0)
+        self.assertFalse(unlike_response.data['is_liked'])
+
     def test_public_related_videos_prefers_same_category_and_excludes_current(self):
         owner = self.authenticate()
         current_video = self.client.post(

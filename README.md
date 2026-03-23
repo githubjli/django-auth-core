@@ -177,6 +177,8 @@ Uploaded videos also receive a default thumbnail automatically. The backend will
 - `PATCH /api/videos/<id>/` - update the owner's `title`, `description`, `category`, or manually replace `thumbnail`
 - `DELETE /api/videos/<id>/` - delete one of the current user's videos
 - `POST /api/videos/<id>/regenerate-thumbnail/` - regenerate the thumbnail from the stored video file
+- `POST /api/videos/<id>/like/` - like a video as the current authenticated user
+- `POST /api/videos/<id>/unlike/` - remove the current user's like from a video
 
 Optional upload/list fields and query params:
 
@@ -248,9 +250,10 @@ These endpoints are read-only and do not require authentication.
 - `GET /api/public/videos/`
 - `GET /api/public/videos/<id>/`
 - `GET /api/public/videos/<id>/related/`
+- `POST /api/public/videos/<id>/view/` - record a lightweight view event and return the updated video payload
 
 The public list also supports the same `category`, `search`, `ordering`, `page`, and `page_size` query params.
-Public video responses also include presentation-friendly fields such as `description_preview`, `category_name`, `category_slug`, and `thumbnail_url`.
+Public video responses also include presentation-friendly fields such as `description_preview`, `category_name`, `category_slug`, `thumbnail_url`, `like_count`, `view_count`, and `is_liked`.
 
 ```bash
 curl "http://127.0.0.1:8001/api/public/videos/?category=education&search=tutorial&ordering=-created_at"
@@ -262,6 +265,11 @@ curl http://127.0.0.1:8001/api/public/videos/1/
 
 ```bash
 curl http://127.0.0.1:8001/api/public/videos/1/related/
+```
+
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/public/videos/1/view/
 ```
 
 ## Public Categories API

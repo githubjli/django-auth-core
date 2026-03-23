@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.db.models import Q
+from django.db.models import Count, Exists, OuterRef, Q
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from apps.accounts.models import Category, Video
+from apps.accounts.models import Category, Video, VideoLike, VideoView
 from apps.accounts.permissions import IsStaffOrSuperuser
 from apps.accounts.services import generate_video_thumbnail
 from apps.accounts.serializers import (
@@ -24,6 +24,21 @@ User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
     'tech': 'technology',
 }
+
+
+def annotate_videos_for_request(queryset, request):
+    queryset = queryset.annotate(
+        like_count=Count('likes', distinct=True),
+        view_count=Count('views', distinct=True),
+    )
+    user = getattr(request, 'user', None)
+    if user and user.is_authenticated:
+        queryset = queryset.annotate(
+            is_liked_value=Exists(
+                VideoLike.objects.filter(video_id=OuterRef('pk'), user=user)
+            )
+        )
+    return queryset
 
 
 class VideoPagination(PageNumberPagination):
@@ -86,6 +101,7 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         queryset = Video.objects.filter(owner=self.request.user).select_related('category')
+        queryset = annotate_videos_for_request(queryset, self.request)
         return self.filter_videos(queryset)
 
     def perform_create(self, serializer):
@@ -105,6 +121,8 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
             queryset = queryset.filter(Q(title__icontains=search))
         if ordering in {'created_at', '-created_at'}:
             queryset = queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at', '-id')
         return queryset
 
 
@@ -118,7 +136,8 @@ class VideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         return VideoSerializer
 
     def get_queryset(self):
-        return Video.objects.filter(owner=self.request.user).select_related('category')
+        queryset = Video.objects.filter(owner=self.request.user).select_related('category')
+        return annotate_videos_for_request(queryset, self.request)
 
 
 class VideoRegenerateThumbnailAPIView(APIView):
@@ -150,6 +169,7 @@ class PublicVideoListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = Video.objects.select_related('category').all()
+        queryset = annotate_videos_for_request(queryset, self.request)
         category = self.request.query_params.get('category')
         search = self.request.query_params.get('search')
         ordering = self.request.query_params.get('ordering')
@@ -161,13 +181,18 @@ class PublicVideoListAPIView(generics.ListAPIView):
             queryset = queryset.filter(Q(title__icontains=search))
         if ordering in {'created_at', '-created_at'}:
             queryset = queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at', '-id')
         return queryset
 
 
 class PublicVideoDetailAPIView(generics.RetrieveAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.AllowAny]
-    queryset = Video.objects.select_related('category').all()
+
+    def get_queryset(self):
+        queryset = Video.objects.select_related('category').all()
+        return annotate_videos_for_request(queryset, self.request)
 
 
 class PublicRelatedVideoListAPIView(generics.ListAPIView):
@@ -188,9 +213,44 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
             limit = 8
 
         queryset = Video.objects.select_related('category').exclude(pk=current_video.pk)
+        queryset = annotate_videos_for_request(queryset, self.request)
         if current_video.category_id:
             queryset = queryset.filter(category=current_video.category_id)
         return queryset.order_by('-created_at', '-id')[:limit]
+
+
+class VideoLikeAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        video = generics.get_object_or_404(Video.objects.select_related('category'), pk=pk)
+        VideoLike.objects.get_or_create(video=video, user=request.user)
+        video = annotate_videos_for_request(Video.objects.select_related('category').filter(pk=video.pk), request).get()
+        serializer = VideoSerializer(video, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class VideoUnlikeAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        video = generics.get_object_or_404(Video.objects.select_related('category'), pk=pk)
+        VideoLike.objects.filter(video=video, user=request.user).delete()
+        video = annotate_videos_for_request(Video.objects.select_related('category').filter(pk=video.pk), request).get()
+        serializer = VideoSerializer(video, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PublicVideoViewTrackAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, pk):
+        video = generics.get_object_or_404(Video.objects.select_related('category'), pk=pk)
+        viewer = request.user if request.user.is_authenticated else None
+        VideoView.objects.create(video=video, viewer=viewer)
+        video = annotate_videos_for_request(Video.objects.select_related('category').filter(pk=video.pk), request).get()
+        serializer = VideoSerializer(video, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class PublicCategoryListAPIView(generics.ListAPIView):
