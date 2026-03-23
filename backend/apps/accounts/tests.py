@@ -119,7 +119,7 @@ class AuthAPITestCase(APITestCase):
     def test_admin_video_management_filter_update_and_delete(self):
         admin_user = self.create_user('staff@example.com', is_staff=True)
         owner = self.create_user('owner1@example.com', first_name='Owner', last_name='One')
-        inactive_owner = self.create_user('owner2@example.com', is_active=False)
+        inactive_owner = self.create_user('owner2@example.com')
         self.client.force_authenticate(user=owner)
         first_video = self.client.post(
             reverse('video-list-create'),
@@ -143,16 +143,26 @@ class AuthAPITestCase(APITestCase):
         ).data
 
         self.client.force_authenticate(user=admin_user)
-        list_response = self.client.get(reverse('admin-video-list'), {'search': 'Alpha', 'owner': str(owner.id), 'category': 'technology', 'status': 'active'})
+        list_response = self.client.get(reverse('admin-video-list'), {'search': 'Alpha', 'owner': str(owner.id), 'category': 'technology', 'status': 'active', 'visibility': 'public'})
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(list_response.data['results'][0]['id'], first_video['id'])
         self.assertEqual(list_response.data['results'][0]['owner_id'], owner.id)
         self.assertEqual(list_response.data['results'][0]['owner_name'], 'Owner One')
+        self.assertEqual(list_response.data['results'][0]['owner_email'], 'owner1@example.com')
+        self.assertEqual(list_response.data['results'][0]['status'], 'active')
+        self.assertEqual(list_response.data['results'][0]['visibility'], 'public')
         self.assertEqual(list_response.data['results'][0]['like_count'], 0)
         self.assertEqual(list_response.data['results'][0]['comment_count'], 0)
+        self.assertIn('updated_at', list_response.data['results'][0])
 
-        inactive_list_response = self.client.get(reverse('admin-video-list'), {'status': 'inactive'})
+        self.client.patch(
+            reverse('admin-video-detail', args=[second_video['id']]),
+            {'status': 'flagged', 'visibility': 'private'},
+            format='json',
+        )
+
+        inactive_list_response = self.client.get(reverse('admin-video-list'), {'status': 'flagged', 'visibility': 'private'})
         self.assertEqual(inactive_list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(inactive_list_response.data['count'], 1)
         self.assertEqual(inactive_list_response.data['results'][0]['id'], second_video['id'])
@@ -164,6 +174,7 @@ class AuthAPITestCase(APITestCase):
         )
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['title'], 'Admin updated title')
+        self.assertEqual(detail_response.data['owner_email'], 'owner1@example.com')
 
         delete_response = self.client.delete(reverse('admin-video-detail', args=[second_video['id']]))
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)

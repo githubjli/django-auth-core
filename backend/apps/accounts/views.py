@@ -19,6 +19,7 @@ from apps.accounts.models import (
 from apps.accounts.permissions import IsStaffOrSuperuser
 from apps.accounts.serializers import (
     AdminUserSerializer,
+    AdminVideoSerializer,
     EmailTokenObtainPairSerializer,
     PublicCategorySerializer,
     RegisterSerializer,
@@ -126,7 +127,7 @@ class AdminUserActivationAPIView(APIView):
 
 
 class AdminVideoListAPIView(generics.ListAPIView):
-    serializer_class = VideoSerializer
+    serializer_class = AdminVideoSerializer
     permission_classes = [IsStaffOrSuperuser]
     pagination_class = VideoPagination
 
@@ -136,6 +137,7 @@ class AdminVideoListAPIView(generics.ListAPIView):
         owner = self.request.query_params.get('owner')
         category = self.request.query_params.get('category')
         status_filter = self.request.query_params.get('status')
+        visibility = self.request.query_params.get('visibility')
         ordering = self.request.query_params.get('ordering')
 
         if search:
@@ -157,12 +159,13 @@ class AdminVideoListAPIView(generics.ListAPIView):
         if category:
             queryset = queryset.filter(category__slug=category)
 
-        if status_filter == 'active':
-            queryset = queryset.filter(owner__is_active=True)
-        elif status_filter == 'inactive':
-            queryset = queryset.filter(owner__is_active=False)
+        if status_filter in {choice for choice, _ in Video.STATUS_CHOICES}:
+            queryset = queryset.filter(status=status_filter)
 
-        if ordering in {'created_at', '-created_at', 'like_count', '-like_count', 'comment_count', '-comment_count'}:
+        if visibility in {choice for choice, _ in Video.VISIBILITY_CHOICES}:
+            queryset = queryset.filter(visibility=visibility)
+
+        if ordering in {'created_at', '-created_at', 'updated_at', '-updated_at', 'like_count', '-like_count', 'comment_count', '-comment_count'}:
             queryset = queryset.order_by(ordering, '-id') if ordering.lstrip('-') in {'like_count', 'comment_count'} else queryset.order_by(ordering)
         else:
             queryset = queryset.order_by('-created_at', '-id')
@@ -174,9 +177,7 @@ class AdminVideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_serializer_class(self):
-        if self.request.method in {'PATCH', 'PUT'}:
-            return VideoMetadataSerializer
-        return VideoSerializer
+        return AdminVideoSerializer
 
     def get_queryset(self):
         return annotate_videos_for_request(Video.objects.all(), self.request)

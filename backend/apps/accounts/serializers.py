@@ -184,6 +184,38 @@ class VideoSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(field_file.url)
 
 
+
+class AdminVideoSerializer(VideoSerializer):
+    owner_email = serializers.EmailField(source='owner.email', read_only=True)
+
+    class Meta(VideoSerializer.Meta):
+        fields = (
+            'id',
+            'title',
+            'thumbnail_url',
+            'owner_id',
+            'owner_name',
+            'owner_email',
+            'category',
+            'status',
+            'visibility',
+            'like_count',
+            'comment_count',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = (
+            'id',
+            'thumbnail_url',
+            'owner_id',
+            'owner_name',
+            'owner_email',
+            'like_count',
+            'comment_count',
+            'created_at',
+            'updated_at',
+        )
+
 class VideoInteractionSummarySerializer(serializers.Serializer):
     video_id = serializers.IntegerField(source='id', read_only=True)
     like_count = serializers.IntegerField(read_only=True)

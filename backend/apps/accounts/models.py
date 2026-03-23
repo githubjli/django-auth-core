@@ -69,6 +69,24 @@ class Category(models.Model):
 
 
 class Video(models.Model):
+    STATUS_ACTIVE = 'active'
+    STATUS_FLAGGED = 'flagged'
+    STATUS_ARCHIVED = 'archived'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_FLAGGED, 'Flagged'),
+        (STATUS_ARCHIVED, 'Archived'),
+    ]
+
+    VISIBILITY_PUBLIC = 'public'
+    VISIBILITY_UNLISTED = 'unlisted'
+    VISIBILITY_PRIVATE = 'private'
+    VISIBILITY_CHOICES = [
+        (VISIBILITY_PUBLIC, 'Public'),
+        (VISIBILITY_UNLISTED, 'Unlisted'),
+        (VISIBILITY_PRIVATE, 'Private'),
+    ]
+
     owner = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -83,11 +101,14 @@ class Video(models.Model):
         blank=True,
         related_name='videos',
     )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default=VISIBILITY_PUBLIC)
     like_count = models.PositiveIntegerField(default=0)
     comment_count = models.PositiveIntegerField(default=0)
     file = models.FileField(upload_to='videos/')
     thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at', '-id']
