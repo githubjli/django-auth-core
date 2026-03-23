@@ -189,11 +189,17 @@ class AdminVideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 
 class LiveStreamListAPIView(generics.ListAPIView):
     serializer_class = LiveStreamSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     pagination_class = None
 
     def get_queryset(self):
-        return LiveStream.objects.filter(owner=self.request.user).select_related('category')
+        queryset = LiveStream.objects.select_related('category', 'owner')
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated:
+            return queryset.filter(
+                Q(visibility=LiveStream.VISIBILITY_PUBLIC) | Q(owner=user)
+            ).distinct()
+        return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
 
 class LiveStreamCreateAPIView(generics.CreateAPIView):
@@ -207,10 +213,16 @@ class LiveStreamCreateAPIView(generics.CreateAPIView):
 
 class LiveStreamDetailAPIView(generics.RetrieveAPIView):
     serializer_class = LiveStreamSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        return LiveStream.objects.filter(owner=self.request.user).select_related('category')
+        queryset = LiveStream.objects.select_related('category', 'owner')
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated:
+            return queryset.filter(
+                Q(visibility=LiveStream.VISIBILITY_PUBLIC) | Q(owner=user)
+            ).distinct()
+        return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
 
 class LiveStreamStatusAPIView(APIView):

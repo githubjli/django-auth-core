@@ -255,6 +255,14 @@ class LiveStream(models.Model):
         (STATUS_LIVE, 'Live'),
         (STATUS_ENDED, 'Ended'),
     ]
+    VISIBILITY_PUBLIC = 'public'
+    VISIBILITY_UNLISTED = 'unlisted'
+    VISIBILITY_PRIVATE = 'private'
+    VISIBILITY_CHOICES = [
+        (VISIBILITY_PUBLIC, 'Public'),
+        (VISIBILITY_UNLISTED, 'Unlisted'),
+        (VISIBILITY_PRIVATE, 'Private'),
+    ]
 
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -262,6 +270,7 @@ class LiveStream(models.Model):
         related_name='live_streams',
     )
     title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
     category = models.ForeignKey(
         Category,
         on_delete=models.SET_NULL,
@@ -270,6 +279,7 @@ class LiveStream(models.Model):
         related_name='live_streams',
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_IDLE)
+    visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default=VISIBILITY_PUBLIC)
     stream_key = models.CharField(max_length=255, unique=True, default=generate_stream_key)
     viewer_count = models.PositiveIntegerField(default=0)
     started_at = models.DateTimeField(null=True, blank=True)

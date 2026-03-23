@@ -189,13 +189,22 @@ These endpoints are for authenticated users and provide a first-pass live stream
 - `GET /api/live/`
 - `GET /api/live/<id>/`
 
-Response fields include `id`, `title`, `status`, `stream_key`, `rtmp_url`, and `playback_url`. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
+`POST /api/live/create/`, `POST /api/live/<id>/start/`, and `POST /api/live/<id>/end/` require authentication. `GET /api/live/` and `GET /api/live/<id>/` can be used publicly for streams with `visibility=public`, while owners can still view their own non-public streams.
+
+Create payload fields:
+
+- `title`
+- optional `description`
+- optional `category`
+- optional `visibility` (`public`, `unlisted`, or `private`)
+
+Response fields include `id`, `owner_id`, `owner_name`, `title`, `description`, `category`, `visibility`, `status`, `stream_key`, `rtmp_url`, and `playback_url`. This payload supports both browser-based studio flows and RTMP encoder workflows while keeping Ant Media URL generation in Django settings. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/live/create/ \
   -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
-  -d '{"title":"My live stream","category":"technology"}'
+  -d '{"title":"My live stream","description":"Studio session","category":"technology","visibility":"unlisted"}'
 ```
 
 ## Video Upload API

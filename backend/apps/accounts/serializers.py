@@ -188,6 +188,8 @@ class VideoSerializer(serializers.ModelSerializer):
 
 
 class LiveStreamSerializer(serializers.ModelSerializer):
+    owner_id = serializers.IntegerField(source='owner.id', read_only=True)
+    owner_name = serializers.CharField(source='owner.display_name', read_only=True)
     category = OptionalSlugRelatedField(
         slug_field='slug',
         queryset=Category.objects.filter(is_active=True),
@@ -201,8 +203,12 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         model = LiveStream
         fields = (
             'id',
+            'owner_id',
+            'owner_name',
             'title',
+            'description',
             'category',
+            'visibility',
             'status',
             'stream_key',
             'rtmp_url',
@@ -214,6 +220,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             'id',
+            'owner_id',
+            'owner_name',
             'status',
             'stream_key',
             'rtmp_url',

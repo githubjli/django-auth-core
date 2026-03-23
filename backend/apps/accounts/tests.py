@@ -8,7 +8,7 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import Category
+from apps.accounts.models import Category, LiveStream
 
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -858,7 +858,8 @@ class LiveStreamAPITestCase(APITestCase):
 
     def test_live_stream_endpoints_require_authentication(self):
         list_response = self.client.get(reverse('live-stream-list'))
-        self.assertEqual(list_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data, [])
 
         create_response = self.client.post(
             reverse('live-stream-create'),
@@ -868,14 +869,23 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_owner_can_create_start_end_and_list_live_streams(self):
-        self.authenticate()
+        user = self.authenticate()
         create_response = self.client.post(
             reverse('live-stream-create'),
-            {'title': 'My live stream', 'category': 'technology'},
+            {
+                'title': 'My live stream',
+                'description': 'Camera and encoder ready',
+                'category': 'technology',
+                'visibility': 'unlisted',
+            },
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         stream_id = create_response.data['id']
+        self.assertEqual(create_response.data['owner_id'], user.id)
+        self.assertEqual(create_response.data['owner_name'], user.email)
+        self.assertEqual(create_response.data['description'], 'Camera and encoder ready')
+        self.assertEqual(create_response.data['visibility'], 'unlisted')
         self.assertEqual(create_response.data['status'], 'idle')
         self.assertTrue(create_response.data['stream_key'])
         self.assertTrue(create_response.data['rtmp_url'].startswith('rtmp://streaming-api-live.pttblockchain.online/live/'))
@@ -884,6 +894,9 @@ class LiveStreamAPITestCase(APITestCase):
         detail_response = self.client.get(reverse('live-stream-detail', args=[stream_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['title'], 'My live stream')
+        self.assertEqual(detail_response.data['description'], 'Camera and encoder ready')
+        self.assertEqual(detail_response.data['visibility'], 'unlisted')
+        self.assertEqual(detail_response.data['owner_id'], user.id)
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
@@ -899,6 +912,45 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(list_response.data), 1)
         self.assertEqual(list_response.data[0]['id'], stream_id)
+
+    def test_public_can_list_and_retrieve_public_live_stream_metadata(self):
+        owner = self.create_user('public-streamer@example.com')
+        public_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Public stream',
+            description='Browser studio compatible',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+        )
+        LiveStream.objects.create(
+            owner=owner,
+            title='Private stream',
+            description='Hidden studio',
+            visibility=LiveStream.VISIBILITY_PRIVATE,
+        )
+
+        list_response = self.client.get(reverse('live-stream-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data[0]['id'], public_stream.id)
+        self.assertEqual(list_response.data[0]['owner_id'], owner.id)
+        self.assertEqual(list_response.data[0]['owner_name'], owner.email)
+        self.assertEqual(list_response.data[0]['visibility'], LiveStream.VISIBILITY_PUBLIC)
+
+        detail_response = self.client.get(reverse('live-stream-detail', args=[public_stream.id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['description'], 'Browser studio compatible')
+        self.assertEqual(detail_response.data['owner_id'], owner.id)
+
+    def test_public_cannot_retrieve_private_live_stream(self):
+        owner = self.create_user('private-streamer@example.com')
+        private_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Private stream',
+            visibility=LiveStream.VISIBILITY_PRIVATE,
+        )
+
+        response = self.client.get(reverse('live-stream-detail', args=[private_stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
