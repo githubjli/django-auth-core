@@ -41,7 +41,7 @@ Minimum fields:
 
 - `DEBUG`
 - `SECRET_KEY`
-- `ALLOWED_HOSTS`
+- `DJANGO_ALLOWED_HOSTS` (preferred) or `ALLOWED_HOSTS`
 - `DATABASE_URL` or `DB_ENGINE`/`DB_NAME`/`DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`
 - `REDIS_URL`
 - `APP_HOST`
@@ -62,6 +62,8 @@ Optional API fields:
 - `JWT_REFRESH_DAYS`
 
 By default SQLite is used. Set `DATABASE_URL` (or `DB_*`) to switch to Postgres.
+
+For local LAN development, Django now reads `DJANGO_ALLOWED_HOSTS` first and falls back to `ALLOWED_HOSTS`. If neither variable is set, the default local development allowlist is `127.0.0.1,localhost,192.168.0.24`.
 
 ## macOS + Homebrew: minimal Postgres/Redis setup
 
