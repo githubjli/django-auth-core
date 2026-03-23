@@ -251,12 +251,12 @@ These endpoints are read-only and do not require authentication.
 - `GET /api/public/videos/`
 - `GET /api/public/videos/<id>/`
 - `GET /api/public/videos/<id>/related/`
-- `GET /api/public/videos/<id>/interaction-summary/`
+- `GET /api/public/videos/<id>/interaction-summary/` returns `video_id`, `like_count`, `comment_count`, `viewer_has_liked`, `viewer_is_subscribed`, `channel_id`, and `subscriber_count`
 - `GET /api/public/videos/<id>/comments/`
 - `POST /api/public/videos/<id>/view/` - record a lightweight view event and return the updated video payload
 
 The public list also supports the same `category`, `search`, `ordering`, `page`, and `page_size` query params.
-Public video responses also include presentation-friendly fields such as `owner_id`, `owner_name`, `description_preview`, `category_name`, `category_slug`, `thumbnail_url`, `like_count`, `comment_count`, `view_count`, and `is_liked`.
+Public video responses also include presentation-friendly fields such as `owner_id`, `owner_name`, `owner_avatar_url`, `description_preview`, `category_name`, `category_slug`, `thumbnail_url`, `like_count`, `comment_count`, `view_count`, and `is_liked`.
 
 ```bash
 curl "http://127.0.0.1:8001/api/public/videos/?category=education&search=tutorial&ordering=-created_at"

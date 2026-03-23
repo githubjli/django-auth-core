@@ -192,6 +192,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.data['description'], 'My video description')
         self.assertEqual(upload_response.data['owner_id'], user.id)
         self.assertEqual(upload_response.data['owner_name'], 'owner@example.com')
+        self.assertIsNone(upload_response.data['owner_avatar_url'])
         self.assertEqual(upload_response.data['like_count'], 0)
         self.assertEqual(upload_response.data['comment_count'], 0)
         self.assertEqual(upload_response.data['description_preview'], 'My video description')
@@ -520,7 +521,7 @@ class VideoAPITestCase(APITestCase):
         like_response = self.client.post(reverse('video-like', args=[video_id]))
         self.assertEqual(like_response.status_code, status.HTTP_200_OK)
         self.assertEqual(like_response.data['like_count'], 1)
-        self.assertTrue(like_response.data['is_liked'])
+        self.assertTrue(like_response.data['viewer_has_liked'])
 
         duplicate_like_response = self.client.post(reverse('video-like', args=[video_id]))
         self.assertEqual(duplicate_like_response.status_code, status.HTTP_200_OK)
@@ -543,7 +544,7 @@ class VideoAPITestCase(APITestCase):
         unlike_response = self.client.delete(reverse('video-like', args=[video_id]))
         self.assertEqual(unlike_response.status_code, status.HTTP_200_OK)
         self.assertEqual(unlike_response.data['like_count'], 0)
-        self.assertFalse(unlike_response.data['is_liked'])
+        self.assertFalse(unlike_response.data['viewer_has_liked'])
 
 
     def test_public_interaction_summary_comments_and_channel_subscription(self):
@@ -582,9 +583,10 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(summary_response.data['video_id'], video_id)
         self.assertEqual(summary_response.data['like_count'], 0)
         self.assertEqual(summary_response.data['comment_count'], 1)
-        self.assertTrue(summary_response.data['is_subscribed'])
-        self.assertEqual(summary_response.data['channel']['id'], channel_owner.id)
-        self.assertEqual(summary_response.data['channel']['subscriber_count'], 1)
+        self.assertFalse(summary_response.data['viewer_has_liked'])
+        self.assertTrue(summary_response.data['viewer_is_subscribed'])
+        self.assertEqual(summary_response.data['channel_id'], channel_owner.id)
+        self.assertEqual(summary_response.data['subscriber_count'], 1)
 
         public_comments_response = self.client.get(reverse('public-video-comments', args=[video_id]))
         self.assertEqual(public_comments_response.status_code, status.HTTP_200_OK)

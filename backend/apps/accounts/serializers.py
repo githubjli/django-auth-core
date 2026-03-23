@@ -33,11 +33,15 @@ class UserSerializer(serializers.ModelSerializer):
 
 class EngagementUserSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='display_name', read_only=True)
+    avatar_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ('id', 'name', 'subscriber_count')
+        fields = ('id', 'name', 'avatar_url', 'subscriber_count')
         read_only_fields = fields
+
+    def get_avatar_url(self, obj):
+        return None
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -83,6 +87,7 @@ class PublicCategorySerializer(serializers.ModelSerializer):
 class VideoSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source='owner.id', read_only=True)
     owner_name = serializers.CharField(source='owner.display_name', read_only=True)
+    owner_avatar_url = serializers.SerializerMethodField()
     file_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     description_preview = serializers.SerializerMethodField()
@@ -105,6 +110,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'id',
             'owner_id',
             'owner_name',
+            'owner_avatar_url',
             'title',
             'description',
             'description_preview',
@@ -125,6 +131,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'id',
             'owner_id',
             'owner_name',
+            'owner_avatar_url',
             'category_name',
             'category_slug',
             'like_count',
@@ -135,6 +142,9 @@ class VideoSerializer(serializers.ModelSerializer):
             'thumbnail_url',
             'created_at',
         )
+
+    def get_owner_avatar_url(self, obj):
+        return None
 
     def get_file_url(self, obj):
         return self._build_absolute_file_url(obj.file)
@@ -178,11 +188,12 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     video_id = serializers.IntegerField(source='id', read_only=True)
     like_count = serializers.IntegerField(read_only=True)
     comment_count = serializers.IntegerField(read_only=True)
-    channel = EngagementUserSerializer(source='owner', read_only=True)
-    is_liked = serializers.SerializerMethodField()
-    is_subscribed = serializers.SerializerMethodField()
+    viewer_has_liked = serializers.SerializerMethodField()
+    viewer_is_subscribed = serializers.SerializerMethodField()
+    channel_id = serializers.IntegerField(source='owner.id', read_only=True)
+    subscriber_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
 
-    def get_is_liked(self, obj):
+    def get_viewer_has_liked(self, obj):
         request = self.context.get('request')
         if request is None or not request.user.is_authenticated:
             return False
@@ -191,7 +202,7 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
             return bool(prefetched)
         return VideoLike.objects.filter(video=obj, user=request.user).exists()
 
-    def get_is_subscribed(self, obj):
+    def get_viewer_is_subscribed(self, obj):
         request = self.context.get('request')
         if request is None or not request.user.is_authenticated:
             return False
@@ -229,6 +240,7 @@ class VideoMetadataSerializer(VideoSerializer):
             'id',
             'owner_id',
             'owner_name',
+            'owner_avatar_url',
             'file',
             'file_url',
             'category_name',
