@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -961,6 +962,61 @@ class LiveStreamAPITestCase(APITestCase):
 
         response = self.client.get(reverse('live-stream-detail', args=[private_stream.id]))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    def test_live_stream_status_can_sync_from_ant_media(self, mock_urlopen):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Synced stream',
+            status=LiveStream.STATUS_IDLE,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"broadcasting"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], LiveStream.STATUS_LIVE)
+        self.assertEqual(response.data['status_source'], 'ant_media')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_LIVE)
+        mock_urlopen.assert_called_once_with(
+            'https://ant.example.com/LiveApp/rest/v2/broadcasts/'
+            f'{stream.stream_key}',
+            timeout=2,
+        )
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    def test_live_stream_status_maps_finished_to_ended(self, mock_urlopen):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Finished stream',
+            status=LiveStream.STATUS_LIVE,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"finished"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], LiveStream.STATUS_ENDED)
+        self.assertEqual(response.data['status_source'], 'ant_media')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_ENDED)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',

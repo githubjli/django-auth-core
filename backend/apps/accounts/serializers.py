@@ -1,3 +1,7 @@
+import json
+from urllib import error, request as urllib_request
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -238,16 +242,21 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'created_at',
         )
 
-    def get_rtmp_url(self, obj):
-        from django.conf import settings
+    ANT_MEDIA_STATUS_MAP = {
+        'broadcasting': LiveStream.STATUS_LIVE,
+        'finished': LiveStream.STATUS_ENDED,
+    }
 
+    def to_representation(self, instance):
+        instance = self._sync_status_from_ant_media(instance)
+        return super().to_representation(instance)
+
+    def get_rtmp_url(self, obj):
         if not settings.ANT_MEDIA_RTMP_BASE:
             return None
         return settings.ANT_MEDIA_RTMP_BASE
 
     def get_playback_url(self, obj):
-        from django.conf import settings
-
         playback_base = settings.ANT_MEDIA_PLAYBACK_BASE
         if not playback_base and settings.ANT_MEDIA_BASE_URL:
             playback_base = f"{settings.ANT_MEDIA_BASE_URL}/{settings.ANT_MEDIA_APP_NAME}/streams"
@@ -256,7 +265,44 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         return f"{playback_base}/{obj.stream_key}.m3u8"
 
     def get_status_source(self, obj):
-        return 'django_control'
+        return getattr(obj, '_status_source', 'django_control')
+
+    def _sync_status_from_ant_media(self, obj):
+        if getattr(obj, '_ant_media_sync_attempted', False):
+            return obj
+
+        obj._ant_media_sync_attempted = True
+        obj._status_source = 'django_control'
+
+        if not settings.ANT_MEDIA_SYNC_STATUS:
+            return obj
+        if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
+            return obj
+
+        stream_status = self._fetch_ant_media_status(obj.stream_key)
+        mapped_status = self.ANT_MEDIA_STATUS_MAP.get(stream_status)
+        if not mapped_status:
+            return obj
+
+        obj._status_source = 'ant_media'
+        if obj.status != mapped_status:
+            obj.status = mapped_status
+            obj.save(update_fields=['status'])
+        return obj
+
+    def _fetch_ant_media_status(self, stream_key):
+        endpoint = (
+            f"{settings.ANT_MEDIA_BASE_URL}/"
+            f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}"
+        )
+        try:
+            with urllib_request.urlopen(endpoint, timeout=2) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+        except (error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload.get('status')
 
 
 class AdminVideoSerializer(VideoSerializer):

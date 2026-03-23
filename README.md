@@ -53,6 +53,8 @@ Optional live-stream fields:
 - `ANT_MEDIA_APP_NAME`
 - `ANT_MEDIA_RTMP_BASE`
 - `ANT_MEDIA_PLAYBACK_BASE`
+- `ANT_MEDIA_REST_APP_NAME`
+- `ANT_MEDIA_SYNC_STATUS`
 
 Optional API fields:
 
@@ -198,7 +200,7 @@ Create payload fields:
 - optional `category`
 - optional `visibility` (`public`, `unlisted`, or `private`)
 
-Response fields include `id`, `owner_id`, `owner_name`, `title`, `description`, `category`, `category_name`, `visibility`, `status`, `status_source`, `stream_key`, `rtmp_url`, and `playback_url`. `rtmp_url` is returned as the OBS-friendly RTMP server/app base, while `stream_key` stays separate for encoder configuration. `status_source` currently reports Django-controlled state so the payload can evolve later to reflect synchronized Ant Media status. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
+Response fields include `id`, `owner_id`, `owner_name`, `title`, `description`, `category`, `category_name`, `visibility`, `status`, `status_source`, `stream_key`, `rtmp_url`, and `playback_url`. `rtmp_url` is returned as the OBS-friendly RTMP server/app base, while `stream_key` stays separate for encoder configuration. When `ANT_MEDIA_SYNC_STATUS=True`, Django can query `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_REST_APP_NAME` at `/rest/v2/broadcasts/<stream_key>` and map Ant Media `broadcasting` to `live` and `finished` to `ended`, returning `status_source="ant_media"` when sync succeeds. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/live/create/ \
