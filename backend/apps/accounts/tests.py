@@ -885,11 +885,17 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.data['owner_id'], user.id)
         self.assertEqual(create_response.data['owner_name'], user.email)
         self.assertEqual(create_response.data['description'], 'Camera and encoder ready')
+        self.assertEqual(create_response.data['category_name'], 'Technology')
         self.assertEqual(create_response.data['visibility'], 'unlisted')
         self.assertEqual(create_response.data['status'], 'idle')
+        self.assertEqual(create_response.data['status_source'], 'django_control')
         self.assertTrue(create_response.data['stream_key'])
-        self.assertTrue(create_response.data['rtmp_url'].startswith('rtmp://streaming-api-live.pttblockchain.online/live/'))
-        self.assertIn('/live/streams/', create_response.data['playback_url'])
+        self.assertEqual(create_response.data['rtmp_url'], 'rtmp://streaming-api-live.pttblockchain.online/live')
+        self.assertTrue(
+            create_response.data['playback_url'].endswith(
+                f"/live/streams/{create_response.data['stream_key']}.m3u8"
+            )
+        )
 
         detail_response = self.client.get(reverse('live-stream-detail', args=[stream_id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
@@ -897,10 +903,13 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['description'], 'Camera and encoder ready')
         self.assertEqual(detail_response.data['visibility'], 'unlisted')
         self.assertEqual(detail_response.data['owner_id'], user.id)
+        self.assertEqual(detail_response.data['category_name'], 'Technology')
+        self.assertEqual(detail_response.data['status_source'], 'django_control')
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
         self.assertEqual(start_response.data['status'], 'live')
+        self.assertEqual(start_response.data['status_source'], 'django_control')
         self.assertIsNotNone(start_response.data['started_at'])
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
@@ -935,6 +944,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(list_response.data[0]['owner_id'], owner.id)
         self.assertEqual(list_response.data[0]['owner_name'], owner.email)
         self.assertEqual(list_response.data[0]['visibility'], LiveStream.VISIBILITY_PUBLIC)
+        self.assertEqual(list_response.data[0]['status_source'], 'django_control')
 
         detail_response = self.client.get(reverse('live-stream-detail', args=[public_stream.id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
@@ -966,8 +976,11 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(create_response.data['rtmp_url'].startswith('rtmp://ant.example.com/live/'))
-        self.assertIn('/live/streams/', create_response.data['playback_url'])
+        self.assertEqual(create_response.data['rtmp_url'], 'rtmp://ant.example.com/live')
+        self.assertEqual(
+            create_response.data['playback_url'],
+            f"https://ant.example.com/live/streams/{create_response.data['stream_key']}.m3u8",
+        )
         self.assertTrue(create_response.data['playback_url'].endswith('.m3u8'))
 
     def test_non_owner_cannot_start_or_end_stream(self):

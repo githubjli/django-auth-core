@@ -190,6 +190,7 @@ class VideoSerializer(serializers.ModelSerializer):
 class LiveStreamSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source='owner.id', read_only=True)
     owner_name = serializers.CharField(source='owner.display_name', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True)
     category = OptionalSlugRelatedField(
         slug_field='slug',
         queryset=Category.objects.filter(is_active=True),
@@ -198,6 +199,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     )
     rtmp_url = serializers.SerializerMethodField()
     playback_url = serializers.SerializerMethodField()
+    status_source = serializers.SerializerMethodField()
 
     class Meta:
         model = LiveStream
@@ -208,8 +210,10 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'title',
             'description',
             'category',
+            'category_name',
             'visibility',
             'status',
+            'status_source',
             'stream_key',
             'rtmp_url',
             'playback_url',
@@ -222,7 +226,9 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'id',
             'owner_id',
             'owner_name',
+            'category_name',
             'status',
+            'status_source',
             'stream_key',
             'rtmp_url',
             'playback_url',
@@ -237,7 +243,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
 
         if not settings.ANT_MEDIA_RTMP_BASE:
             return None
-        return f"{settings.ANT_MEDIA_RTMP_BASE}/{obj.stream_key}"
+        return settings.ANT_MEDIA_RTMP_BASE
 
     def get_playback_url(self, obj):
         from django.conf import settings
@@ -248,6 +254,9 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         if not playback_base:
             return None
         return f"{playback_base}/{obj.stream_key}.m3u8"
+
+    def get_status_source(self, obj):
+        return 'django_control'
 
 
 class AdminVideoSerializer(VideoSerializer):
