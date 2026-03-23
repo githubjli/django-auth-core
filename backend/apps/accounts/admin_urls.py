@@ -4,6 +4,8 @@ from apps.accounts.views import (
     AdminUserActivationAPIView,
     AdminUserDetailAPIView,
     AdminUserListAPIView,
+    AdminVideoDetailAPIView,
+    AdminVideoListAPIView,
 )
 
 urlpatterns = [
@@ -19,4 +21,6 @@ urlpatterns = [
         AdminUserActivationAPIView.as_view(active=False),
         name='admin-user-deactivate',
     ),
+    path('videos/', AdminVideoListAPIView.as_view(), name='admin-video-list'),
+    path('videos/<int:pk>/', AdminVideoDetailAPIView.as_view(), name='admin-video-detail'),
 ]

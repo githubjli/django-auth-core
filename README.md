@@ -135,6 +135,10 @@ Deactivating a user sets `is_active=False`, which blocks that user from logging 
 - `PATCH /api/admin/users/<id>/` - update user fields such as `first_name`, `last_name`, `is_staff`, or `is_active`
 - `POST /api/admin/users/<id>/activate/` - set `is_active=true`
 - `POST /api/admin/users/<id>/deactivate/` - set `is_active=false`
+- `GET /api/admin/videos/` - list all videos across all users with admin filters (`search`, `owner`, `category`, `status`, `ordering`)
+- `GET /api/admin/videos/<id>/` - retrieve any video
+- `PATCH /api/admin/videos/<id>/` - update video metadata such as `title`, `description`, `category`, or `thumbnail`
+- `DELETE /api/admin/videos/<id>/` - delete any video
 
 Example admin curl commands:
 

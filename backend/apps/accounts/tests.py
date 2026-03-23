@@ -104,6 +104,72 @@ class AuthAPITestCase(APITestCase):
         deactivate_response = self.client.post(reverse('admin-user-deactivate', args=[user.id]))
         self.assertEqual(deactivate_response.status_code, status.HTTP_403_FORBIDDEN)
 
+
+    def test_admin_video_management_requires_staff_or_superuser(self):
+        user = self.create_user('member@example.com')
+        self.client.force_authenticate(user=user)
+
+        list_response = self.client.get(reverse('admin-video-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        detail_response = self.client.get(reverse('admin-video-detail', args=[1]))
+        self.assertEqual(detail_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_admin_video_management_filter_update_and_delete(self):
+        admin_user = self.create_user('staff@example.com', is_staff=True)
+        owner = self.create_user('owner1@example.com', first_name='Owner', last_name='One')
+        inactive_owner = self.create_user('owner2@example.com', is_active=False)
+        self.client.force_authenticate(user=owner)
+        first_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Alpha admin clip',
+                'description': 'searchable body',
+                'category': 'technology',
+                'file': SimpleUploadedFile('alpha-admin.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        self.client.force_authenticate(user=inactive_owner)
+        second_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Beta admin clip',
+                'category': 'education',
+                'file': SimpleUploadedFile('beta-admin.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+
+        self.client.force_authenticate(user=admin_user)
+        list_response = self.client.get(reverse('admin-video-list'), {'search': 'Alpha', 'owner': str(owner.id), 'category': 'technology', 'status': 'active'})
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data['count'], 1)
+        self.assertEqual(list_response.data['results'][0]['id'], first_video['id'])
+        self.assertEqual(list_response.data['results'][0]['owner_id'], owner.id)
+        self.assertEqual(list_response.data['results'][0]['owner_name'], 'Owner One')
+        self.assertEqual(list_response.data['results'][0]['like_count'], 0)
+        self.assertEqual(list_response.data['results'][0]['comment_count'], 0)
+
+        inactive_list_response = self.client.get(reverse('admin-video-list'), {'status': 'inactive'})
+        self.assertEqual(inactive_list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(inactive_list_response.data['count'], 1)
+        self.assertEqual(inactive_list_response.data['results'][0]['id'], second_video['id'])
+
+        detail_response = self.client.patch(
+            reverse('admin-video-detail', args=[first_video['id']]),
+            {'title': 'Admin updated title'},
+            format='json',
+        )
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['title'], 'Admin updated title')
+
+        delete_response = self.client.delete(reverse('admin-video-detail', args=[second_video['id']]))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        remaining_list_response = self.client.get(reverse('admin-video-list'))
+        self.assertEqual(remaining_list_response.data['count'], 1)
+
     def test_admin_user_management_and_activation_flow(self):
         admin_user = self.create_user('staff@example.com', is_staff=True)
         target_user = self.create_user('target@example.com')

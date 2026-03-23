@@ -124,6 +124,64 @@ class AdminUserActivationAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+
+class AdminVideoListAPIView(generics.ListAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [IsStaffOrSuperuser]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        queryset = annotate_videos_for_request(Video.objects.all(), self.request)
+        search = self.request.query_params.get('search')
+        owner = self.request.query_params.get('owner')
+        category = self.request.query_params.get('category')
+        status_filter = self.request.query_params.get('status')
+        ordering = self.request.query_params.get('ordering')
+
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(description__icontains=search)
+                | Q(owner__email__icontains=search)
+                | Q(owner__first_name__icontains=search)
+                | Q(owner__last_name__icontains=search)
+            )
+
+        if owner:
+            if owner.isdigit():
+                queryset = queryset.filter(owner_id=int(owner))
+            else:
+                queryset = queryset.filter(owner__email__icontains=owner)
+
+        category = LEGACY_CATEGORY_SLUG_ALIASES.get(category, category)
+        if category:
+            queryset = queryset.filter(category__slug=category)
+
+        if status_filter == 'active':
+            queryset = queryset.filter(owner__is_active=True)
+        elif status_filter == 'inactive':
+            queryset = queryset.filter(owner__is_active=False)
+
+        if ordering in {'created_at', '-created_at', 'like_count', '-like_count', 'comment_count', '-comment_count'}:
+            queryset = queryset.order_by(ordering, '-id') if ordering.lstrip('-') in {'like_count', 'comment_count'} else queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at', '-id')
+        return queryset
+
+
+class AdminVideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsStaffOrSuperuser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_serializer_class(self):
+        if self.request.method in {'PATCH', 'PUT'}:
+            return VideoMetadataSerializer
+        return VideoSerializer
+
+    def get_queryset(self):
+        return annotate_videos_for_request(Video.objects.all(), self.request)
+
+
 class VideoListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.IsAuthenticated]
