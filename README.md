@@ -103,6 +103,10 @@ Base path: `/api/auth`
 - `POST /api/auth/login`
 - `POST /api/auth/refresh`
 - `GET /api/auth/me` (Bearer access token required)
+- `GET /api/account/profile` (Bearer access token required)
+- `PATCH /api/account/profile` (Bearer access token required)
+- `GET /api/account/preferences` (Bearer access token required)
+- `PATCH /api/account/preferences` (Bearer access token required)
 
 ### Curl examples
 
@@ -135,6 +139,40 @@ Current user profile:
 ```bash
 curl http://127.0.0.1:8001/api/auth/me \
   -H 'Authorization: Bearer <access_token>'
+```
+
+Account profile menu data:
+
+```bash
+curl http://127.0.0.1:8001/api/account/profile \
+  -H 'Authorization: Bearer <access_token>'
+```
+
+Update account profile:
+
+```bash
+curl -X PATCH http://127.0.0.1:8001/api/account/profile \
+  -H 'Authorization: Bearer <access_token>' \
+  -F 'first_name=Demo' \
+  -F 'last_name=User' \
+  -F 'bio=Short profile bio' \
+  -F 'avatar=@./avatar.png'
+```
+
+Account preferences:
+
+```bash
+curl http://127.0.0.1:8001/api/account/preferences \
+  -H 'Authorization: Bearer <access_token>'
+```
+
+Update account preferences:
+
+```bash
+curl -X PATCH http://127.0.0.1:8001/api/account/preferences \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"language":"en-US","theme":"system","timezone":"Asia/Bangkok"}'
 ```
 
 ## Admin User Control API

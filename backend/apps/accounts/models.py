@@ -43,6 +43,11 @@ class User(AbstractUser):
     username = None
     email = models.EmailField(unique=True)
     subscriber_count = models.PositiveIntegerField(default=0)
+    avatar = models.FileField(upload_to='avatars/', blank=True)
+    bio = models.TextField(blank=True)
+    language = models.CharField(max_length=10, default='en-US')
+    theme = models.CharField(max_length=10, default='system')
+    timezone = models.CharField(max_length=64, blank=True)
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS: list[str] = []

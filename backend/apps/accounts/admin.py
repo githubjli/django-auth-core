@@ -25,20 +25,27 @@ class UserAdmin(DjangoUserAdmin):
     ordering = ('email',)
     list_display = (
         'email',
+        'display_name',
         'first_name',
         'last_name',
+        'language',
+        'theme',
         'subscriber_count',
         'is_staff',
         'is_active',
         'date_joined',
     )
     list_filter = ('is_staff', 'is_superuser', 'is_active')
-    search_fields = ('email', 'first_name', 'last_name')
+    search_fields = ('email', 'first_name', 'last_name', 'bio')
     readonly_fields = ('date_joined', 'last_login', 'subscriber_count')
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
-        ('Personal info', {'fields': ('first_name', 'last_name', 'subscriber_count')}),
+        (
+            'Personal info',
+            {'fields': ('first_name', 'last_name', 'avatar', 'bio', 'subscriber_count')},
+        ),
+        ('Preferences', {'fields': ('language', 'theme', 'timezone')}),
         (
             'Permissions',
             {

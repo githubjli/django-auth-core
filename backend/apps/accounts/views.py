@@ -20,6 +20,8 @@ from apps.accounts.models import (
 )
 from apps.accounts.permissions import IsStaffOrSuperuser
 from apps.accounts.serializers import (
+    AccountPreferencesSerializer,
+    AccountProfileSerializer,
     AdminUserSerializer,
     AdminVideoSerializer,
     LiveStreamSerializer,
@@ -102,6 +104,45 @@ class MeAPIView(APIView):
     def get(self, request):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
+
+
+class AccountProfileAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def get(self, request):
+        serializer = AccountProfileSerializer(request.user, context={'request': request})
+        return Response(serializer.data)
+
+    def patch(self, request):
+        serializer = AccountProfileSerializer(
+            request.user,
+            data=request.data,
+            partial=True,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AccountPreferencesAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def get(self, request):
+        serializer = AccountPreferencesSerializer(request.user)
+        return Response(serializer.data)
+
+    def patch(self, request):
+        serializer = AccountPreferencesSerializer(
+            request.user,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class AdminUserListAPIView(generics.ListAPIView):

@@ -224,6 +224,85 @@ class AuthAPITestCase(APITestCase):
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
 
 
+class AccountMenuAPITestCase(APITestCase):
+    def create_user(self, email, password='strong-pass-123', **extra_fields):
+        defaults = {
+            'first_name': 'Menu',
+            'last_name': 'User',
+        }
+        defaults.update(extra_fields)
+        return User.objects.create_user(email=email, password=password, **defaults)
+
+    def test_profile_endpoints_require_authentication(self):
+        response = self.client.get(reverse('account-profile'))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        patch_response = self.client.patch(
+            reverse('account-profile'),
+            {'bio': 'No auth'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_profile_get_and_patch(self):
+        user = self.create_user('account@example.com')
+        self.client.force_authenticate(user=user)
+
+        get_response = self.client.get(reverse('account-profile'))
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data['display_name'], 'Menu User')
+        self.assertIsNone(get_response.data['avatar_url'])
+
+        patch_response = self.client.patch(
+            reverse('account-profile'),
+            {
+                'first_name': 'Updated',
+                'last_name': 'Name',
+                'bio': 'About me',
+                'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['display_name'], 'Updated Name')
+        self.assertEqual(patch_response.data['bio'], 'About me')
+        self.assertIn('/media/avatars/', patch_response.data['avatar_url'])
+
+    def test_preferences_get_and_patch(self):
+        user = self.create_user('prefs@example.com')
+        self.client.force_authenticate(user=user)
+
+        get_response = self.client.get(reverse('account-preferences'))
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data['language'], 'en-US')
+        self.assertEqual(get_response.data['theme'], 'system')
+        self.assertEqual(get_response.data['timezone'], '')
+
+        patch_response = self.client.patch(
+            reverse('account-preferences'),
+            {'language': 'th-TH', 'theme': 'dark', 'timezone': 'Asia/Bangkok'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['language'], 'th-TH')
+        self.assertEqual(patch_response.data['theme'], 'dark')
+        self.assertEqual(patch_response.data['timezone'], 'Asia/Bangkok')
+
+    def test_preferences_reject_invalid_values(self):
+        user = self.create_user('prefs-invalid@example.com')
+        self.client.force_authenticate(user=user)
+
+        invalid_response = self.client.patch(
+            reverse('account-preferences'),
+            {'language': 'xx-YY', 'theme': 'neon'},
+            format='json',
+        )
+        self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('language', invalid_response.data)
+        self.assertIn('theme', invalid_response.data)
+
+
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
 class VideoAPITestCase(APITestCase):
     @classmethod

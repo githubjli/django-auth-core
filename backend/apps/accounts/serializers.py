@@ -36,6 +36,53 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ('id',)
 
 
+class AccountProfileSerializer(serializers.ModelSerializer):
+    display_name = serializers.CharField(source='display_name', read_only=True)
+    avatar_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'display_name',
+            'first_name',
+            'last_name',
+            'avatar',
+            'avatar_url',
+            'bio',
+        )
+
+    def get_avatar_url(self, obj):
+        request = self.context.get('request')
+        if not obj.avatar:
+            return None
+        if request is None:
+            return obj.avatar.url
+        return request.build_absolute_uri(obj.avatar.url)
+
+
+class AccountPreferencesSerializer(serializers.ModelSerializer):
+    LANGUAGE_CHOICES = {'en-US', 'zh-CN', 'th-TH', 'my-MM'}
+    THEME_CHOICES = {'light', 'dark', 'system'}
+
+    class Meta:
+        model = User
+        fields = (
+            'language',
+            'theme',
+            'timezone',
+        )
+
+    def validate_language(self, value):
+        if value not in self.LANGUAGE_CHOICES:
+            raise serializers.ValidationError('Unsupported language.')
+        return value
+
+    def validate_theme(self, value):
+        if value not in self.THEME_CHOICES:
+            raise serializers.ValidationError('Unsupported theme.')
+        return value
+
+
 class EngagementUserSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='display_name', read_only=True)
     avatar_url = serializers.SerializerMethodField()
