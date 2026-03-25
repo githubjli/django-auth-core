@@ -2,6 +2,7 @@
 
 This document captures the currently implemented API contract used by the frontend.
 It is **analysis-only** and reflects current behavior; no contract redesign is proposed here.
+The internal unified content mapping layer is not part of this public contract yet.
 
 ## Base Routes
 

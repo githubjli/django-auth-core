@@ -1,5 +1,7 @@
 # Unified Content Layer: Smallest Safe Next Step (Design Only)
 
+> Status note: the unified content layer is currently **internal-only** and is **not** a public frontend API contract yet.
+
 ## Decision Summary
 
 **Recommendation: keep the unified content layer as an internal mapping layer for now** and defer a public `/api/content/` endpoint to the next phase.
