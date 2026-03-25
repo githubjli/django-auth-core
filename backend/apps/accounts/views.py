@@ -376,7 +376,10 @@ class PublicVideoListAPIView(generics.ListAPIView):
     pagination_class = VideoPagination
 
     def get_queryset(self):
-        queryset = annotate_videos_for_request(Video.objects.all(), self.request)
+        queryset = annotate_videos_for_request(
+            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            self.request,
+        )
         category = self.request.query_params.get('category')
         search = self.request.query_params.get('search')
         ordering = self.request.query_params.get('ordering')
@@ -398,7 +401,10 @@ class PublicVideoDetailAPIView(generics.RetrieveAPIView):
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        return annotate_videos_for_request(Video.objects.all(), self.request)
+        return annotate_videos_for_request(
+            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            self.request,
+        )
 
 
 class PublicRelatedVideoListAPIView(generics.ListAPIView):
@@ -407,7 +413,10 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
     pagination_class = None
 
     def get_queryset(self):
-        current_video = generics.get_object_or_404(Video.objects.select_related('category'), pk=self.kwargs['pk'])
+        current_video = generics.get_object_or_404(
+            Video.objects.select_related('category').filter(visibility=Video.VISIBILITY_PUBLIC),
+            pk=self.kwargs['pk'],
+        )
         limit = self.request.query_params.get('limit', 8)
 
         try:
@@ -415,7 +424,10 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
         except (TypeError, ValueError):
             limit = 8
 
-        queryset = annotate_videos_for_request(Video.objects.exclude(pk=current_video.pk), self.request)
+        queryset = annotate_videos_for_request(
+            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC).exclude(pk=current_video.pk),
+            self.request,
+        )
         if current_video.category_id:
             queryset = queryset.filter(category=current_video.category_id)
         return queryset.order_by('-created_at', '-id')[:limit]
@@ -425,7 +437,13 @@ class PublicVideoInteractionSummaryAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, pk):
-        video = generics.get_object_or_404(annotate_videos_for_request(Video.objects.all(), request), pk=pk)
+        video = generics.get_object_or_404(
+            annotate_videos_for_request(
+                Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+                request,
+            ),
+            pk=pk,
+        )
         serializer = VideoInteractionSummarySerializer(video, context={'request': request})
         return Response(serializer.data)
 
@@ -497,7 +515,11 @@ class PublicVideoCommentListAPIView(generics.ListAPIView):
     pagination_class = CommentPagination
 
     def get_queryset(self):
-        video = generics.get_object_or_404(Video, pk=self.kwargs['pk'])
+        video = generics.get_object_or_404(
+            Video,
+            pk=self.kwargs['pk'],
+            visibility=Video.VISIBILITY_PUBLIC,
+        )
         parent_id = self.request.query_params.get('parent_id')
         queryset = VideoComment.objects.filter(video=video, is_deleted=False)
 
@@ -548,7 +570,11 @@ class PublicVideoViewTrackAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request, pk):
-        video = generics.get_object_or_404(Video, pk=pk)
+        video = generics.get_object_or_404(
+            Video,
+            pk=pk,
+            visibility=Video.VISIBILITY_PUBLIC,
+        )
         viewer = request.user if request.user.is_authenticated else None
         VideoView.objects.create(video=video, viewer=viewer)
         video = annotate_videos_for_request(Video.objects.filter(pk=video.pk), request).get()

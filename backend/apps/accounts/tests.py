@@ -9,7 +9,12 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import Category, LiveStream
+from apps.accounts.content import (
+    UnifiedContentSerializer,
+    map_live_to_content,
+    map_video_to_content,
+)
+from apps.accounts.models import Category, LiveStream, Video
 
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -65,6 +70,40 @@ class AuthAPITestCase(APITestCase):
         )
         self.assertEqual(refresh_response.status_code, status.HTTP_200_OK)
         self.assertIn('access', refresh_response.data)
+
+    def test_auth_contract_response_shapes(self):
+        register_response = self.client.post(
+            reverse('auth-register'),
+            {
+                'email': 'contract-auth@example.com',
+                'password': 'strong-pass-123',
+                'first_name': 'Contract',
+                'last_name': 'User',
+            },
+            format='json',
+        )
+        self.assertEqual(register_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            set(register_response.data.keys()),
+            {'id', 'email', 'first_name', 'last_name'},
+        )
+
+        login_response = self.client.post(
+            reverse('auth-login'),
+            {
+                'email': 'contract-auth@example.com',
+                'password': 'strong-pass-123',
+            },
+            format='json',
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', login_response.data)
+        self.assertIn('refresh', login_response.data)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_response.data['access']}")
+        me_response = self.client.get(reverse('auth-me'))
+        self.assertEqual(me_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(me_response.data.keys()), {'id', 'email', 'first_name', 'last_name'})
 
     def test_me_requires_authentication(self):
         response = self.client.get(reverse('auth-me'))
@@ -478,6 +517,35 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(len(paginated_response.data['results']), 1)
         self.assertIsNotNone(paginated_response.data['next'])
 
+    def test_owner_video_contract_fields_for_list_and_detail(self):
+        user = self.authenticate()
+        video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Owner contract video',
+                'description': 'Owner contract description',
+                'category': 'technology',
+                'file': SimpleUploadedFile('owner-contract.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        expected_keys = {
+            'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
+            'description_preview', 'category', 'category_name', 'category_slug', 'like_count',
+            'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
+            'thumbnail_url', 'created_at',
+        }
+        self.assertTrue(expected_keys.issubset(set(list_response.data['results'][0].keys())))
+        self.assertEqual(list_response.data['results'][0]['owner_id'], user.id)
+
+        detail_response = self.client.get(reverse('video-detail', args=[video['id']]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(expected_keys.issubset(set(detail_response.data.keys())))
+
+
     def test_public_video_listing_and_detail_are_read_only(self):
         owner = self.authenticate()
         upload_response = self.client.post(
@@ -517,6 +585,99 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(create_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
         self.assertEqual(owner.videos.count(), 1)
+
+    def test_public_video_endpoints_only_expose_public_visibility(self):
+        self.authenticate()
+        public_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public item',
+                'file': SimpleUploadedFile('public-item.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        private_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Private item',
+                'file': SimpleUploadedFile('private-item.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        unlisted_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Unlisted item',
+                'file': SimpleUploadedFile('unlisted-item.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        Video.objects.filter(pk=private_video['id']).update(visibility=Video.VISIBILITY_PRIVATE)
+        Video.objects.filter(pk=unlisted_video['id']).update(visibility=Video.VISIBILITY_UNLISTED)
+        self.client.force_authenticate(user=None)
+
+        list_response = self.client.get(reverse('public-video-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        listed_ids = [item['id'] for item in list_response.data['results']]
+        self.assertIn(public_video['id'], listed_ids)
+        self.assertNotIn(private_video['id'], listed_ids)
+        self.assertNotIn(unlisted_video['id'], listed_ids)
+
+        public_detail_response = self.client.get(reverse('public-video-detail', args=[public_video['id']]))
+        self.assertEqual(public_detail_response.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(
+            self.client.get(reverse('public-video-detail', args=[private_video['id']])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.get(reverse('public-video-interaction-summary', args=[private_video['id']])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.get(reverse('public-video-comments', args=[private_video['id']])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.post(reverse('public-video-view', args=[private_video['id']])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.get(reverse('public-video-related', args=[private_video['id']])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_public_video_contract_fields_are_stable_for_frontend(self):
+        self.authenticate()
+        video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Contract video',
+                'description': 'Contract body',
+                'category': 'technology',
+                'file': SimpleUploadedFile('contract.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        self.client.force_authenticate(user=None)
+
+        detail_response = self.client.get(reverse('public-video-detail', args=[video['id']]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        expected_keys = {
+            'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
+            'description_preview', 'category', 'category_name', 'category_slug', 'like_count',
+            'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
+            'thumbnail_url', 'created_at',
+        }
+        self.assertTrue(expected_keys.issubset(set(detail_response.data.keys())))
+        self.assertEqual(detail_response.data['category'], 'technology')
+        self.assertFalse(detail_response.data['is_liked'])
+
+        list_response = self.client.get(reverse('public-video-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertIn('count', list_response.data)
+        self.assertIn('results', list_response.data)
+        self.assertTrue(expected_keys.issubset(set(list_response.data['results'][0].keys())))
 
     def test_owner_can_patch_video_metadata_and_manual_thumbnail(self):
         self.authenticate()
@@ -758,6 +919,54 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(unsubscribe_response.status_code, status.HTTP_200_OK)
         self.assertFalse(unsubscribe_response.data['viewer_is_subscribed'])
         self.assertEqual(unsubscribe_response.data['subscriber_count'], 0)
+
+    def test_interaction_summary_contract_fields(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Summary contract video',
+                'file': SimpleUploadedFile('summary-contract.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(reverse('public-video-interaction-summary', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            set(response.data.keys()),
+            {'video_id', 'like_count', 'comment_count', 'viewer_has_liked', 'viewer_is_subscribed', 'channel_id', 'subscriber_count'},
+        )
+
+    def test_public_comments_contract_fields(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Comment contract video',
+                'file': SimpleUploadedFile('comment-contract.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+        create_comment_response = self.client.post(
+            reverse('video-comment-create', args=[video_id]),
+            {'content': 'Comment contract body'},
+            format='json',
+        )
+        self.assertEqual(create_comment_response.status_code, status.HTTP_201_CREATED)
+        self.client.force_authenticate(user=None)
+
+        list_response = self.client.get(reverse('public-video-comments', args=[video_id]))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertIn('count', list_response.data)
+        self.assertIn('results', list_response.data)
+        comment_payload = list_response.data['results'][0]
+        self.assertEqual(
+            set(comment_payload.keys()),
+            {'id', 'video_id', 'parent_id', 'content', 'created_at', 'updated_at', 'like_count', 'reply_count', 'viewer_has_liked', 'user'},
+        )
+        self.assertEqual(set(comment_payload['user'].keys()), {'id', 'name', 'avatar_url'})
 
 
 
@@ -1009,6 +1218,26 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(len(list_response.data), 1)
         self.assertEqual(list_response.data[0]['id'], stream_id)
 
+    def test_live_stream_contract_fields_on_create_and_detail(self):
+        self.authenticate()
+        create_response = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Live contract stream', 'visibility': 'public'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        expected_keys = {
+            'id', 'owner_id', 'owner_name', 'title', 'description', 'payment_address',
+            'category', 'visibility', 'status', 'status_source', 'stream_key',
+            'rtmp_url', 'playback_url', 'thumbnail_url', 'preview_image_url', 'snapshot_url',
+            'viewer_count', 'started_at', 'ended_at', 'created_at',
+        }
+        self.assertTrue(expected_keys.issubset(set(create_response.data.keys())))
+
+        detail_response = self.client.get(reverse('live-stream-detail', args=[create_response.data['id']]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(expected_keys.issubset(set(detail_response.data.keys())))
+
     def test_public_can_list_and_retrieve_public_live_stream_metadata(self):
         owner = self.create_user('public-streamer@example.com')
         public_stream = LiveStream.objects.create(
@@ -1060,7 +1289,53 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_REST_APP_NAME='LiveApp',
         ANT_MEDIA_SYNC_STATUS=True,
     )
-    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_live_status_api_values_contract(self, mock_urlopen):
+        owner = self.authenticate()
+        ready_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Ready stream',
+            status=LiveStream.STATUS_IDLE,
+        )
+        live_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Live stream',
+            status=LiveStream.STATUS_LIVE,
+        )
+        ended_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Ended stream',
+            status=LiveStream.STATUS_ENDED,
+        )
+        waiting_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Waiting stream',
+            status=LiveStream.STATUS_IDLE,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"created"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        ready_response = self.client.get(reverse('live-stream-detail', args=[ready_stream.id]))
+        self.assertEqual(ready_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(ready_response.data['status'], 'waiting_for_signal')
+
+        with patch('apps.accounts.services.AntMediaLiveAdapter._fetch_broadcast_payload', return_value=None):
+            live_response = self.client.get(reverse('live-stream-detail', args=[live_stream.id]))
+            ended_response = self.client.get(reverse('live-stream-detail', args=[ended_stream.id]))
+            ready_fallback_response = self.client.get(reverse('live-stream-detail', args=[waiting_stream.id]))
+
+        self.assertEqual(live_response.data['status'], 'live')
+        self.assertEqual(ended_response.data['status'], 'ended')
+        self.assertEqual(ready_fallback_response.data['status'], 'ready')
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
     def test_live_stream_status_can_sync_from_ant_media(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
@@ -1090,7 +1365,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_REST_APP_NAME='LiveApp',
         ANT_MEDIA_SYNC_STATUS=True,
     )
-    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    @patch('apps.accounts.services.urllib_request.urlopen')
     def test_live_stream_status_maps_finished_to_ended(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
@@ -1115,7 +1390,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_REST_APP_NAME='LiveApp',
         ANT_MEDIA_SYNC_STATUS=True,
     )
-    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    @patch('apps.accounts.services.urllib_request.urlopen')
     def test_live_stream_status_waits_for_signal_when_ant_media_session_exists(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
@@ -1134,6 +1409,50 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_live_stream_viewer_count_is_normalized_from_ant_media_payload(self, mock_urlopen):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Viewer count stream',
+            viewer_count=7,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"broadcasting","hlsViewerCount":3,"webRTCViewerCount":2,"rtmpViewerCount":"4"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['viewer_count'], 9)
+        self.assertEqual(response.data['status_source'], 'ant_media')
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen', side_effect=TimeoutError())
+    def test_live_stream_falls_back_when_ant_media_is_unavailable(self, _mock_urlopen):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Fallback stream',
+            status=LiveStream.STATUS_IDLE,
+            viewer_count=5,
+        )
+
+        response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'ready')
+        self.assertEqual(response.data['status_source'], 'django_control')
+        self.assertEqual(response.data['viewer_count'], 5)
 
     @override_settings(
         ANT_MEDIA_PREVIEW_BASE='https://ant.example.com/live/previews',
@@ -1229,3 +1548,70 @@ class LiveStreamAPITestCase(APITestCase):
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(end_response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class UnifiedContentMappingTestCase(APITestCase):
+    def create_user(self, email='content@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Content', last_name='Owner')
+
+    def test_video_maps_to_unified_content_shape(self):
+        owner = self.create_user()
+        video = Video.objects.create(
+            owner=owner,
+            title='Video content',
+            description='Video body',
+            category=Category.objects.get(slug='technology'),
+            visibility=Video.VISIBILITY_PUBLIC,
+            file=SimpleUploadedFile('unified-video.mp4', b'video-bytes', content_type='video/mp4'),
+            like_count=4,
+            comment_count=2,
+        )
+
+        payload = map_video_to_content(video)
+        serializer = UnifiedContentSerializer(data=payload)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(payload['content_type'], 'video')
+        self.assertFalse(payload['is_live'])
+        self.assertEqual(payload['status'], 'active')
+        self.assertEqual(payload['status_source'], 'django_control')
+        self.assertEqual(payload['visibility'], 'public')
+        self.assertEqual(payload['like_count'], 4)
+        self.assertEqual(payload['comment_count'], 2)
+        self.assertIsNotNone(payload['playback_url'])
+        self.assertIsNone(payload['viewer_count'])
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_live_maps_to_unified_content_shape(self, mock_urlopen):
+        owner = self.create_user(email='live-content@example.com')
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Live content',
+            description='Live body',
+            category=Category.objects.get(slug='gaming'),
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+            status=LiveStream.STATUS_IDLE,
+            viewer_count=1,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"broadcasting","hlsViewerCount":5}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        payload = map_live_to_content(stream)
+        serializer = UnifiedContentSerializer(data=payload)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(payload['content_type'], 'live')
+        self.assertTrue(payload['is_live'])
+        self.assertEqual(payload['status'], 'live')
+        self.assertEqual(payload['status_source'], 'ant_media')
+        self.assertEqual(payload['visibility'], 'public')
+        self.assertEqual(payload['viewer_count'], 5)
+        self.assertIsNone(payload['view_count'])
+        self.assertIsNone(payload['like_count'])
+        self.assertIsNone(payload['comment_count'])
