@@ -37,11 +37,15 @@ SECRET_KEY = os.getenv(
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env_bool('DEBUG', True)
 
-DEFAULT_ALLOWED_HOSTS = '127.0.0.1,localhost,192.168.0.24'
+DEFAULT_ALLOWED_HOSTS = '127.0.0.1,localhost,192.168.0.24,171.102.174.35,stream.meownews.online'
 ALLOWED_HOSTS = env_list(
     'DJANGO_ALLOWED_HOSTS',
     os.getenv('ALLOWED_HOSTS', DEFAULT_ALLOWED_HOSTS),
 )
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://stream.meownews.online",
+]
 
 
 # Application definition
