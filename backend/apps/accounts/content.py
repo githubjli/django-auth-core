@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""
+Internal unified content representation helpers.
+
+Important:
+- This module is an internal backend mapping layer.
+- It is NOT a public API contract by itself.
+- Existing public contract remains the current /api/videos/* and /api/live/* endpoints.
+"""
+
 from rest_framework import serializers
 
 from apps.accounts.models import LiveStream, Video
