@@ -37,7 +37,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class AccountProfileSerializer(serializers.ModelSerializer):
-    display_name = serializers.CharField(source='display_name', read_only=True)
+    display_name = serializers.CharField(read_only=True)
     avatar_url = serializers.SerializerMethodField()
 
     class Meta:
