@@ -1,7 +1,3 @@
-import json
-from urllib import error, request as urllib_request
-
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -14,6 +10,7 @@ from apps.accounts.models import (
     VideoComment,
     VideoLike,
 )
+from apps.accounts.services import AntMediaLiveAdapter
 
 User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
@@ -255,6 +252,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     preview_image_url = serializers.SerializerMethodField()
     snapshot_url = serializers.SerializerMethodField()
     status_source = serializers.SerializerMethodField()
+    viewer_count = serializers.SerializerMethodField()
 
     class Meta:
         model = LiveStream
@@ -300,99 +298,38 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'created_at',
         )
 
-    ANT_MEDIA_STATUS_MAP = {
-        'broadcasting': LiveStream.STATUS_LIVE,
-        'finished': LiveStream.STATUS_ENDED,
-    }
-
-    def to_representation(self, instance):
-        instance = self._sync_status_from_ant_media(instance)
-        return super().to_representation(instance)
-
     def get_rtmp_url(self, obj):
-        if not settings.ANT_MEDIA_RTMP_BASE:
-            return None
-        return settings.ANT_MEDIA_RTMP_BASE
+        return self._normalized(obj).get('rtmp_url')
 
     def get_playback_url(self, obj):
-        playback_base = settings.ANT_MEDIA_PLAYBACK_BASE
-        if not playback_base and settings.ANT_MEDIA_BASE_URL:
-            playback_base = f"{settings.ANT_MEDIA_BASE_URL}/{settings.ANT_MEDIA_APP_NAME}/streams"
-        if not playback_base:
-            return None
-        return f"{playback_base}/{obj.stream_key}.m3u8"
+        return self._normalized(obj).get('playback_url')
 
     def get_thumbnail_url(self, obj):
-        return self._build_preview_image_url(obj)
+        return self._normalized(obj).get('thumbnail_url')
 
     def get_preview_image_url(self, obj):
-        return self._build_preview_image_url(obj)
+        return self._normalized(obj).get('preview_image_url')
 
     def get_snapshot_url(self, obj):
-        return self._build_preview_image_url(obj)
+        return self._normalized(obj).get('snapshot_url')
 
     def get_status_source(self, obj):
-        return getattr(obj, '_status_source', 'django_control')
+        return self._normalized(obj).get('status_source')
 
     def get_status(self, obj):
-        ant_media_status = getattr(obj, '_ant_media_status', None)
-        if ant_media_status is not None:
-            if ant_media_status == 'broadcasting':
-                return LiveStream.STATUS_LIVE
-            if ant_media_status == 'finished':
-                return LiveStream.STATUS_ENDED
-            return 'waiting_for_signal'
+        return self._normalized(obj).get('status')
 
-        if obj.status == LiveStream.STATUS_LIVE:
-            return LiveStream.STATUS_LIVE
-        if obj.status == LiveStream.STATUS_ENDED:
-            return LiveStream.STATUS_ENDED
-        return 'ready'
+    def get_viewer_count(self, obj):
+        return self._normalized(obj).get('viewer_count')
 
-    def _sync_status_from_ant_media(self, obj):
-        if getattr(obj, '_ant_media_sync_attempted', False):
-            return obj
-
-        obj._ant_media_sync_attempted = True
-        obj._status_source = 'django_control'
-
-        if not settings.ANT_MEDIA_SYNC_STATUS:
-            return obj
-        if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
-            return obj
-
-        stream_status = self._fetch_ant_media_status(obj.stream_key)
-        if stream_status is None:
-            return obj
-
-        obj._status_source = 'ant_media'
-        obj._ant_media_status = stream_status
-        mapped_status = self.ANT_MEDIA_STATUS_MAP.get(stream_status)
-        if not mapped_status:
-            return obj
-        if obj.status != mapped_status:
-            obj.status = mapped_status
-            obj.save(update_fields=['status'])
-        return obj
-
-    def _fetch_ant_media_status(self, stream_key):
-        endpoint = (
-            f"{settings.ANT_MEDIA_BASE_URL}/"
-            f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}"
-        )
-        try:
-            with urllib_request.urlopen(endpoint, timeout=2) as response:
-                payload = json.loads(response.read().decode('utf-8'))
-        except (error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        return payload.get('status')
-
-    def _build_preview_image_url(self, obj):
-        if not settings.ANT_MEDIA_PREVIEW_BASE:
-            return None
-        return f"{settings.ANT_MEDIA_PREVIEW_BASE}/{obj.stream_key}.png"
+    def _normalized(self, obj):
+        normalized = getattr(obj, '_normalized_live_fields', None)
+        if normalized is not None:
+            return normalized
+        adapter = AntMediaLiveAdapter()
+        normalized = adapter.normalize_stream_fields(obj)
+        obj._normalized_live_fields = normalized
+        return normalized
 
 
 class AdminVideoSerializer(VideoSerializer):

@@ -1284,7 +1284,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_REST_APP_NAME='LiveApp',
         ANT_MEDIA_SYNC_STATUS=True,
     )
-    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    @patch('apps.accounts.services.urllib_request.urlopen')
     def test_live_status_api_values_contract(self, mock_urlopen):
         owner = self.authenticate()
         ready_stream = LiveStream.objects.create(
@@ -1316,7 +1316,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(ready_response.status_code, status.HTTP_200_OK)
         self.assertEqual(ready_response.data['status'], 'waiting_for_signal')
 
-        with patch('apps.accounts.serializers.LiveStreamSerializer._fetch_ant_media_status', return_value=None):
+        with patch('apps.accounts.services.AntMediaLiveAdapter._fetch_broadcast_payload', return_value=None):
             live_response = self.client.get(reverse('live-stream-detail', args=[live_stream.id]))
             ended_response = self.client.get(reverse('live-stream-detail', args=[ended_stream.id]))
             ready_fallback_response = self.client.get(reverse('live-stream-detail', args=[waiting_stream.id]))
@@ -1330,7 +1330,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_REST_APP_NAME='LiveApp',
         ANT_MEDIA_SYNC_STATUS=True,
     )
-    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    @patch('apps.accounts.services.urllib_request.urlopen')
     def test_live_stream_status_can_sync_from_ant_media(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
@@ -1360,7 +1360,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_REST_APP_NAME='LiveApp',
         ANT_MEDIA_SYNC_STATUS=True,
     )
-    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    @patch('apps.accounts.services.urllib_request.urlopen')
     def test_live_stream_status_maps_finished_to_ended(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
@@ -1385,7 +1385,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_REST_APP_NAME='LiveApp',
         ANT_MEDIA_SYNC_STATUS=True,
     )
-    @patch('apps.accounts.serializers.urllib_request.urlopen')
+    @patch('apps.accounts.services.urllib_request.urlopen')
     def test_live_stream_status_waits_for_signal_when_ant_media_session_exists(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
@@ -1404,6 +1404,50 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_live_stream_viewer_count_is_normalized_from_ant_media_payload(self, mock_urlopen):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Viewer count stream',
+            viewer_count=7,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"broadcasting","hlsViewerCount":3,"webRTCViewerCount":2,"rtmpViewerCount":"4"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['viewer_count'], 9)
+        self.assertEqual(response.data['status_source'], 'ant_media')
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen', side_effect=TimeoutError())
+    def test_live_stream_falls_back_when_ant_media_is_unavailable(self, _mock_urlopen):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Fallback stream',
+            status=LiveStream.STATUS_IDLE,
+            viewer_count=5,
+        )
+
+        response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'ready')
+        self.assertEqual(response.data['status_source'], 'django_control')
+        self.assertEqual(response.data['viewer_count'], 5)
 
     @override_settings(
         ANT_MEDIA_PREVIEW_BASE='https://ant.example.com/live/previews',
