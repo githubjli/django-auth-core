@@ -266,6 +266,16 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
 
+class LiveStreamUpdateAPIView(generics.UpdateAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+    http_method_names = ['patch']
+
+    def get_queryset(self):
+        return LiveStream.objects.filter(owner=self.request.user).select_related('category', 'owner')
+
+
 class LiveStreamStatusAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     new_status = LiveStream.STATUS_IDLE

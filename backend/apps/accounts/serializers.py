@@ -264,6 +264,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'owner_name',
             'title',
             'description',
+            'payment_address',
             'category',
             'category_name',
             'visibility',

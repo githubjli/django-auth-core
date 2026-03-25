@@ -955,6 +955,7 @@ class LiveStreamAPITestCase(APITestCase):
             {
                 'title': 'My live stream',
                 'description': 'Camera and encoder ready',
+                'payment_address': '0xabc123',
                 'category': 'technology',
                 'visibility': 'unlisted',
             },
@@ -965,6 +966,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.data['owner_id'], user.id)
         self.assertEqual(create_response.data['owner_name'], user.email)
         self.assertEqual(create_response.data['description'], 'Camera and encoder ready')
+        self.assertEqual(create_response.data['payment_address'], '0xabc123')
         self.assertEqual(create_response.data['category_name'], 'Technology')
         self.assertEqual(create_response.data['visibility'], 'unlisted')
         self.assertEqual(create_response.data['status'], 'ready')
@@ -984,6 +986,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['title'], 'My live stream')
         self.assertEqual(detail_response.data['description'], 'Camera and encoder ready')
+        self.assertEqual(detail_response.data['payment_address'], '0xabc123')
         self.assertEqual(detail_response.data['visibility'], 'unlisted')
         self.assertEqual(detail_response.data['owner_id'], user.id)
         self.assertEqual(detail_response.data['category_name'], 'Technology')
@@ -1012,6 +1015,7 @@ class LiveStreamAPITestCase(APITestCase):
             owner=owner,
             title='Public stream',
             description='Browser studio compatible',
+            payment_address='0xfeedbeef',
             visibility=LiveStream.VISIBILITY_PUBLIC,
         )
         LiveStream.objects.create(
@@ -1037,6 +1041,7 @@ class LiveStreamAPITestCase(APITestCase):
         detail_response = self.client.get(reverse('live-stream-detail', args=[public_stream.id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['description'], 'Browser studio compatible')
+        self.assertEqual(detail_response.data['payment_address'], '0xfeedbeef')
         self.assertEqual(detail_response.data['owner_id'], owner.id)
 
     def test_public_cannot_retrieve_private_live_stream(self):
@@ -1147,6 +1152,45 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.data['thumbnail_url'], expected_preview_url)
         self.assertEqual(create_response.data['preview_image_url'], expected_preview_url)
         self.assertEqual(create_response.data['snapshot_url'], expected_preview_url)
+
+    def test_owner_can_patch_live_stream_payment_address(self):
+        self.authenticate()
+        create_response = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Payment stream', 'payment_address': '0xabc123'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        stream_id = create_response.data['id']
+
+        patch_response = self.client.patch(
+            reverse('live-stream-update', args=[stream_id]),
+            {'payment_address': '0xdef456'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['payment_address'], '0xdef456')
+
+        detail_response = self.client.get(reverse('live-stream-detail', args=[stream_id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['payment_address'], '0xdef456')
+
+    def test_non_owner_cannot_patch_live_stream_payment_address(self):
+        self.authenticate()
+        stream_id = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Owner payment stream', 'payment_address': '0xabc123'},
+            format='json',
+        ).data['id']
+
+        other_user = self.create_user('other-payment@example.com')
+        self.client.force_authenticate(user=other_user)
+        patch_response = self.client.patch(
+            reverse('live-stream-update', args=[stream_id]),
+            {'payment_address': '0xdef456'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_404_NOT_FOUND)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
