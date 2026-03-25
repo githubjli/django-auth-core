@@ -9,6 +9,11 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.accounts.content import (
+    UnifiedContentSerializer,
+    map_live_to_content,
+    map_video_to_content,
+)
 from apps.accounts.models import Category, LiveStream, Video
 
 User = get_user_model()
@@ -1543,3 +1548,70 @@ class LiveStreamAPITestCase(APITestCase):
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(end_response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class UnifiedContentMappingTestCase(APITestCase):
+    def create_user(self, email='content@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Content', last_name='Owner')
+
+    def test_video_maps_to_unified_content_shape(self):
+        owner = self.create_user()
+        video = Video.objects.create(
+            owner=owner,
+            title='Video content',
+            description='Video body',
+            category=Category.objects.get(slug='technology'),
+            visibility=Video.VISIBILITY_PUBLIC,
+            file=SimpleUploadedFile('unified-video.mp4', b'video-bytes', content_type='video/mp4'),
+            like_count=4,
+            comment_count=2,
+        )
+
+        payload = map_video_to_content(video)
+        serializer = UnifiedContentSerializer(data=payload)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(payload['content_type'], 'video')
+        self.assertFalse(payload['is_live'])
+        self.assertEqual(payload['status'], 'active')
+        self.assertEqual(payload['status_source'], 'django_control')
+        self.assertEqual(payload['visibility'], 'public')
+        self.assertEqual(payload['like_count'], 4)
+        self.assertEqual(payload['comment_count'], 2)
+        self.assertIsNotNone(payload['playback_url'])
+        self.assertIsNone(payload['viewer_count'])
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_live_maps_to_unified_content_shape(self, mock_urlopen):
+        owner = self.create_user(email='live-content@example.com')
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Live content',
+            description='Live body',
+            category=Category.objects.get(slug='gaming'),
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+            status=LiveStream.STATUS_IDLE,
+            viewer_count=1,
+        )
+
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"broadcasting","hlsViewerCount":5}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        payload = map_live_to_content(stream)
+        serializer = UnifiedContentSerializer(data=payload)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(payload['content_type'], 'live')
+        self.assertTrue(payload['is_live'])
+        self.assertEqual(payload['status'], 'live')
+        self.assertEqual(payload['status_source'], 'ant_media')
+        self.assertEqual(payload['visibility'], 'public')
+        self.assertEqual(payload['viewer_count'], 5)
+        self.assertIsNone(payload['view_count'])
+        self.assertIsNone(payload['like_count'])
+        self.assertIsNone(payload['comment_count'])
