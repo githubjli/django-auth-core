@@ -178,6 +178,11 @@ The internal unified content mapping layer is not part of this public contract y
 - Visibility behavior same as list.
 - Response: live stream object
 
+### `GET /api/live/{id}/status/`
+- Auth: optional
+- Visibility behavior same as list/detail (public streams are public, non-public streams are owner-only)
+- Response: live stream object (status-focused contract fields included)
+
 ### `PATCH /api/live/{id}/update/`
 - Auth: required (owner only)
 - Body (partial):
@@ -188,18 +193,43 @@ The internal unified content mapping layer is not part of this public contract y
 - Auth: required (owner only)
 - Sets stream to live, sets `started_at=now`, `ended_at=null`
 - Response: live stream object
+- Note: this is a Django-side control action; it does not guarantee direct media-server ingest control.
+
+### `POST /api/live/{id}/prepare/`
+- Auth: required (owner only)
+- Django control-plane handshake for browser publishing.
+- Does **not** transition stream state to `live` by itself.
+- Response: live stream object plus:
+  - `publish_session`
+    - `mode` (`browser`)
+    - `session_id` (stable publish session identifier)
+    - `expires_at` (currently `null`)
+    - `constraints` (currently `{ "video": true, "audio": true }`)
 
 ### `POST /api/live/{id}/end/`
 - Auth: required (owner only)
 - Sets stream to ended, sets `ended_at=now` and backfills `started_at` if absent
 - Response: live stream object
+- Note: this is a Django-side control action; it does not guarantee direct media-server ingest control.
 
 Live stream object fields:
 - `id`, `owner_id`, `owner_name`, `title`, `description`, `payment_address`, `category`, `category_name`, `visibility`,
-- `status`, `status_source`, `stream_key`, `rtmp_url`, `playback_url`, `thumbnail_url`, `preview_image_url`, `snapshot_url`,
-- `viewer_count`, `started_at`, `ended_at`, `created_at`
+- `status`, `django_status`, `effective_status`, `status_source`, `raw_ant_media_status`,
+- `stream_key`, `rtmp_url`, `playback_url`, `watch_url`, `thumbnail_url`, `preview_image_url`, `snapshot_url`,
+- `viewer_count`, `can_start`, `can_end`, `sync_ok`, `sync_error`, `message`,
+- `started_at`, `ended_at`, `created_at`
 
-`status` is computed:
+Status field meanings:
+- `status`: backward-compatible effective status (same as `effective_status`)
+- `django_status`: stored Django DB control status
+- `effective_status`: final status shown to clients after optional Ant Media normalization
+- `status_source`: `ant_media` when derived from Ant Media payload, otherwise `django_control`
+- `raw_ant_media_status`: raw status string from Ant Media payload, or `null`
+- `watch_url`: canonical frontend watch/share URL for this live room (viewer-facing route)
+- `playback_url`: media playback URL (HLS `.m3u8`), intentionally separate from `watch_url`
+- `publish_session` (prepare endpoint only): abstract Django-owned publish handshake metadata for frontend control flow
+
+`effective_status` is computed:
 - if Ant Media synced status = `broadcasting` => `live`
 - if Ant Media synced status = `finished` => `ended`
 - if Ant Media returns other status => `waiting_for_signal`

@@ -266,6 +266,20 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
 
+class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        queryset = LiveStream.objects.select_related('category', 'owner')
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated:
+            return queryset.filter(
+                Q(visibility=LiveStream.VISIBILITY_PUBLIC) | Q(owner=user)
+            ).distinct()
+        return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
+
+
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
     serializer_class = LiveStreamSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -298,6 +312,30 @@ class LiveStreamStatusAPIView(APIView):
 
         serializer = LiveStreamSerializer(stream, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class LiveStreamPrepareAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        stream = generics.get_object_or_404(
+            LiveStream.objects.select_related('category'),
+            pk=pk,
+            owner=request.user,
+        )
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = dict(serializer.data)
+        payload['message'] = 'Live session is prepared for browser publishing.'
+        payload['publish_session'] = {
+            'mode': 'browser',
+            'session_id': stream.stream_key,
+            'expires_at': None,
+            'constraints': {
+                'video': True,
+                'audio': True,
+            },
+        }
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class VideoListCreateAPIView(generics.ListCreateAPIView):
