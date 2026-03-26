@@ -266,6 +266,20 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
 
+class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        queryset = LiveStream.objects.select_related('category', 'owner')
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated:
+            return queryset.filter(
+                Q(visibility=LiveStream.VISIBILITY_PUBLIC) | Q(owner=user)
+            ).distinct()
+        return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
+
+
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
     serializer_class = LiveStreamSerializer
     permission_classes = [permissions.IsAuthenticated]
