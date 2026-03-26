@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 from urllib import error, request as urllib_request
 from uuid import uuid4
 
@@ -59,6 +60,28 @@ class AntMediaLiveAdapter:
             ),
             'can_start': effective_status != LiveStream.STATUS_LIVE,
             'can_end': effective_status != LiveStream.STATUS_ENDED,
+        }
+
+    def get_browser_publish_config(self, stream: LiveStream) -> dict:
+        stream_id = stream.stream_key
+        websocket_url = self._get_websocket_url()
+        adaptor_script_url = self._get_adaptor_script_url()
+        app_name = settings.ANT_MEDIA_APP_NAME or None
+        if not stream_id or not websocket_url or not adaptor_script_url:
+            return {
+                'ok': False,
+                'error': 'ant_media_publish_config_unavailable',
+                'message': 'Ant Media publish config is unavailable. Check backend Ant Media settings.',
+            }
+        return {
+            'ok': True,
+            'config': {
+                'websocket_url': websocket_url,
+                'adaptor_script_url': adaptor_script_url,
+                'stream_id': stream_id,
+                'app_name': app_name,
+                'publish_mode': 'webrtc',
+            },
         }
 
     def _normalize_status(self, db_status: str, ant_status: str | None) -> str:
@@ -138,6 +161,30 @@ class AntMediaLiveAdapter:
         if not settings.ANT_MEDIA_PREVIEW_BASE:
             return None
         return f"{settings.ANT_MEDIA_PREVIEW_BASE}/{stream_key}.png"
+
+    def _get_websocket_url(self) -> str | None:
+        explicit = getattr(settings, 'ANT_MEDIA_WEBSOCKET_URL', '')
+        if explicit:
+            return explicit.rstrip('/')
+        base_url = settings.ANT_MEDIA_BASE_URL or ''
+        app_name = settings.ANT_MEDIA_APP_NAME or ''
+        if not base_url or not app_name:
+            return None
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {'http', 'https', 'ws', 'wss'} or not parsed.netloc:
+            return None
+        scheme = {'http': 'ws', 'https': 'wss'}.get(parsed.scheme, parsed.scheme)
+        return f'{scheme}://{parsed.netloc}/{app_name}/websocket'
+
+    def _get_adaptor_script_url(self) -> str | None:
+        explicit = getattr(settings, 'ANT_MEDIA_ADAPTOR_SCRIPT_URL', '')
+        if explicit:
+            return explicit.rstrip('/')
+        base_url = settings.ANT_MEDIA_BASE_URL or ''
+        app_name = settings.ANT_MEDIA_APP_NAME or ''
+        if not base_url or not app_name:
+            return None
+        return f'{base_url}/{app_name}/js/webrtc_adaptor.js'
 
 
 def generate_video_thumbnail(video, time_offset: float = 1.0) -> bool:

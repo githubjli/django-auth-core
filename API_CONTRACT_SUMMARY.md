@@ -199,12 +199,20 @@ The internal unified content mapping layer is not part of this public contract y
 - Auth: required (owner only)
 - Django control-plane handshake for browser publishing.
 - Does **not** transition stream state to `live` by itself.
+- Frontend should use this response as the primary source of browser publish configuration.
+- Media still flows directly from browser to Ant Media (not through Django).
 - Response: live stream object plus:
   - `publish_session`
     - `mode` (`browser`)
     - `session_id` (stable publish session identifier)
     - `expires_at` (currently `null`)
     - `constraints` (currently `{ "video": true, "audio": true }`)
+    - `ant_media`
+      - `websocket_url`
+      - `adaptor_script_url`
+      - `stream_id` (uses the stream's canonical `stream_key`)
+      - `app_name`
+      - `publish_mode` (`webrtc`)
 
 ### `POST /api/live/{id}/end/`
 - Auth: required (owner only)
@@ -227,7 +235,7 @@ Status field meanings:
 - `raw_ant_media_status`: raw status string from Ant Media payload, or `null`
 - `watch_url`: canonical frontend watch/share URL for this live room (viewer-facing route)
 - `playback_url`: media playback URL (HLS `.m3u8`), intentionally separate from `watch_url`
-- `publish_session` (prepare endpoint only): abstract Django-owned publish handshake metadata for frontend control flow
+- `publish_session` (prepare endpoint only): abstract Django-owned publish handshake metadata for frontend control flow, including backend-provided Ant Media browser publish config
 
 `effective_status` is computed:
 - if Ant Media synced status = `broadcasting` => `live`

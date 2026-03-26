@@ -1392,6 +1392,11 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.data['publish_session']['session_id'], stream.stream_key)
         self.assertEqual(response.data['publish_session']['expires_at'], None)
         self.assertEqual(response.data['publish_session']['constraints'], {'video': True, 'audio': True})
+        self.assertIn('ant_media', response.data['publish_session'])
+        self.assertIn('websocket_url', response.data['publish_session']['ant_media'])
+        self.assertIn('adaptor_script_url', response.data['publish_session']['ant_media'])
+        self.assertEqual(response.data['publish_session']['ant_media']['stream_id'], stream.stream_key)
+        self.assertEqual(response.data['publish_session']['ant_media']['publish_mode'], 'webrtc')
         self.assertEqual(response.data['message'], 'Live session is prepared for browser publishing.')
         self.assertNotEqual(response.data['watch_url'], response.data['playback_url'])
         stream.refresh_from_db()
@@ -1422,6 +1427,18 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.data['status'], 'waiting_for_signal')
         self.assertEqual(response.data['status_source'], 'ant_media')
         self.assertEqual(response.data['publish_session']['mode'], 'browser')
+        self.assertEqual(response.data['publish_session']['ant_media']['stream_id'], stream.stream_key)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='',
+    )
+    def test_prepare_returns_explicit_error_when_publish_config_is_unavailable(self):
+        owner = self.authenticate(email='prepare-missing-config@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Prepare config fail stream')
+        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['error'], 'ant_media_publish_config_unavailable')
+        self.assertIn('publish config is unavailable', response.data['detail'])
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',

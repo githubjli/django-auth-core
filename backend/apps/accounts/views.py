@@ -35,7 +35,7 @@ from apps.accounts.serializers import (
     VideoMetadataSerializer,
     VideoSerializer,
 )
-from apps.accounts.services import generate_video_thumbnail
+from apps.accounts.services import AntMediaLiveAdapter, generate_video_thumbnail
 
 User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
@@ -324,6 +324,16 @@ class LiveStreamPrepareAPIView(APIView):
             owner=request.user,
         )
         serializer = LiveStreamSerializer(stream, context={'request': request})
+        adapter = AntMediaLiveAdapter()
+        publish_config = adapter.get_browser_publish_config(stream)
+        if not publish_config.get('ok'):
+            return Response(
+                {
+                    'detail': publish_config.get('message'),
+                    'error': publish_config.get('error'),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         payload = dict(serializer.data)
         payload['message'] = 'Live session is prepared for browser publishing.'
         payload['publish_session'] = {
@@ -334,6 +344,7 @@ class LiveStreamPrepareAPIView(APIView):
                 'video': True,
                 'audio': True,
             },
+            'ant_media': publish_config['config'],
         }
         return Response(payload, status=status.HTTP_200_OK)
 
