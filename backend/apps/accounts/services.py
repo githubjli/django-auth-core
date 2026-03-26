@@ -25,7 +25,8 @@ class AntMediaLiveAdapter:
     }
 
     def normalize_stream_fields(self, stream: LiveStream) -> dict:
-        payload = self._fetch_broadcast_payload(stream.stream_key)
+        sync = self._fetch_broadcast_payload(stream.stream_key)
+        payload = sync.get('payload')
         ant_status = payload.get('status') if payload else None
         mapped_status = self.STATUS_MAP.get(ant_status)
 
@@ -33,15 +34,31 @@ class AntMediaLiveAdapter:
             stream.status = mapped_status
             stream.save(update_fields=['status'])
 
+        django_status = stream.status
+        effective_status = self._normalize_status(django_status, ant_status)
+        status_source = 'ant_media' if ant_status is not None else 'django_control'
+
         return {
-            'status': self._normalize_status(stream.status, ant_status),
-            'status_source': 'ant_media' if ant_status is not None else 'django_control',
+            'status': effective_status,
+            'django_status': django_status,
+            'effective_status': effective_status,
+            'status_source': status_source,
+            'raw_ant_media_status': ant_status,
             'rtmp_url': self._get_rtmp_url(),
             'playback_url': self._get_playback_url(stream.stream_key),
             'thumbnail_url': self._get_preview_image_url(stream.stream_key),
             'preview_image_url': self._get_preview_image_url(stream.stream_key),
             'snapshot_url': self._get_preview_image_url(stream.stream_key),
             'viewer_count': self._normalize_viewer_count(payload, fallback=stream.viewer_count),
+            'sync_ok': sync.get('sync_ok', False),
+            'sync_error': sync.get('sync_error'),
+            'message': self._build_message(
+                effective_status=effective_status,
+                status_source=status_source,
+                sync_ok=sync.get('sync_ok', False),
+            ),
+            'can_start': effective_status != LiveStream.STATUS_LIVE,
+            'can_end': effective_status != LiveStream.STATUS_ENDED,
         }
 
     def _normalize_status(self, db_status: str, ant_status: str | None) -> str:
@@ -74,11 +91,11 @@ class AntMediaLiveAdapter:
                 continue
         return total if has_metric else fallback
 
-    def _fetch_broadcast_payload(self, stream_key: str) -> dict | None:
+    def _fetch_broadcast_payload(self, stream_key: str) -> dict:
         if not settings.ANT_MEDIA_SYNC_STATUS:
-            return None
+            return {'payload': None, 'sync_ok': False, 'sync_error': 'sync_disabled'}
         if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
-            return None
+            return {'payload': None, 'sync_ok': False, 'sync_error': 'ant_media_not_configured'}
 
         endpoint = (
             f"{settings.ANT_MEDIA_BASE_URL}/"
@@ -87,11 +104,24 @@ class AntMediaLiveAdapter:
         try:
             with urllib_request.urlopen(endpoint, timeout=2) as response:
                 payload = json.loads(response.read().decode('utf-8'))
-        except (error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
-            return None
+        except (error.URLError, TimeoutError):
+            return {'payload': None, 'sync_ok': False, 'sync_error': 'ant_media_unavailable'}
+        except (ValueError, json.JSONDecodeError):
+            return {'payload': None, 'sync_ok': False, 'sync_error': 'invalid_ant_media_payload'}
         if not isinstance(payload, dict):
-            return None
-        return payload
+            return {'payload': None, 'sync_ok': False, 'sync_error': 'invalid_ant_media_payload'}
+        return {'payload': payload, 'sync_ok': True, 'sync_error': None}
+
+    def _build_message(self, *, effective_status: str, status_source: str, sync_ok: bool) -> str:
+        if status_source == 'ant_media' and effective_status == 'waiting_for_signal':
+            return 'Ant Media session exists but is not yet broadcasting.'
+        if not sync_ok:
+            return 'Using Django control state because Ant Media status is unavailable.'
+        if effective_status == LiveStream.STATUS_LIVE:
+            return 'Stream is live.'
+        if effective_status == LiveStream.STATUS_ENDED:
+            return 'Stream has ended.'
+        return 'Stream is ready to start.'
 
     def _get_rtmp_url(self) -> str | None:
         return settings.ANT_MEDIA_RTMP_BASE or None
