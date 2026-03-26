@@ -1365,6 +1365,64 @@ class LiveStreamAPITestCase(APITestCase):
         payload = LiveStreamSerializer(stream).data
         self.assertEqual(payload['watch_url'], f'/live/{stream.id}')
 
+    def test_owner_can_prepare_live_stream_without_transitioning_to_live(self):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Prepare stream',
+            status=LiveStream.STATUS_IDLE,
+            visibility=LiveStream.VISIBILITY_UNLISTED,
+        )
+        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for key in (
+            'id',
+            'watch_url',
+            'playback_url',
+            'status',
+            'django_status',
+            'effective_status',
+            'status_source',
+            'can_start',
+            'can_end',
+            'publish_session',
+        ):
+            self.assertIn(key, response.data)
+        self.assertEqual(response.data['publish_session']['mode'], 'browser')
+        self.assertEqual(response.data['publish_session']['session_id'], stream.stream_key)
+        self.assertEqual(response.data['publish_session']['expires_at'], None)
+        self.assertEqual(response.data['publish_session']['constraints'], {'video': True, 'audio': True})
+        self.assertEqual(response.data['message'], 'Live session is prepared for browser publishing.')
+        self.assertNotEqual(response.data['watch_url'], response.data['playback_url'])
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
+    def test_non_owner_cannot_prepare_live_stream(self):
+        owner = self.create_user('prepare-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Owner stream')
+        self.authenticate(email='prepare-other@example.com')
+        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_prepare_works_when_ant_media_sync_is_enabled(self, mock_urlopen):
+        owner = self.authenticate(email='prepare-sync@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Prepare sync stream', status=LiveStream.STATUS_IDLE)
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"created"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'waiting_for_signal')
+        self.assertEqual(response.data['status_source'], 'ant_media')
+        self.assertEqual(response.data['publish_session']['mode'], 'browser')
+
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
         ANT_MEDIA_REST_APP_NAME='LiveApp',

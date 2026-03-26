@@ -314,6 +314,30 @@ class LiveStreamStatusAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class LiveStreamPrepareAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        stream = generics.get_object_or_404(
+            LiveStream.objects.select_related('category'),
+            pk=pk,
+            owner=request.user,
+        )
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = dict(serializer.data)
+        payload['message'] = 'Live session is prepared for browser publishing.'
+        payload['publish_session'] = {
+            'mode': 'browser',
+            'session_id': stream.stream_key,
+            'expires_at': None,
+            'constraints': {
+                'video': True,
+                'audio': True,
+            },
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+
 class VideoListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.IsAuthenticated]
