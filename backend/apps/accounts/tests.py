@@ -15,6 +15,7 @@ from apps.accounts.content import (
     map_video_to_content,
 )
 from apps.accounts.models import Category, LiveStream, Video
+from apps.accounts.serializers import LiveStreamSerializer
 
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -1182,11 +1183,13 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.data['status_source'], 'django_control')
         self.assertTrue(create_response.data['stream_key'])
         self.assertEqual(create_response.data['rtmp_url'], 'rtmp://streaming-api-live.pttblockchain.online/live')
+        self.assertTrue(create_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertTrue(
             create_response.data['playback_url'].endswith(
                 f"/live/streams/{create_response.data['stream_key']}.m3u8"
             )
         )
+        self.assertNotEqual(create_response.data['watch_url'], create_response.data['playback_url'])
         self.assertIsNone(create_response.data['thumbnail_url'])
         self.assertIsNone(create_response.data['preview_image_url'])
         self.assertIsNone(create_response.data['snapshot_url'])
@@ -1201,16 +1204,34 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['status_source'], 'django_control')
         self.assertEqual(detail_response.data['status'], 'ready')
+        self.assertTrue(detail_response.data['watch_url'].endswith(f'/live/{stream_id}'))
+        self.assertNotEqual(detail_response.data['watch_url'], detail_response.data['playback_url'])
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
         self.assertEqual(start_response.data['status'], 'live')
+        self.assertEqual(start_response.data['django_status'], 'live')
+        self.assertEqual(start_response.data['effective_status'], 'live')
         self.assertEqual(start_response.data['status_source'], 'django_control')
+        self.assertIsNone(start_response.data['raw_ant_media_status'])
+        self.assertFalse(start_response.data['can_start'])
+        self.assertTrue(start_response.data['can_end'])
+        self.assertFalse(start_response.data['sync_ok'])
+        self.assertEqual(start_response.data['sync_error'], 'sync_disabled')
+        self.assertTrue(start_response.data['watch_url'].endswith(f'/live/{stream_id}'))
+        self.assertNotEqual(start_response.data['watch_url'], start_response.data['playback_url'])
         self.assertIsNotNone(start_response.data['started_at'])
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(end_response.status_code, status.HTTP_200_OK)
         self.assertEqual(end_response.data['status'], 'ended')
+        self.assertEqual(end_response.data['django_status'], 'ended')
+        self.assertEqual(end_response.data['effective_status'], 'ended')
+        self.assertFalse(end_response.data['can_end'])
+        self.assertTrue(end_response.data['can_start'])
+        self.assertFalse(end_response.data['sync_ok'])
+        self.assertTrue(end_response.data['watch_url'].endswith(f'/live/{stream_id}'))
+        self.assertNotEqual(end_response.data['watch_url'], end_response.data['playback_url'])
         self.assertIsNotNone(end_response.data['ended_at'])
 
         list_response = self.client.get(reverse('live-stream-list'))
@@ -1228,9 +1249,11 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'title', 'description', 'payment_address',
-            'category', 'visibility', 'status', 'status_source', 'stream_key',
-            'rtmp_url', 'playback_url', 'thumbnail_url', 'preview_image_url', 'snapshot_url',
-            'viewer_count', 'started_at', 'ended_at', 'created_at',
+            'category', 'visibility', 'status', 'django_status', 'effective_status', 'status_source',
+            'raw_ant_media_status', 'stream_key',
+            'rtmp_url', 'playback_url', 'watch_url', 'thumbnail_url', 'preview_image_url', 'snapshot_url',
+            'viewer_count', 'can_start', 'can_end', 'sync_ok', 'sync_error', 'message',
+            'started_at', 'ended_at', 'created_at',
         }
         self.assertTrue(expected_keys.issubset(set(create_response.data.keys())))
 
@@ -1284,6 +1307,64 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.get(reverse('live-stream-detail', args=[private_stream.id]))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_live_stream_status_endpoint_visibility_rules(self):
+        owner = self.create_user('status-owner@example.com')
+        public_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Public status stream',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+        )
+        private_stream = LiveStream.objects.create(
+            owner=owner,
+            title='Private status stream',
+            visibility=LiveStream.VISIBILITY_PRIVATE,
+        )
+
+        public_response = self.client.get(reverse('live-stream-status', args=[public_stream.id]))
+        self.assertEqual(public_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(public_response.data['id'], public_stream.id)
+
+        private_anon_response = self.client.get(reverse('live-stream-status', args=[private_stream.id]))
+        self.assertEqual(private_anon_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.client.force_authenticate(user=owner)
+        private_owner_response = self.client.get(reverse('live-stream-status', args=[private_stream.id]))
+        self.assertEqual(private_owner_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(private_owner_response.data['id'], private_stream.id)
+
+        stranger = self.create_user('status-stranger@example.com')
+        self.client.force_authenticate(user=stranger)
+        private_stranger_response = self.client.get(reverse('live-stream-status', args=[private_stream.id]))
+        self.assertEqual(private_stranger_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_live_stream_status_endpoint_includes_contract_fields(self):
+        owner = self.authenticate()
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Status contract stream',
+            status=LiveStream.STATUS_IDLE,
+        )
+        response = self.client.get(reverse('live-stream-status', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for key in (
+            'django_status',
+            'effective_status',
+            'status_source',
+            'raw_ant_media_status',
+            'can_start',
+            'can_end',
+            'sync_ok',
+            'sync_error',
+            'watch_url',
+        ):
+            self.assertIn(key, response.data)
+
+    def test_live_stream_watch_url_falls_back_without_request_context(self):
+        owner = self.create_user('watch-url-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Watch URL stream')
+        payload = LiveStreamSerializer(stream).data
+        self.assertEqual(payload['watch_url'], f'/live/{stream.id}')
+
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
         ANT_MEDIA_REST_APP_NAME='LiveApp',
@@ -1321,7 +1402,10 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(ready_response.status_code, status.HTTP_200_OK)
         self.assertEqual(ready_response.data['status'], 'waiting_for_signal')
 
-        with patch('apps.accounts.services.AntMediaLiveAdapter._fetch_broadcast_payload', return_value=None):
+        with patch(
+            'apps.accounts.services.AntMediaLiveAdapter._fetch_broadcast_payload',
+            return_value={'payload': None, 'sync_ok': False, 'sync_error': 'ant_media_unavailable'},
+        ):
             live_response = self.client.get(reverse('live-stream-detail', args=[live_stream.id]))
             ended_response = self.client.get(reverse('live-stream-detail', args=[ended_stream.id]))
             ready_fallback_response = self.client.get(reverse('live-stream-detail', args=[waiting_stream.id]))
@@ -1351,6 +1435,9 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['status'], LiveStream.STATUS_LIVE)
+        self.assertEqual(response.data['raw_ant_media_status'], 'broadcasting')
+        self.assertTrue(response.data['sync_ok'])
+        self.assertIsNone(response.data['sync_error'])
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_LIVE)
@@ -1381,6 +1468,7 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['status'], LiveStream.STATUS_ENDED)
+        self.assertEqual(response.data['raw_ant_media_status'], 'finished')
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_ENDED)
@@ -1406,6 +1494,10 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['status'], 'waiting_for_signal')
+        self.assertEqual(
+            response.data['message'],
+            'Ant Media session exists but is not yet broadcasting.',
+        )
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
@@ -1452,6 +1544,8 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['status'], 'ready')
         self.assertEqual(response.data['status_source'], 'django_control')
+        self.assertFalse(response.data['sync_ok'])
+        self.assertEqual(response.data['sync_error'], 'ant_media_unavailable')
         self.assertEqual(response.data['viewer_count'], 5)
 
     @override_settings(
