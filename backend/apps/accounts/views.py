@@ -35,7 +35,7 @@ from apps.accounts.serializers import (
     VideoMetadataSerializer,
     VideoSerializer,
 )
-from apps.accounts.services import generate_video_thumbnail
+from apps.accounts.services import AntMediaLiveAdapter, generate_video_thumbnail
 
 User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
@@ -266,6 +266,20 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
 
+class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        queryset = LiveStream.objects.select_related('category', 'owner')
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated:
+            return queryset.filter(
+                Q(visibility=LiveStream.VISIBILITY_PUBLIC) | Q(owner=user)
+            ).distinct()
+        return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
+
+
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
     serializer_class = LiveStreamSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -298,6 +312,41 @@ class LiveStreamStatusAPIView(APIView):
 
         serializer = LiveStreamSerializer(stream, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class LiveStreamPrepareAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        stream = generics.get_object_or_404(
+            LiveStream.objects.select_related('category'),
+            pk=pk,
+            owner=request.user,
+        )
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        adapter = AntMediaLiveAdapter()
+        publish_config = adapter.get_browser_publish_config(stream)
+        if not publish_config.get('ok'):
+            return Response(
+                {
+                    'detail': publish_config.get('message'),
+                    'error': publish_config.get('error'),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        payload = dict(serializer.data)
+        payload['message'] = 'Live session is prepared for browser publishing.'
+        payload['publish_session'] = {
+            'mode': 'browser',
+            'session_id': stream.stream_key,
+            'expires_at': None,
+            'constraints': {
+                'video': True,
+                'audio': True,
+            },
+            'ant_media': publish_config['config'],
+        }
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class VideoListCreateAPIView(generics.ListCreateAPIView):

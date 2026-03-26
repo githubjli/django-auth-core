@@ -247,12 +247,21 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     )
     rtmp_url = serializers.SerializerMethodField()
     playback_url = serializers.SerializerMethodField()
+    watch_url = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     preview_image_url = serializers.SerializerMethodField()
     snapshot_url = serializers.SerializerMethodField()
     status_source = serializers.SerializerMethodField()
     viewer_count = serializers.SerializerMethodField()
+    django_status = serializers.SerializerMethodField()
+    effective_status = serializers.SerializerMethodField()
+    raw_ant_media_status = serializers.SerializerMethodField()
+    sync_ok = serializers.SerializerMethodField()
+    sync_error = serializers.SerializerMethodField()
+    message = serializers.SerializerMethodField()
+    can_start = serializers.SerializerMethodField()
+    can_end = serializers.SerializerMethodField()
 
     class Meta:
         model = LiveStream
@@ -267,14 +276,23 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'category_name',
             'visibility',
             'status',
+            'django_status',
+            'effective_status',
             'status_source',
+            'raw_ant_media_status',
             'stream_key',
             'rtmp_url',
             'playback_url',
+            'watch_url',
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
             'viewer_count',
+            'can_start',
+            'can_end',
+            'sync_ok',
+            'sync_error',
+            'message',
             'started_at',
             'ended_at',
             'created_at',
@@ -285,14 +303,23 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'owner_name',
             'category_name',
             'status',
+            'django_status',
+            'effective_status',
             'status_source',
+            'raw_ant_media_status',
             'stream_key',
             'rtmp_url',
             'playback_url',
+            'watch_url',
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
             'viewer_count',
+            'can_start',
+            'can_end',
+            'sync_ok',
+            'sync_error',
+            'message',
             'started_at',
             'ended_at',
             'created_at',
@@ -303,6 +330,13 @@ class LiveStreamSerializer(serializers.ModelSerializer):
 
     def get_playback_url(self, obj):
         return self._normalized(obj).get('playback_url')
+
+    def get_watch_url(self, obj):
+        relative_url = f'/live/{obj.id}'
+        request = self.context.get('request')
+        if request is None:
+            return relative_url
+        return request.build_absolute_uri(relative_url)
 
     def get_thumbnail_url(self, obj):
         return self._normalized(obj).get('thumbnail_url')
@@ -321,6 +355,30 @@ class LiveStreamSerializer(serializers.ModelSerializer):
 
     def get_viewer_count(self, obj):
         return self._normalized(obj).get('viewer_count')
+
+    def get_django_status(self, obj):
+        return self._normalized(obj).get('django_status')
+
+    def get_effective_status(self, obj):
+        return self._normalized(obj).get('effective_status')
+
+    def get_raw_ant_media_status(self, obj):
+        return self._normalized(obj).get('raw_ant_media_status')
+
+    def get_sync_ok(self, obj):
+        return self._normalized(obj).get('sync_ok')
+
+    def get_sync_error(self, obj):
+        return self._normalized(obj).get('sync_error')
+
+    def get_message(self, obj):
+        return self._normalized(obj).get('message')
+
+    def get_can_start(self, obj):
+        return self._normalized(obj).get('can_start')
+
+    def get_can_end(self, obj):
+        return self._normalized(obj).get('can_end')
 
     def _normalized(self, obj):
         normalized = getattr(obj, '_normalized_live_fields', None)
