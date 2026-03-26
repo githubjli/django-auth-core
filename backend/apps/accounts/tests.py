@@ -15,6 +15,7 @@ from apps.accounts.content import (
     map_video_to_content,
 )
 from apps.accounts.models import Category, LiveStream, Video
+from apps.accounts.serializers import LiveStreamSerializer
 
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -1182,11 +1183,13 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.data['status_source'], 'django_control')
         self.assertTrue(create_response.data['stream_key'])
         self.assertEqual(create_response.data['rtmp_url'], 'rtmp://streaming-api-live.pttblockchain.online/live')
+        self.assertTrue(create_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertTrue(
             create_response.data['playback_url'].endswith(
                 f"/live/streams/{create_response.data['stream_key']}.m3u8"
             )
         )
+        self.assertNotEqual(create_response.data['watch_url'], create_response.data['playback_url'])
         self.assertIsNone(create_response.data['thumbnail_url'])
         self.assertIsNone(create_response.data['preview_image_url'])
         self.assertIsNone(create_response.data['snapshot_url'])
@@ -1201,6 +1204,8 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['status_source'], 'django_control')
         self.assertEqual(detail_response.data['status'], 'ready')
+        self.assertTrue(detail_response.data['watch_url'].endswith(f'/live/{stream_id}'))
+        self.assertNotEqual(detail_response.data['watch_url'], detail_response.data['playback_url'])
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
@@ -1213,6 +1218,8 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertTrue(start_response.data['can_end'])
         self.assertFalse(start_response.data['sync_ok'])
         self.assertEqual(start_response.data['sync_error'], 'sync_disabled')
+        self.assertTrue(start_response.data['watch_url'].endswith(f'/live/{stream_id}'))
+        self.assertNotEqual(start_response.data['watch_url'], start_response.data['playback_url'])
         self.assertIsNotNone(start_response.data['started_at'])
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
@@ -1223,6 +1230,8 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertFalse(end_response.data['can_end'])
         self.assertTrue(end_response.data['can_start'])
         self.assertFalse(end_response.data['sync_ok'])
+        self.assertTrue(end_response.data['watch_url'].endswith(f'/live/{stream_id}'))
+        self.assertNotEqual(end_response.data['watch_url'], end_response.data['playback_url'])
         self.assertIsNotNone(end_response.data['ended_at'])
 
         list_response = self.client.get(reverse('live-stream-list'))
@@ -1242,7 +1251,7 @@ class LiveStreamAPITestCase(APITestCase):
             'id', 'owner_id', 'owner_name', 'title', 'description', 'payment_address',
             'category', 'visibility', 'status', 'django_status', 'effective_status', 'status_source',
             'raw_ant_media_status', 'stream_key',
-            'rtmp_url', 'playback_url', 'thumbnail_url', 'preview_image_url', 'snapshot_url',
+            'rtmp_url', 'playback_url', 'watch_url', 'thumbnail_url', 'preview_image_url', 'snapshot_url',
             'viewer_count', 'can_start', 'can_end', 'sync_ok', 'sync_error', 'message',
             'started_at', 'ended_at', 'created_at',
         }
@@ -1346,8 +1355,15 @@ class LiveStreamAPITestCase(APITestCase):
             'can_end',
             'sync_ok',
             'sync_error',
+            'watch_url',
         ):
             self.assertIn(key, response.data)
+
+    def test_live_stream_watch_url_falls_back_without_request_context(self):
+        owner = self.create_user('watch-url-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Watch URL stream')
+        payload = LiveStreamSerializer(stream).data
+        self.assertEqual(payload['watch_url'], f'/live/{stream.id}')
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',

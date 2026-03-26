@@ -247,6 +247,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     )
     rtmp_url = serializers.SerializerMethodField()
     playback_url = serializers.SerializerMethodField()
+    watch_url = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     preview_image_url = serializers.SerializerMethodField()
@@ -282,6 +283,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'stream_key',
             'rtmp_url',
             'playback_url',
+            'watch_url',
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
@@ -308,6 +310,7 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'stream_key',
             'rtmp_url',
             'playback_url',
+            'watch_url',
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
@@ -327,6 +330,13 @@ class LiveStreamSerializer(serializers.ModelSerializer):
 
     def get_playback_url(self, obj):
         return self._normalized(obj).get('playback_url')
+
+    def get_watch_url(self, obj):
+        relative_url = f'/live/{obj.id}'
+        request = self.context.get('request')
+        if request is None:
+            return relative_url
+        return request.build_absolute_uri(relative_url)
 
     def get_thumbnail_url(self, obj):
         return self._normalized(obj).get('thumbnail_url')

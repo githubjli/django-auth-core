@@ -204,7 +204,7 @@ The internal unified content mapping layer is not part of this public contract y
 Live stream object fields:
 - `id`, `owner_id`, `owner_name`, `title`, `description`, `payment_address`, `category`, `category_name`, `visibility`,
 - `status`, `django_status`, `effective_status`, `status_source`, `raw_ant_media_status`,
-- `stream_key`, `rtmp_url`, `playback_url`, `thumbnail_url`, `preview_image_url`, `snapshot_url`,
+- `stream_key`, `rtmp_url`, `playback_url`, `watch_url`, `thumbnail_url`, `preview_image_url`, `snapshot_url`,
 - `viewer_count`, `can_start`, `can_end`, `sync_ok`, `sync_error`, `message`,
 - `started_at`, `ended_at`, `created_at`
 
@@ -214,6 +214,8 @@ Status field meanings:
 - `effective_status`: final status shown to clients after optional Ant Media normalization
 - `status_source`: `ant_media` when derived from Ant Media payload, otherwise `django_control`
 - `raw_ant_media_status`: raw status string from Ant Media payload, or `null`
+- `watch_url`: canonical frontend watch/share URL for this live room (viewer-facing route)
+- `playback_url`: media playback URL (HLS `.m3u8`), intentionally separate from `watch_url`
 
 `effective_status` is computed:
 - if Ant Media synced status = `broadcasting` => `live`
