@@ -4,6 +4,7 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from apps.accounts.models import (
     Category,
     ChannelSubscription,
+    LiveStream,
     User,
     Video,
     VideoComment,
@@ -30,12 +31,13 @@ class UserAdmin(DjangoUserAdmin):
         'last_name',
         'language',
         'theme',
+        'is_creator',
         'subscriber_count',
         'is_staff',
         'is_active',
         'date_joined',
     )
-    list_filter = ('is_staff', 'is_superuser', 'is_active')
+    list_filter = ('is_staff', 'is_superuser', 'is_active', 'is_creator')
     search_fields = ('email', 'first_name', 'last_name', 'bio')
     readonly_fields = ('date_joined', 'last_login', 'subscriber_count')
 
@@ -53,6 +55,7 @@ class UserAdmin(DjangoUserAdmin):
                     'is_active',
                     'is_staff',
                     'is_superuser',
+                    'is_creator',
                     'groups',
                     'user_permissions',
                 ),
@@ -66,10 +69,29 @@ class UserAdmin(DjangoUserAdmin):
             None,
             {
                 'classes': ('wide',),
-                'fields': ('email', 'password1', 'password2', 'is_staff', 'is_active'),
+                'fields': ('email', 'password1', 'password2', 'is_staff', 'is_active', 'is_creator'),
             },
         ),
     )
+
+
+@admin.register(LiveStream)
+class LiveStreamAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'title',
+        'owner',
+        'visibility',
+        'status',
+        'payment_address',
+        'viewer_count',
+        'created_at',
+    )
+    list_filter = ('visibility', 'status', 'created_at')
+    search_fields = ('title', 'description', 'payment_address', 'owner__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('stream_key', 'viewer_count', 'started_at', 'ended_at', 'created_at')
+    autocomplete_fields = ('owner', 'category')
 
 
 @admin.register(Video)
