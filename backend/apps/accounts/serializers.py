@@ -29,7 +29,7 @@ class OptionalSlugRelatedField(serializers.SlugRelatedField):
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ('id', 'email', 'first_name', 'last_name')
+        fields = ('id', 'email', 'first_name', 'last_name', 'is_creator')
         read_only_fields = ('id',)
 
 
@@ -122,6 +122,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
             'is_active',
             'is_staff',
             'is_superuser',
+            'is_creator',
             'date_joined',
         )
         read_only_fields = ('id', 'date_joined')
@@ -280,7 +281,6 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'effective_status',
             'status_source',
             'raw_ant_media_status',
-            'stream_key',
             'rtmp_url',
             'playback_url',
             'watch_url',
@@ -307,7 +307,6 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'effective_status',
             'status_source',
             'raw_ant_media_status',
-            'stream_key',
             'rtmp_url',
             'playback_url',
             'watch_url',

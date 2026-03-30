@@ -231,7 +231,7 @@ These endpoints are for authenticated users and provide a first-pass live stream
 - `GET /api/live/`
 - `GET /api/live/<id>/`
 
-`POST /api/live/create/`, `POST /api/live/<id>/start/`, and `POST /api/live/<id>/end/` require authentication. `GET /api/live/` and `GET /api/live/<id>/` can be used publicly for streams with `visibility=public`, while owners can still view their own non-public streams.
+`POST /api/live/create/`, `POST /api/live/<id>/prepare/`, `POST /api/live/<id>/start/`, and `POST /api/live/<id>/end/` require authentication plus creator role (`is_creator=true`). `GET /api/live/` and `GET /api/live/<id>/` can be used publicly for streams with `visibility=public`, while owners can still view their own non-public streams.
 
 Create payload fields:
 
@@ -241,7 +241,7 @@ Create payload fields:
 - optional `category`
 - optional `visibility` (`public`, `unlisted`, or `private`)
 
-Response fields include `id`, `owner_id`, `owner_name`, `title`, `description`, `payment_address`, `category`, `category_name`, `visibility`, `status`, `status_source`, `stream_key`, `rtmp_url`, `playback_url`, `thumbnail_url`, `preview_image_url`, and `snapshot_url`. `rtmp_url` is returned as the OBS-friendly RTMP server/app base, while `stream_key` stays separate for encoder configuration. Without external sync, Django exposes `ready`, `live`, and `ended` semantics from its control state. When `ANT_MEDIA_SYNC_STATUS=True`, Django can query `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_REST_APP_NAME` at `/rest/v2/broadcasts/<stream_key>` and expose `live` for Ant Media `broadcasting`, `ended` for `finished`, and `waiting_for_signal` when the Ant Media session exists but no live signal is present yet, returning `status_source="ant_media"` when sync succeeds. `thumbnail_url`, `preview_image_url`, and `snapshot_url` stay nullable unless `ANT_MEDIA_PREVIEW_BASE` is configured. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
+Public live object responses include `id`, `owner_id`, `owner_name`, `title`, `description`, `payment_address`, `category`, `category_name`, `visibility`, `status`, `status_source`, `rtmp_url`, `playback_url`, `thumbnail_url`, `preview_image_url`, and `snapshot_url`. `stream_key` is not exposed in public/shared live serializers. Use `POST /api/live/<id>/prepare/` (owner + creator only) to rotate and retrieve publish credentials (`rtmp_base`, `stream_key`, `playback_url`, `watch_url`, `status`). Without external sync, Django exposes `ready`, `live`, and `ended` semantics from its control state. When `ANT_MEDIA_SYNC_STATUS=True`, Django can query `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_REST_APP_NAME` at `/rest/v2/broadcasts/<stream_key>` and expose `live` for Ant Media `broadcasting`, `ended` for `finished`, and `waiting_for_signal` when the Ant Media session exists but no live signal is present yet, returning `status_source="ant_media"` when sync succeeds. `thumbnail_url`, `preview_image_url`, and `snapshot_url` stay nullable unless `ANT_MEDIA_PREVIEW_BASE` is configured. Configure `ANT_MEDIA_RTMP_BASE` for OBS ingest and `ANT_MEDIA_PLAYBACK_BASE` (or `ANT_MEDIA_BASE_URL` + `ANT_MEDIA_APP_NAME`) for HLS playback.
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/live/create/ \

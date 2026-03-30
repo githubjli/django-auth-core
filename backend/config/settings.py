@@ -134,10 +134,10 @@ DATABASES = {
 }
 
 REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
-ANT_MEDIA_BASE_URL = os.getenv('ANT_MEDIA_BASE_URL', 'https://streaming-api-live.pttblockchain.online').rstrip('/')
+ANT_MEDIA_BASE_URL = os.getenv('ANT_MEDIA_BASE_URL', 'https://media.meownews.online').rstrip('/')
 ANT_MEDIA_APP_NAME = os.getenv('ANT_MEDIA_APP_NAME', 'live')
-ANT_MEDIA_RTMP_BASE = os.getenv('ANT_MEDIA_RTMP_BASE', 'rtmp://streaming-api-live.pttblockchain.online/live').rstrip('/')
-ANT_MEDIA_PLAYBACK_BASE = os.getenv('ANT_MEDIA_PLAYBACK_BASE', 'https://streaming-api-live.pttblockchain.online/live/streams').rstrip('/')
+ANT_MEDIA_RTMP_BASE = os.getenv('ANT_MEDIA_RTMP_BASE', 'rtmp://media.meownews.online/live').rstrip('/')
+ANT_MEDIA_PLAYBACK_BASE = os.getenv('ANT_MEDIA_PLAYBACK_BASE', 'https://media.meownews.online/live/streams').rstrip('/')
 ANT_MEDIA_PREVIEW_BASE = os.getenv('ANT_MEDIA_PREVIEW_BASE', '').rstrip('/')
 ANT_MEDIA_APPLICATION = ANT_MEDIA_APP_NAME
 ANT_MEDIA_REST_APP_NAME = os.getenv('ANT_MEDIA_REST_APP_NAME', ANT_MEDIA_APPLICATION)
