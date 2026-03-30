@@ -29,7 +29,7 @@ class OptionalSlugRelatedField(serializers.SlugRelatedField):
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ('id', 'email', 'first_name', 'last_name')
+        fields = ('id', 'email', 'first_name', 'last_name', 'is_creator')
         read_only_fields = ('id',)
 
 
@@ -122,6 +122,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
             'is_active',
             'is_staff',
             'is_superuser',
+            'is_creator',
             'date_joined',
         )
         read_only_fields = ('id', 'date_joined')
@@ -152,6 +153,10 @@ class VideoSerializer(serializers.ModelSerializer):
         allow_null=True,
         required=False,
     )
+    visibility = serializers.ChoiceField(
+        choices=[Video.VISIBILITY_PUBLIC, Video.VISIBILITY_PRIVATE],
+        required=False,
+    )
 
     class Meta:
         model = Video
@@ -163,6 +168,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'title',
             'description',
             'description_preview',
+            'visibility',
             'category',
             'category_name',
             'category_slug',
@@ -280,7 +286,6 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'effective_status',
             'status_source',
             'raw_ant_media_status',
-            'stream_key',
             'rtmp_url',
             'playback_url',
             'watch_url',
@@ -307,7 +312,6 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'effective_status',
             'status_source',
             'raw_ant_media_status',
-            'stream_key',
             'rtmp_url',
             'playback_url',
             'watch_url',
