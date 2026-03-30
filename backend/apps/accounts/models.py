@@ -48,6 +48,7 @@ class User(AbstractUser):
     language = models.CharField(max_length=10, default='en-US')
     theme = models.CharField(max_length=10, default='system')
     timezone = models.CharField(max_length=64, blank=True)
+    is_creator = models.BooleanField(default=False)
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS: list[str] = []
@@ -90,11 +91,9 @@ class Video(models.Model):
     ]
 
     VISIBILITY_PUBLIC = 'public'
-    VISIBILITY_UNLISTED = 'unlisted'
     VISIBILITY_PRIVATE = 'private'
     VISIBILITY_CHOICES = [
         (VISIBILITY_PUBLIC, 'Public'),
-        (VISIBILITY_UNLISTED, 'Unlisted'),
         (VISIBILITY_PRIVATE, 'Private'),
     ]
 

@@ -104,7 +104,7 @@ class AuthAPITestCase(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_response.data['access']}")
         me_response = self.client.get(reverse('auth-me'))
         self.assertEqual(me_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(me_response.data.keys()), {'id', 'email', 'first_name', 'last_name'})
+        self.assertEqual(set(me_response.data.keys()), {'id', 'email', 'first_name', 'last_name', 'is_creator'})
 
     def test_me_requires_authentication(self):
         response = self.client.get(reverse('auth-me'))
@@ -379,6 +379,7 @@ class VideoAPITestCase(APITestCase):
             {
                 'title': 'My first video',
                 'description': 'My video description',
+                'visibility': 'private',
                 'category': 'technology',
                 'file': SimpleUploadedFile('first.mp4', b'video-bytes', content_type='video/mp4'),
             },
@@ -393,12 +394,14 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.data['like_count'], 0)
         self.assertEqual(upload_response.data['comment_count'], 0)
         self.assertEqual(upload_response.data['description_preview'], 'My video description')
+        self.assertEqual(upload_response.data['visibility'], 'private')
         self.assertEqual(upload_response.data['category'], 'technology')
         self.assertTrue(upload_response.data['thumbnail'])
         self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
 
         created_video = user.videos.get(pk=video_id)
         self.assertEqual(created_video.description, 'My video description')
+        self.assertEqual(created_video.visibility, Video.VISIBILITY_PRIVATE)
         self.assertIsNotNone(created_video.category)
         self.assertEqual(created_video.category.slug, 'technology')
 
@@ -407,6 +410,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(len(list_response.data['results']), 1)
         self.assertEqual(list_response.data['results'][0]['title'], 'My first video')
+        self.assertEqual(list_response.data['results'][0]['visibility'], 'private')
         self.assertIn('/media/thumbnails/', list_response.data['results'][0]['thumbnail_url'])
 
         detail_response = self.client.get(reverse('video-detail', args=[video_id]))
@@ -415,6 +419,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['category_slug'], 'technology')
         self.assertEqual(detail_response.data['description_preview'], 'My video description')
+        self.assertEqual(detail_response.data['visibility'], 'private')
         self.assertEqual(detail_response.data['owner_id'], user.id)
         self.assertIn('/media/videos/', detail_response.data['file_url'])
         self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
@@ -518,6 +523,53 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(len(paginated_response.data['results']), 1)
         self.assertIsNotNone(paginated_response.data['next'])
 
+    def test_owner_can_update_video_visibility(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Visibility update video',
+                'visibility': 'public',
+                'file': SimpleUploadedFile('vis-update.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        patch_response = self.client.patch(
+            reverse('video-detail', args=[video_id]),
+            {'visibility': 'private'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['visibility'], 'private')
+        self.assertEqual(Video.objects.get(pk=video_id).visibility, Video.VISIBILITY_PRIVATE)
+
+    def test_owner_list_includes_private_videos(self):
+        self.authenticate()
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public dashboard item',
+                'visibility': 'public',
+                'file': SimpleUploadedFile('owner-public.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Private dashboard item',
+                'visibility': 'private',
+                'file': SimpleUploadedFile('owner-private.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        titles = {item['title'] for item in list_response.data['results']}
+        self.assertIn('Public dashboard item', titles)
+        self.assertIn('Private dashboard item', titles)
+
     def test_owner_video_contract_fields_for_list_and_detail(self):
         user = self.authenticate()
         video = self.client.post(
@@ -535,7 +587,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
-            'description_preview', 'category', 'category_name', 'category_slug', 'like_count',
+            'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }
@@ -593,6 +645,7 @@ class VideoAPITestCase(APITestCase):
             reverse('video-list-create'),
             {
                 'title': 'Public item',
+                'visibility': 'public',
                 'file': SimpleUploadedFile('public-item.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
@@ -601,20 +654,11 @@ class VideoAPITestCase(APITestCase):
             reverse('video-list-create'),
             {
                 'title': 'Private item',
+                'visibility': 'private',
                 'file': SimpleUploadedFile('private-item.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
         ).data
-        unlisted_video = self.client.post(
-            reverse('video-list-create'),
-            {
-                'title': 'Unlisted item',
-                'file': SimpleUploadedFile('unlisted-item.mp4', b'video-bytes', content_type='video/mp4'),
-            },
-            format='multipart',
-        ).data
-        Video.objects.filter(pk=private_video['id']).update(visibility=Video.VISIBILITY_PRIVATE)
-        Video.objects.filter(pk=unlisted_video['id']).update(visibility=Video.VISIBILITY_UNLISTED)
         self.client.force_authenticate(user=None)
 
         list_response = self.client.get(reverse('public-video-list'))
@@ -622,7 +666,6 @@ class VideoAPITestCase(APITestCase):
         listed_ids = [item['id'] for item in list_response.data['results']]
         self.assertIn(public_video['id'], listed_ids)
         self.assertNotIn(private_video['id'], listed_ids)
-        self.assertNotIn(unlisted_video['id'], listed_ids)
 
         public_detail_response = self.client.get(reverse('public-video-detail', args=[public_video['id']]))
         self.assertEqual(public_detail_response.status_code, status.HTTP_200_OK)
@@ -666,7 +709,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
-            'description_preview', 'category', 'category_name', 'category_slug', 'like_count',
+            'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }
@@ -1142,7 +1185,7 @@ class LiveStreamAPITestCase(APITestCase):
         return User.objects.create_user(email=email, password=password, **extra_fields)
 
     def authenticate(self, email='streamer@example.com'):
-        user = self.create_user(email=email)
+        user = self.create_user(email=email, is_creator=True)
         self.client.force_authenticate(user=user)
         return user
 
@@ -1157,6 +1200,33 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_non_creator_cannot_create_live_stream(self):
+        non_creator = self.create_user('viewer@example.com', is_creator=False)
+        self.client.force_authenticate(user=non_creator)
+        response = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Blocked stream'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_non_creator_cannot_prepare_start_or_end_even_as_owner(self):
+        owner = self.create_user('noncreator-owner@example.com', is_creator=False)
+        stream = LiveStream.objects.create(owner=owner, title='Owner stream')
+        self.client.force_authenticate(user=owner)
+        self.assertEqual(
+            self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json').status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.post(reverse('live-stream-start', args=[stream.id]), format='json').status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.post(reverse('live-stream-end', args=[stream.id]), format='json').status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
 
     def test_owner_can_create_start_end_and_list_live_streams(self):
         user = self.authenticate()
@@ -1181,13 +1251,11 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(create_response.data['visibility'], 'unlisted')
         self.assertEqual(create_response.data['status'], 'ready')
         self.assertEqual(create_response.data['status_source'], 'django_control')
-        self.assertTrue(create_response.data['stream_key'])
-        self.assertEqual(create_response.data['rtmp_url'], 'rtmp://streaming-api-live.pttblockchain.online/live')
+        self.assertNotIn('stream_key', create_response.data)
+        self.assertEqual(create_response.data['rtmp_url'], 'rtmp://media.meownews.online/live')
         self.assertTrue(create_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertTrue(
-            create_response.data['playback_url'].endswith(
-                f"/live/streams/{create_response.data['stream_key']}.m3u8"
-            )
+            create_response.data['playback_url'].startswith('https://media.meownews.online/live/streams/')
         )
         self.assertNotEqual(create_response.data['watch_url'], create_response.data['playback_url'])
         self.assertIsNone(create_response.data['thumbnail_url'])
@@ -1250,7 +1318,7 @@ class LiveStreamAPITestCase(APITestCase):
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'title', 'description', 'payment_address',
             'category', 'visibility', 'status', 'django_status', 'effective_status', 'status_source',
-            'raw_ant_media_status', 'stream_key',
+            'raw_ant_media_status',
             'rtmp_url', 'playback_url', 'watch_url', 'thumbnail_url', 'preview_image_url', 'snapshot_url',
             'viewer_count', 'can_start', 'can_end', 'sync_ok', 'sync_error', 'message',
             'started_at', 'ended_at', 'created_at',
@@ -1289,12 +1357,14 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertIsNone(list_response.data[0]['thumbnail_url'])
         self.assertIsNone(list_response.data[0]['preview_image_url'])
         self.assertIsNone(list_response.data[0]['snapshot_url'])
+        self.assertNotIn('stream_key', list_response.data[0])
 
         detail_response = self.client.get(reverse('live-stream-detail', args=[public_stream.id]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['description'], 'Browser studio compatible')
         self.assertEqual(detail_response.data['payment_address'], '0xfeedbeef')
         self.assertEqual(detail_response.data['owner_id'], owner.id)
+        self.assertNotIn('stream_key', detail_response.data)
 
     def test_public_cannot_retrieve_private_live_stream(self):
         owner = self.create_user('private-streamer@example.com')
@@ -1373,37 +1443,20 @@ class LiveStreamAPITestCase(APITestCase):
             status=LiveStream.STATUS_IDLE,
             visibility=LiveStream.VISIBILITY_UNLISTED,
         )
+        old_stream_key = stream.stream_key
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        for key in (
-            'id',
-            'watch_url',
-            'playback_url',
-            'status',
-            'django_status',
-            'effective_status',
-            'status_source',
-            'can_start',
-            'can_end',
-            'publish_session',
-        ):
+        for key in ('id', 'rtmp_base', 'stream_key', 'playback_url', 'watch_url', 'status', 'message'):
             self.assertIn(key, response.data)
-        self.assertEqual(response.data['publish_session']['mode'], 'browser')
-        self.assertEqual(response.data['publish_session']['session_id'], stream.stream_key)
-        self.assertEqual(response.data['publish_session']['expires_at'], None)
-        self.assertEqual(response.data['publish_session']['constraints'], {'video': True, 'audio': True})
-        self.assertIn('ant_media', response.data['publish_session'])
-        self.assertIn('websocket_url', response.data['publish_session']['ant_media'])
-        self.assertIn('adaptor_script_url', response.data['publish_session']['ant_media'])
-        self.assertEqual(response.data['publish_session']['ant_media']['stream_id'], stream.stream_key)
-        self.assertEqual(response.data['publish_session']['ant_media']['publish_mode'], 'webrtc')
-        self.assertEqual(response.data['message'], 'Live session is prepared for browser publishing.')
-        self.assertNotEqual(response.data['watch_url'], response.data['playback_url'])
+        self.assertEqual(response.data['rtmp_base'], 'rtmp://media.meownews.online/live')
+        self.assertEqual(response.data['message'], 'Live stream prepared.')
+        self.assertNotEqual(response.data['stream_key'], old_stream_key)
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+        self.assertEqual(stream.stream_key, response.data['stream_key'])
 
     def test_non_owner_cannot_prepare_live_stream(self):
-        owner = self.create_user('prepare-owner@example.com')
+        owner = self.create_user('prepare-owner@example.com', is_creator=True)
         stream = LiveStream.objects.create(owner=owner, title='Owner stream')
         self.authenticate(email='prepare-other@example.com')
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
@@ -1425,20 +1478,13 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['status'], 'waiting_for_signal')
-        self.assertEqual(response.data['status_source'], 'ant_media')
-        self.assertEqual(response.data['publish_session']['mode'], 'browser')
-        self.assertEqual(response.data['publish_session']['ant_media']['stream_id'], stream.stream_key)
+        self.assertIn('stream_key', response.data)
 
-    @override_settings(
-        ANT_MEDIA_BASE_URL='',
-    )
-    def test_prepare_returns_explicit_error_when_publish_config_is_unavailable(self):
-        owner = self.authenticate(email='prepare-missing-config@example.com')
-        stream = LiveStream.objects.create(owner=owner, title='Prepare config fail stream')
+    def test_prepare_rejects_invalid_lifecycle_state(self):
+        owner = self.authenticate(email='prepare-live@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Already live', status=LiveStream.STATUS_LIVE)
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
-        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
-        self.assertEqual(response.data['error'], 'ant_media_publish_config_unavailable')
-        self.assertIn('publish config is unavailable', response.data['detail'])
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
@@ -1495,7 +1541,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_SYNC_STATUS=True,
     )
     @patch('apps.accounts.services.urllib_request.urlopen')
-    def test_live_stream_status_can_sync_from_ant_media(self, mock_urlopen):
+    def test_live_stream_status_can_sync_from_ant_media_without_mutating_db(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
             owner=owner,
@@ -1515,7 +1561,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertIsNone(response.data['sync_error'])
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
-        self.assertEqual(stream.status, LiveStream.STATUS_LIVE)
+        self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
         mock_urlopen.assert_called_once_with(
             'https://ant.example.com/LiveApp/rest/v2/broadcasts/'
             f'{stream.stream_key}',
@@ -1528,7 +1574,7 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_SYNC_STATUS=True,
     )
     @patch('apps.accounts.services.urllib_request.urlopen')
-    def test_live_stream_status_maps_finished_to_ended(self, mock_urlopen):
+    def test_live_stream_status_maps_finished_to_ended_without_mutating_db(self, mock_urlopen):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
             owner=owner,
@@ -1546,7 +1592,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.data['raw_ant_media_status'], 'finished')
         self.assertEqual(response.data['status_source'], 'ant_media')
         stream.refresh_from_db()
-        self.assertEqual(stream.status, LiveStream.STATUS_ENDED)
+        self.assertEqual(stream.status, LiveStream.STATUS_LIVE)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
@@ -1634,8 +1680,9 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        stream = LiveStream.objects.get(pk=create_response.data['id'])
         expected_preview_url = (
-            f"https://ant.example.com/live/previews/{create_response.data['stream_key']}.png"
+            f"https://ant.example.com/live/previews/{stream.stream_key}.png"
         )
         self.assertEqual(create_response.data['thumbnail_url'], expected_preview_url)
         self.assertEqual(create_response.data['preview_image_url'], expected_preview_url)
@@ -1694,10 +1741,11 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        stream = LiveStream.objects.get(pk=create_response.data['id'])
         self.assertEqual(create_response.data['rtmp_url'], 'rtmp://ant.example.com/live')
         self.assertEqual(
             create_response.data['playback_url'],
-            f"https://ant.example.com/live/streams/{create_response.data['stream_key']}.m3u8",
+            f"https://ant.example.com/live/streams/{stream.stream_key}.m3u8",
         )
         self.assertTrue(create_response.data['playback_url'].endswith('.m3u8'))
 
@@ -1709,7 +1757,7 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         ).data['id']
 
-        other_user = self.create_user('other-streamer@example.com')
+        other_user = self.create_user('other-streamer@example.com', is_creator=True)
         self.client.force_authenticate(user=other_user)
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
@@ -1717,6 +1765,24 @@ class LiveStreamAPITestCase(APITestCase):
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(end_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_repeated_start_or_invalid_end_returns_conflict(self):
+        self.authenticate()
+        stream_id = self.client.post(
+            reverse('live-stream-create'),
+            {'title': 'Lifecycle guard stream'},
+            format='json',
+        ).data['id']
+
+        first_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        self.assertEqual(first_start.status_code, status.HTTP_200_OK)
+        repeated_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        self.assertEqual(repeated_start.status_code, status.HTTP_409_CONFLICT)
+
+        first_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        self.assertEqual(first_end.status_code, status.HTTP_200_OK)
+        repeated_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        self.assertEqual(repeated_end.status_code, status.HTTP_409_CONFLICT)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
