@@ -2,6 +2,7 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Count, Exists, F, OuterRef, Q
+import logging
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -40,6 +41,7 @@ from apps.accounts.serializers import (
 from apps.accounts.services import AntMediaLiveAdapter, generate_video_thumbnail
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 LEGACY_CATEGORY_SLUG_ALIASES = {
     'tech': 'technology',
 }
@@ -340,6 +342,20 @@ class LiveStreamPrepareAPIView(APIView):
             )
         stream.stream_key = generate_stream_key()
         stream.save(update_fields=['stream_key'])
+        adapter = AntMediaLiveAdapter()
+        publish_config = adapter.get_browser_publish_config(stream)
+        ant_media_config = publish_config.get('config', {})
+
+        masked_stream_id = stream.stream_key[:6] + '...' if stream.stream_key else None
+        logger.debug(
+            'live_prepare generated publish session live_id=%s user_id=%s stream_id=%s websocket_url=%s adaptor_script_url=%s',
+            stream.id,
+            request.user.id,
+            masked_stream_id,
+            ant_media_config.get('websocket_url'),
+            ant_media_config.get('adaptor_script_url'),
+        )
+
         serializer = LiveStreamSerializer(stream, context={'request': request})
         payload = serializer.data
         return Response(
