@@ -275,7 +275,7 @@ Uploaded videos also receive a default thumbnail automatically. The backend will
 
 Optional upload/list fields and query params:
 
-- Upload fields: `title`, optional `description`, optional `category`, `file`
+- Upload fields: `title`, optional `description`, optional `category`, optional `visibility` (`public` or `private`), `file`
 - Detail/PATCH response fields also include `thumbnail` and `thumbnail_url`
 - Categories: `technology`, `education`, `gaming`, `news`, `entertainment`, `other`
 - List query params:

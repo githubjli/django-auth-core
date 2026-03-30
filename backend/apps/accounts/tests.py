@@ -379,6 +379,7 @@ class VideoAPITestCase(APITestCase):
             {
                 'title': 'My first video',
                 'description': 'My video description',
+                'visibility': 'private',
                 'category': 'technology',
                 'file': SimpleUploadedFile('first.mp4', b'video-bytes', content_type='video/mp4'),
             },
@@ -393,12 +394,14 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.data['like_count'], 0)
         self.assertEqual(upload_response.data['comment_count'], 0)
         self.assertEqual(upload_response.data['description_preview'], 'My video description')
+        self.assertEqual(upload_response.data['visibility'], 'private')
         self.assertEqual(upload_response.data['category'], 'technology')
         self.assertTrue(upload_response.data['thumbnail'])
         self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
 
         created_video = user.videos.get(pk=video_id)
         self.assertEqual(created_video.description, 'My video description')
+        self.assertEqual(created_video.visibility, Video.VISIBILITY_PRIVATE)
         self.assertIsNotNone(created_video.category)
         self.assertEqual(created_video.category.slug, 'technology')
 
@@ -407,6 +410,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(len(list_response.data['results']), 1)
         self.assertEqual(list_response.data['results'][0]['title'], 'My first video')
+        self.assertEqual(list_response.data['results'][0]['visibility'], 'private')
         self.assertIn('/media/thumbnails/', list_response.data['results'][0]['thumbnail_url'])
 
         detail_response = self.client.get(reverse('video-detail', args=[video_id]))
@@ -415,6 +419,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['category_slug'], 'technology')
         self.assertEqual(detail_response.data['description_preview'], 'My video description')
+        self.assertEqual(detail_response.data['visibility'], 'private')
         self.assertEqual(detail_response.data['owner_id'], user.id)
         self.assertIn('/media/videos/', detail_response.data['file_url'])
         self.assertIn('/media/thumbnails/', detail_response.data['thumbnail_url'])
@@ -518,6 +523,53 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(len(paginated_response.data['results']), 1)
         self.assertIsNotNone(paginated_response.data['next'])
 
+    def test_owner_can_update_video_visibility(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Visibility update video',
+                'visibility': 'public',
+                'file': SimpleUploadedFile('vis-update.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        patch_response = self.client.patch(
+            reverse('video-detail', args=[video_id]),
+            {'visibility': 'private'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['visibility'], 'private')
+        self.assertEqual(Video.objects.get(pk=video_id).visibility, Video.VISIBILITY_PRIVATE)
+
+    def test_owner_list_includes_private_videos(self):
+        self.authenticate()
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public dashboard item',
+                'visibility': 'public',
+                'file': SimpleUploadedFile('owner-public.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Private dashboard item',
+                'visibility': 'private',
+                'file': SimpleUploadedFile('owner-private.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        )
+        list_response = self.client.get(reverse('video-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        titles = {item['title'] for item in list_response.data['results']}
+        self.assertIn('Public dashboard item', titles)
+        self.assertIn('Private dashboard item', titles)
+
     def test_owner_video_contract_fields_for_list_and_detail(self):
         user = self.authenticate()
         video = self.client.post(
@@ -535,7 +587,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
-            'description_preview', 'category', 'category_name', 'category_slug', 'like_count',
+            'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }
@@ -593,6 +645,7 @@ class VideoAPITestCase(APITestCase):
             reverse('video-list-create'),
             {
                 'title': 'Public item',
+                'visibility': 'public',
                 'file': SimpleUploadedFile('public-item.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
@@ -601,6 +654,7 @@ class VideoAPITestCase(APITestCase):
             reverse('video-list-create'),
             {
                 'title': 'Private item',
+                'visibility': 'private',
                 'file': SimpleUploadedFile('private-item.mp4', b'video-bytes', content_type='video/mp4'),
             },
             format='multipart',
@@ -613,7 +667,6 @@ class VideoAPITestCase(APITestCase):
             },
             format='multipart',
         ).data
-        Video.objects.filter(pk=private_video['id']).update(visibility=Video.VISIBILITY_PRIVATE)
         Video.objects.filter(pk=unlisted_video['id']).update(visibility=Video.VISIBILITY_UNLISTED)
         self.client.force_authenticate(user=None)
 
@@ -666,7 +719,7 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
-            'description_preview', 'category', 'category_name', 'category_slug', 'like_count',
+            'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }

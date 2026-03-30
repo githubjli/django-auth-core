@@ -153,6 +153,10 @@ class VideoSerializer(serializers.ModelSerializer):
         allow_null=True,
         required=False,
     )
+    visibility = serializers.ChoiceField(
+        choices=[Video.VISIBILITY_PUBLIC, Video.VISIBILITY_PRIVATE],
+        required=False,
+    )
 
     class Meta:
         model = Video
@@ -164,6 +168,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'title',
             'description',
             'description_preview',
+            'visibility',
             'category',
             'category_name',
             'category_slug',

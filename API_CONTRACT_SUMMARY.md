@@ -100,7 +100,7 @@ The internal unified content mapping layer is not part of this public contract y
 - Content types: JSON/form/multipart
 - Request fields:
   - **required**: `title`, `file`
-  - **optional**: `description`, `category` (slug or null), `thumbnail`
+  - **optional**: `description`, `category` (slug or null), `thumbnail`, `visibility` (`public|private`)
 - Response (201): full video object.
 
 ### `GET /api/videos/{id}/`
@@ -110,7 +110,7 @@ The internal unified content mapping layer is not part of this public contract y
 ### `PATCH|PUT|DELETE /api/videos/{id}/`
 - Auth: required (owner only)
 - Update serializer is metadata-only:
-  - writable: `title`, `description`, `category`, `thumbnail`
+  - writable: `title`, `description`, `category`, `thumbnail`, `visibility` (`public|private`)
   - read-only: includes `file` (cannot replace video file through this route)
 - Response: video object (for update)
 
