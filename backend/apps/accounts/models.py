@@ -91,11 +91,9 @@ class Video(models.Model):
     ]
 
     VISIBILITY_PUBLIC = 'public'
-    VISIBILITY_UNLISTED = 'unlisted'
     VISIBILITY_PRIVATE = 'private'
     VISIBILITY_CHOICES = [
         (VISIBILITY_PUBLIC, 'Public'),
-        (VISIBILITY_UNLISTED, 'Unlisted'),
         (VISIBILITY_PRIVATE, 'Private'),
     ]
 

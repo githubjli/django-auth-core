@@ -659,15 +659,6 @@ class VideoAPITestCase(APITestCase):
             },
             format='multipart',
         ).data
-        unlisted_video = self.client.post(
-            reverse('video-list-create'),
-            {
-                'title': 'Unlisted item',
-                'file': SimpleUploadedFile('unlisted-item.mp4', b'video-bytes', content_type='video/mp4'),
-            },
-            format='multipart',
-        ).data
-        Video.objects.filter(pk=unlisted_video['id']).update(visibility=Video.VISIBILITY_UNLISTED)
         self.client.force_authenticate(user=None)
 
         list_response = self.client.get(reverse('public-video-list'))
@@ -675,7 +666,6 @@ class VideoAPITestCase(APITestCase):
         listed_ids = [item['id'] for item in list_response.data['results']]
         self.assertIn(public_video['id'], listed_ids)
         self.assertNotIn(private_video['id'], listed_ids)
-        self.assertNotIn(unlisted_video['id'], listed_ids)
 
         public_detail_response = self.client.get(reverse('public-video-detail', args=[public_video['id']]))
         self.assertEqual(public_detail_response.status_code, status.HTTP_200_OK)
