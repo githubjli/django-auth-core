@@ -31,10 +31,6 @@ class AntMediaLiveAdapter:
         ant_status = payload.get('status') if payload else None
         mapped_status = self.STATUS_MAP.get(ant_status)
 
-        if mapped_status and stream.status != mapped_status:
-            stream.status = mapped_status
-            stream.save(update_fields=['status'])
-
         django_status = stream.status
         effective_status = self._normalize_status(django_status, ant_status)
         status_source = 'ant_media' if ant_status is not None else 'django_control'

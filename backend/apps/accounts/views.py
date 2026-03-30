@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.utils import timezone
 from django.db.models import Count, Exists, F, OuterRef, Q
 from rest_framework import generics, permissions, status
@@ -17,8 +18,9 @@ from apps.accounts.models import (
     VideoComment,
     VideoLike,
     VideoView,
+    generate_stream_key,
 )
-from apps.accounts.permissions import IsStaffOrSuperuser
+from apps.accounts.permissions import IsCreator, IsStaffOrSuperuser
 from apps.accounts.serializers import (
     AccountPreferencesSerializer,
     AccountProfileSerializer,
@@ -245,7 +247,7 @@ class LiveStreamListAPIView(generics.ListAPIView):
 
 class LiveStreamCreateAPIView(generics.CreateAPIView):
     serializer_class = LiveStreamSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsCreator]
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def perform_create(self, serializer):
@@ -291,7 +293,7 @@ class LiveStreamUpdateAPIView(generics.UpdateAPIView):
 
 
 class LiveStreamStatusAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsCreator]
     new_status = LiveStream.STATUS_IDLE
 
     def post(self, request, pk):
@@ -299,23 +301,31 @@ class LiveStreamStatusAPIView(APIView):
         now = timezone.now()
 
         if self.new_status == LiveStream.STATUS_LIVE:
+            if stream.status != LiveStream.STATUS_IDLE:
+                return Response(
+                    {'detail': 'Only idle streams can be started.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
             stream.status = LiveStream.STATUS_LIVE
             stream.started_at = now
             stream.ended_at = None
             stream.save(update_fields=['status', 'started_at', 'ended_at'])
         elif self.new_status == LiveStream.STATUS_ENDED:
+            if stream.status != LiveStream.STATUS_LIVE:
+                return Response(
+                    {'detail': 'Only live streams can be ended.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
             stream.status = LiveStream.STATUS_ENDED
-            if stream.started_at is None:
-                stream.started_at = now
             stream.ended_at = now
-            stream.save(update_fields=['status', 'started_at', 'ended_at'])
+            stream.save(update_fields=['status', 'ended_at'])
 
         serializer = LiveStreamSerializer(stream, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class LiveStreamPrepareAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsCreator]
 
     def post(self, request, pk):
         stream = generics.get_object_or_404(
@@ -323,30 +333,27 @@ class LiveStreamPrepareAPIView(APIView):
             pk=pk,
             owner=request.user,
         )
-        serializer = LiveStreamSerializer(stream, context={'request': request})
-        adapter = AntMediaLiveAdapter()
-        publish_config = adapter.get_browser_publish_config(stream)
-        if not publish_config.get('ok'):
+        if stream.status != LiveStream.STATUS_IDLE:
             return Response(
-                {
-                    'detail': publish_config.get('message'),
-                    'error': publish_config.get('error'),
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                {'detail': 'Only idle streams can be prepared.'},
+                status=status.HTTP_409_CONFLICT,
             )
-        payload = dict(serializer.data)
-        payload['message'] = 'Live session is prepared for browser publishing.'
-        payload['publish_session'] = {
-            'mode': 'browser',
-            'session_id': stream.stream_key,
-            'expires_at': None,
-            'constraints': {
-                'video': True,
-                'audio': True,
+        stream.stream_key = generate_stream_key()
+        stream.save(update_fields=['stream_key'])
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = serializer.data
+        return Response(
+            {
+                'id': stream.id,
+                'rtmp_base': settings.ANT_MEDIA_RTMP_BASE or None,
+                'stream_key': stream.stream_key,
+                'playback_url': payload.get('playback_url'),
+                'watch_url': payload.get('watch_url'),
+                'status': payload.get('status'),
+                'message': 'Live stream prepared.',
             },
-            'ant_media': publish_config['config'],
-        }
-        return Response(payload, status=status.HTTP_200_OK)
+            status=status.HTTP_200_OK,
+        )
 
 
 class VideoListCreateAPIView(generics.ListCreateAPIView):

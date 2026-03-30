@@ -49,7 +49,7 @@ The internal unified content mapping layer is not part of this public contract y
 ### `GET /api/auth/me`
 - Auth: required
 - Response (200):
-  - `id`, `email`, `first_name`, `last_name`
+  - `id`, `email`, `first_name`, `last_name`, `is_creator`
 
 ---
 
@@ -165,12 +165,12 @@ The internal unified content mapping layer is not part of this public contract y
   - authenticated: `public` + own streams
 
 ### `POST /api/live/create/`
-- Auth: required
+- Auth: required + creator role (`is_creator=true`)
 - Content types: JSON/form/multipart
 - Request fields:
   - **required**: `title`
   - **optional**: `description`, `payment_address`, `category`, `visibility`
-  - read-only server fields include `status`, `stream_key`, `viewer_count`, timestamps
+  - read-only server fields include `status`, `viewer_count`, timestamps
 - Response (201): live stream object
 
 ### `GET /api/live/{id}/`
@@ -190,40 +190,39 @@ The internal unified content mapping layer is not part of this public contract y
 - Response: live stream object
 
 ### `POST /api/live/{id}/start/`
-- Auth: required (owner only)
+- Auth: required + creator role (owner only)
+- Allowed transition: `idle -> live`
+- Invalid transitions return `409 Conflict`
 - Sets stream to live, sets `started_at=now`, `ended_at=null`
 - Response: live stream object
 - Note: this is a Django-side control action; it does not guarantee direct media-server ingest control.
 
 ### `POST /api/live/{id}/prepare/`
-- Auth: required (owner only)
-- Django control-plane handshake for browser publishing.
-- Does **not** transition stream state to `live` by itself.
-- Frontend should use this response as the primary source of browser publish configuration.
-- Media still flows directly from browser to Ant Media (not through Django).
-- Response: live stream object plus:
-  - `publish_session`
-    - `mode` (`browser`)
-    - `session_id` (stable publish session identifier)
-    - `expires_at` (currently `null`)
-    - `constraints` (currently `{ "video": true, "audio": true }`)
-    - `ant_media`
-      - `websocket_url`
-      - `adaptor_script_url`
-      - `stream_id` (uses the stream's canonical `stream_key`)
-      - `app_name`
-      - `publish_mode` (`webrtc`)
+- Auth: required + creator role (owner only)
+- Allowed lifecycle state: `idle` only
+- Invalid lifecycle states return `409 Conflict`
+- Rotates/regenerates stream publish credential (`stream_key`) per successful prepare
+- Response (owner-only compact payload):
+  - `id`
+  - `rtmp_base`
+  - `stream_key`
+  - `playback_url`
+  - `watch_url`
+  - `status`
+  - `message`
 
 ### `POST /api/live/{id}/end/`
-- Auth: required (owner only)
-- Sets stream to ended, sets `ended_at=now` and backfills `started_at` if absent
+- Auth: required + creator role (owner only)
+- Allowed transition: `live -> ended`
+- Invalid transitions return `409 Conflict`
+- Sets stream to ended, sets `ended_at=now`
 - Response: live stream object
 - Note: this is a Django-side control action; it does not guarantee direct media-server ingest control.
 
 Live stream object fields:
 - `id`, `owner_id`, `owner_name`, `title`, `description`, `payment_address`, `category`, `category_name`, `visibility`,
 - `status`, `django_status`, `effective_status`, `status_source`, `raw_ant_media_status`,
-- `stream_key`, `rtmp_url`, `playback_url`, `watch_url`, `thumbnail_url`, `preview_image_url`, `snapshot_url`,
+- `rtmp_url`, `playback_url`, `watch_url`, `thumbnail_url`, `preview_image_url`, `snapshot_url`,
 - `viewer_count`, `can_start`, `can_end`, `sync_ok`, `sync_error`, `message`,
 - `started_at`, `ended_at`, `created_at`
 
@@ -235,7 +234,7 @@ Status field meanings:
 - `raw_ant_media_status`: raw status string from Ant Media payload, or `null`
 - `watch_url`: canonical frontend watch/share URL for this live room (viewer-facing route)
 - `playback_url`: media playback URL (HLS `.m3u8`), intentionally separate from `watch_url`
-- `publish_session` (prepare endpoint only): abstract Django-owned publish handshake metadata for frontend control flow, including backend-provided Ant Media browser publish config
+- `stream_key` is intentionally excluded from list/detail/status/update live object responses and is only returned by owner-only `prepare`.
 
 `effective_status` is computed:
 - if Ant Media synced status = `broadcasting` => `live`
