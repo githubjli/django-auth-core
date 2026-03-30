@@ -1446,11 +1446,23 @@ class LiveStreamAPITestCase(APITestCase):
         old_stream_key = stream.stream_key
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        for key in ('id', 'rtmp_base', 'stream_key', 'playback_url', 'watch_url', 'status', 'message'):
+        for key in ('id', 'rtmp_base', 'stream_key', 'playback_url', 'watch_url', 'status', 'message', 'publish_session'):
             self.assertIn(key, response.data)
         self.assertEqual(response.data['rtmp_base'], 'rtmp://media.meownews.online/live')
         self.assertEqual(response.data['message'], 'Live stream prepared.')
         self.assertNotEqual(response.data['stream_key'], old_stream_key)
+        self.assertEqual(response.data['publish_session']['mode'], 'browser')
+        self.assertIn('ant_media', response.data['publish_session'])
+        self.assertEqual(
+            response.data['publish_session']['ant_media']['stream_id'],
+            response.data['stream_key'],
+        )
+        self.assertTrue(
+            response.data['publish_session']['ant_media']['websocket_url'].endswith('/live/websocket')
+        )
+        self.assertTrue(
+            response.data['publish_session']['ant_media']['adaptor_script_url'].endswith('/live/js/webrtc_adaptor.js')
+        )
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
         self.assertEqual(stream.stream_key, response.data['stream_key'])
@@ -1479,6 +1491,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['status'], 'waiting_for_signal')
         self.assertIn('stream_key', response.data)
+        self.assertEqual(response.data['publish_session']['ant_media']['stream_id'], response.data['stream_key'])
 
     def test_prepare_rejects_invalid_lifecycle_state(self):
         owner = self.authenticate(email='prepare-live@example.com')

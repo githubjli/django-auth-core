@@ -367,6 +367,14 @@ class LiveStreamPrepareAPIView(APIView):
                 'watch_url': payload.get('watch_url'),
                 'status': payload.get('status'),
                 'message': 'Live stream prepared.',
+                'publish_session': {
+                    'mode': 'browser',
+                    'ant_media': {
+                        'websocket_url': ant_media_config.get('websocket_url'),
+                        'adaptor_script_url': ant_media_config.get('adaptor_script_url'),
+                        'stream_id': ant_media_config.get('stream_id') or stream.stream_key,
+                    },
+                },
             },
             status=status.HTTP_200_OK,
         )
