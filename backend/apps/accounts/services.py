@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,8 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 
 from apps.accounts.models import LiveStream
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_THUMBNAIL_PNG = base64.b64decode(
@@ -79,6 +82,66 @@ class AntMediaLiveAdapter:
                 'publish_mode': 'webrtc',
             },
         }
+
+    def ensure_broadcast(self, stream: LiveStream) -> dict:
+        if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
+            return {
+                'ok': False,
+                'error': 'ant_media_not_configured',
+                'message': 'Ant Media REST app is not configured.',
+            }
+
+        endpoint = (
+            f"{settings.ANT_MEDIA_BASE_URL}/"
+            f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/create"
+        )
+        payload = {
+            'name': stream.title,
+            'description': stream.description,
+            'streamId': stream.stream_key,
+            'type': 'liveStream',
+        }
+        body = json.dumps(payload).encode('utf-8')
+        logger.debug('ant_media create_broadcast request url=%s payload=%s', endpoint, payload)
+        request_obj = urllib_request.Request(
+            endpoint,
+            data=body,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        try:
+            with urllib_request.urlopen(request_obj, timeout=3) as response:
+                response_body = response.read().decode('utf-8')
+                status_code = getattr(response, 'status', response.getcode())
+        except (error.URLError, TimeoutError) as exc:
+            logger.debug('ant_media create_broadcast failed url=%s error=%s', endpoint, exc)
+            return {
+                'ok': False,
+                'error': 'ant_media_create_failed',
+                'message': 'Unable to create broadcast on Ant Media.',
+            }
+
+        logger.debug(
+            'ant_media create_broadcast response status=%s body=%s',
+            status_code,
+            response_body,
+        )
+        try:
+            response_payload = json.loads(response_body)
+        except (ValueError, json.JSONDecodeError):
+            return {
+                'ok': False,
+                'error': 'invalid_ant_media_payload',
+                'message': 'Invalid Ant Media create broadcast response.',
+            }
+        if not isinstance(response_payload, dict):
+            return {
+                'ok': False,
+                'error': 'invalid_ant_media_payload',
+                'message': 'Invalid Ant Media create broadcast response.',
+            }
+        stream_id = response_payload.get('streamId') or stream.stream_key
+        return {'ok': True, 'stream_id': stream_id}
 
     def _normalize_status(self, db_status: str, ant_status: str | None) -> str:
         if ant_status is not None:

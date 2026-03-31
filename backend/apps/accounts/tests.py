@@ -1435,7 +1435,11 @@ class LiveStreamAPITestCase(APITestCase):
         payload = LiveStreamSerializer(stream).data
         self.assertEqual(payload['watch_url'], f'/live/{stream.id}')
 
-    def test_owner_can_prepare_live_stream_without_transitioning_to_live(self):
+    @patch(
+        'apps.accounts.services.AntMediaLiveAdapter.ensure_broadcast',
+        return_value={'ok': True, 'stream_id': 'prepared-stream-id'},
+    )
+    def test_owner_can_prepare_live_stream_without_transitioning_to_live(self, _mock_ensure):
         owner = self.authenticate()
         stream = LiveStream.objects.create(
             owner=owner,
@@ -1450,6 +1454,7 @@ class LiveStreamAPITestCase(APITestCase):
             self.assertIn(key, response.data)
         self.assertEqual(response.data['rtmp_base'], 'rtmp://media.meownews.online/live')
         self.assertEqual(response.data['message'], 'Live stream prepared.')
+        self.assertEqual(response.data['stream_key'], 'prepared-stream-id')
         self.assertNotEqual(response.data['stream_key'], old_stream_key)
         self.assertEqual(response.data['publish_session']['mode'], 'browser')
         self.assertIn('ant_media', response.data['publish_session'])
@@ -1480,7 +1485,11 @@ class LiveStreamAPITestCase(APITestCase):
         ANT_MEDIA_SYNC_STATUS=True,
     )
     @patch('apps.accounts.services.urllib_request.urlopen')
-    def test_prepare_works_when_ant_media_sync_is_enabled(self, mock_urlopen):
+    @patch(
+        'apps.accounts.services.AntMediaLiveAdapter.ensure_broadcast',
+        return_value={'ok': True, 'stream_id': 'prepared-sync-stream-id'},
+    )
+    def test_prepare_works_when_ant_media_sync_is_enabled(self, _mock_ensure, mock_urlopen):
         owner = self.authenticate(email='prepare-sync@example.com')
         stream = LiveStream.objects.create(owner=owner, title='Prepare sync stream', status=LiveStream.STATUS_IDLE)
         response_payload = Mock()
@@ -1490,14 +1499,29 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['status'], 'waiting_for_signal')
-        self.assertIn('stream_key', response.data)
-        self.assertEqual(response.data['publish_session']['ant_media']['stream_id'], response.data['stream_key'])
+        self.assertEqual(response.data['stream_key'], 'prepared-sync-stream-id')
+        self.assertEqual(response.data['publish_session']['ant_media']['stream_id'], 'prepared-sync-stream-id')
 
     def test_prepare_rejects_invalid_lifecycle_state(self):
         owner = self.authenticate(email='prepare-live@example.com')
         stream = LiveStream.objects.create(owner=owner, title='Already live', status=LiveStream.STATUS_LIVE)
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+    @patch(
+        'apps.accounts.services.AntMediaLiveAdapter.ensure_broadcast',
+        return_value={
+            'ok': False,
+            'error': 'ant_media_create_failed',
+            'message': 'Unable to create broadcast on Ant Media.',
+        },
+    )
+    def test_prepare_returns_error_when_ant_broadcast_create_fails(self, _mock_ensure):
+        owner = self.authenticate(email='prepare-create-fail@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Prepare fail stream', status=LiveStream.STATUS_IDLE)
+        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['error'], 'ant_media_create_failed')
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',

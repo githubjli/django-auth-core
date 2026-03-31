@@ -343,6 +343,22 @@ class LiveStreamPrepareAPIView(APIView):
         stream.stream_key = generate_stream_key()
         stream.save(update_fields=['stream_key'])
         adapter = AntMediaLiveAdapter()
+        ensure_result = adapter.ensure_broadcast(stream)
+        if not ensure_result.get('ok'):
+            return Response(
+                {
+                    'detail': ensure_result.get('message'),
+                    'error': ensure_result.get('error'),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        ant_stream_id = ensure_result.get('stream_id') or stream.stream_key
+        if ant_stream_id != stream.stream_key:
+            stream.stream_key = ant_stream_id
+            stream.save(update_fields=['stream_key'])
+        logger.debug('live_prepare persisted stream_id live_id=%s stream_id=%s', stream.id, stream.stream_key)
+
         publish_config = adapter.get_browser_publish_config(stream)
         ant_media_config = publish_config.get('config', {})
 
@@ -358,6 +374,40 @@ class LiveStreamPrepareAPIView(APIView):
 
         serializer = LiveStreamSerializer(stream, context={'request': request})
         payload = serializer.data
+        return Response(
+            {
+                'id': stream.id,
+                'rtmp_base': settings.ANT_MEDIA_RTMP_BASE or None,
+                'stream_key': stream.stream_key,
+                'playback_url': payload.get('playback_url'),
+                'watch_url': payload.get('watch_url'),
+                'status': payload.get('status'),
+                'message': 'Live stream prepared.',
+                'publish_session': {
+                    'mode': 'browser',
+                    'ant_media': {
+                        'websocket_url': ant_media_config.get('websocket_url'),
+                        'adaptor_script_url': ant_media_config.get('adaptor_script_url'),
+                        'stream_id': ant_media_config.get('stream_id') or stream.stream_key,
+                    },
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        ant_media_config = publish_config.get('config', {})
+
+        masked_stream_id = stream.stream_key[:6] + '...' if stream.stream_key else None
+        logger.debug(
+            'live_prepare generated publish session live_id=%s user_id=%s stream_id=%s websocket_url=%s adaptor_script_url=%s',
+            stream.id,
+            request.user.id,
+            masked_stream_id,
+            ant_media_config.get('websocket_url'),
+            ant_media_config.get('adaptor_script_url'),
+        )
+
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = serializer.data
+        logger.debug('live_prepare returning stream_id live_id=%s stream_id=%s', stream.id, stream.stream_key)
         return Response(
             {
                 'id': stream.id,
