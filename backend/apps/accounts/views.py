@@ -23,6 +23,7 @@ from apps.accounts.models import (
     LiveStreamProduct,
     Product,
     SellerStore,
+    StreamPaymentMethod,
     Video,
     VideoComment,
     VideoLike,
@@ -46,6 +47,7 @@ from apps.accounts.serializers import (
     ProductSerializer,
     RegisterSerializer,
     SellerStoreSerializer,
+    StreamPaymentMethodSerializer,
     UserSerializer,
     VideoCommentCreateSerializer,
     VideoCommentSerializer,
@@ -604,6 +606,86 @@ class LiveChatMessageModerationAPIView(APIView):
             except Exception:  # pragma: no cover
                 logger.debug('live chat ws broadcast failed for delete action', exc_info=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LivePaymentMethodManageListCreateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def _stream(self, request, pk):
+        return generics.get_object_or_404(LiveStream, pk=pk, owner=request.user)
+
+    def get(self, request, pk):
+        stream = self._stream(request, pk)
+        queryset = StreamPaymentMethod.objects.filter(stream=stream).order_by('sort_order', '-created_at', '-id')
+        serializer = StreamPaymentMethodSerializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, pk):
+        stream = self._stream(request, pk)
+        serializer = StreamPaymentMethodSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        payment_method = serializer.save(stream=stream)
+        response_serializer = StreamPaymentMethodSerializer(payment_method, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class LivePaymentMethodManageDetailAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def _payment_method(self, request, pk, pm_id):
+        return generics.get_object_or_404(
+            StreamPaymentMethod,
+            pk=pm_id,
+            stream_id=pk,
+            stream__owner=request.user,
+        )
+
+    def patch(self, request, pk, pm_id):
+        payment_method = self._payment_method(request, pk, pm_id)
+        serializer = StreamPaymentMethodSerializer(
+            payment_method,
+            data=request.data,
+            partial=True,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        payment_method = serializer.save()
+        response_serializer = StreamPaymentMethodSerializer(payment_method, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, pk, pm_id):
+        payment_method = self._payment_method(request, pk, pm_id)
+        payment_method.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LivePaymentMethodPublicListAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, pk):
+        stream = generics.get_object_or_404(LiveStream.objects.select_related('owner'), pk=pk)
+        if stream.visibility == LiveStream.VISIBILITY_PRIVATE:
+            user = getattr(request, 'user', None)
+            if not (user and user.is_authenticated and user.id == stream.owner_id):
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        queryset = StreamPaymentMethod.objects.filter(stream=stream, is_active=True).order_by('sort_order', '-created_at', '-id')
+        serializer = StreamPaymentMethodSerializer(queryset, many=True, context={'request': request})
+        payload = [
+            {
+                'id': item['id'],
+                'method_type': item['method_type'],
+                'title': item['title'],
+                'qr_image_url': item['qr_image_url'],
+                'qr_text': item['qr_text'],
+                'wallet_address': item['wallet_address'],
+                'sort_order': item['sort_order'],
+            }
+            for item in serializer.data
+        ]
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 

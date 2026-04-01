@@ -446,3 +446,34 @@ class LiveChatMessage(models.Model):
 
     class Meta:
         ordering = ['id']
+
+
+class StreamPaymentMethod(models.Model):
+    TYPE_WATCH_QR = 'watch_qr'
+    TYPE_PAY_QR = 'pay_qr'
+    TYPE_PAID_PROGRAM_QR = 'paid_program_qr'
+    TYPE_CRYPTO_ADDRESS = 'crypto_address'
+    METHOD_TYPE_CHOICES = [
+        (TYPE_WATCH_QR, 'Watch QR'),
+        (TYPE_PAY_QR, 'Pay QR'),
+        (TYPE_PAID_PROGRAM_QR, 'Paid Programming QR'),
+        (TYPE_CRYPTO_ADDRESS, 'Crypto Address'),
+    ]
+
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.CASCADE,
+        related_name='payment_methods',
+    )
+    method_type = models.CharField(max_length=32, choices=METHOD_TYPE_CHOICES)
+    title = models.CharField(max_length=255)
+    qr_image = models.FileField(upload_to='live/payment_qr/', null=True, blank=True)
+    qr_text = models.TextField(null=True, blank=True)
+    wallet_address = models.TextField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', '-created_at', '-id']

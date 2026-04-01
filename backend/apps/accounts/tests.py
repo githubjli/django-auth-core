@@ -22,6 +22,7 @@ from apps.accounts.models import (
     LiveStreamProduct,
     Product,
     SellerStore,
+    StreamPaymentMethod,
     Video,
 )
 from apps.accounts.serializers import LiveStreamSerializer
@@ -2171,6 +2172,80 @@ class LiveChatAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(too_long.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class LivePaymentMethodAPITestCase(APITestCase):
+    def create_user(self, email, is_creator=True):
+        return User.objects.create_user(
+            email=email,
+            password='strong-pass-123',
+            first_name='Pay',
+            last_name='Owner',
+            is_creator=is_creator,
+        )
+
+    def test_owner_can_manage_payment_methods(self):
+        owner = self.create_user('payment-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Payment stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=owner)
+
+        create_response = self.client.post(
+            reverse('live-payment-methods-manage', args=[stream.id]),
+            {
+                'method_type': StreamPaymentMethod.TYPE_PAY_QR,
+                'title': 'Pay QR',
+                'qr_text': 'pay://example',
+                'wallet_address': '0xabc',
+                'sort_order': 2,
+            },
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        pm_id = create_response.data['id']
+
+        list_response = self.client.get(reverse('live-payment-methods-manage', args=[stream.id]))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+
+        patch_response = self.client.patch(
+            reverse('live-payment-methods-manage-detail', args=[stream.id, pm_id]),
+            {'title': 'Updated Pay QR', 'is_active': False},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['title'], 'Updated Pay QR')
+        self.assertFalse(patch_response.data['is_active'])
+
+        delete_response = self.client.delete(reverse('live-payment-methods-manage-detail', args=[stream.id, pm_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_public_endpoint_returns_only_active_methods(self):
+        owner = self.create_user('payment-public-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Payment public stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        StreamPaymentMethod.objects.create(
+            stream=stream,
+            method_type=StreamPaymentMethod.TYPE_WATCH_QR,
+            title='Watch QR',
+            qr_text='watch://qr',
+            is_active=True,
+            sort_order=1,
+        )
+        StreamPaymentMethod.objects.create(
+            stream=stream,
+            method_type=StreamPaymentMethod.TYPE_PAY_QR,
+            title='Inactive Pay QR',
+            is_active=False,
+            sort_order=0,
+        )
+
+        response = self.client.get(reverse('live-payment-methods-public', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(
+            set(response.data[0].keys()),
+            {'id', 'method_type', 'title', 'qr_image_url', 'qr_text', 'wallet_address', 'sort_order'},
+        )
+        self.assertEqual(response.data[0]['method_type'], StreamPaymentMethod.TYPE_WATCH_QR)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

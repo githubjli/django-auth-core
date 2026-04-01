@@ -11,6 +11,7 @@ from apps.accounts.models import (
     LiveStreamProduct,
     Product,
     SellerStore,
+    StreamPaymentMethod,
     Video,
     VideoComment,
     VideoLike,
@@ -600,6 +601,33 @@ class LiveChatMessageSerializer(serializers.ModelSerializer):
                 'slug': obj.product.store.slug,
             },
         }
+
+
+class StreamPaymentMethodSerializer(serializers.ModelSerializer):
+    qr_image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StreamPaymentMethod
+        fields = (
+            'id',
+            'method_type',
+            'title',
+            'qr_image',
+            'qr_image_url',
+            'qr_text',
+            'wallet_address',
+            'sort_order',
+            'is_active',
+        )
+        read_only_fields = ('id', 'qr_image_url')
+
+    def get_qr_image_url(self, obj):
+        request = self.context.get('request')
+        if not obj.qr_image:
+            return None
+        if request is None:
+            return obj.qr_image.url
+        return request.build_absolute_uri(obj.qr_image.url)
 
 
 class AdminVideoSerializer(VideoSerializer):
