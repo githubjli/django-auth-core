@@ -709,6 +709,11 @@ class LiveStreamStatusAPIView(APIView):
 
 
 class LiveStreamPrepareAPIView(APIView):
+    """Prepare a live stream and return the backend-owned publish stream id.
+
+    Contract: the frontend should publish to Ant Media using the stream id from
+    this response (`stream_key` and `publish_session.ant_media.stream_id`).
+    """
     permission_classes = [permissions.IsAuthenticated, IsCreator]
 
     def post(self, request, pk):
@@ -771,7 +776,9 @@ class LiveStreamPrepareAPIView(APIView):
                     'ant_media': {
                         'websocket_url': ant_media_config.get('websocket_url'),
                         'adaptor_script_url': ant_media_config.get('adaptor_script_url'),
-                        'stream_id': ant_media_config.get('stream_id') or stream.stream_key,
+                        # Keep this tied to persisted backend state to avoid any
+                        # ambiguity about publish stream-id ownership.
+                        'stream_id': stream.stream_key,
                     },
                 },
             },
