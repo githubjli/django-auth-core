@@ -14,7 +14,7 @@ from apps.accounts.content import (
     map_live_to_content,
     map_video_to_content,
 )
-from apps.accounts.models import Category, LiveStream, Video
+from apps.accounts.models import Category, LiveStream, LiveStreamProduct, Product, SellerStore, Video
 from apps.accounts.serializers import LiveStreamSerializer
 
 User = get_user_model()
@@ -1272,6 +1272,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['status_source'], 'django_control')
         self.assertEqual(detail_response.data['status'], 'ready')
+        self.assertEqual(detail_response.data['stream_key'], LiveStream.objects.get(pk=stream_id).stream_key)
         self.assertTrue(detail_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertNotEqual(detail_response.data['watch_url'], detail_response.data['playback_url'])
 
@@ -1364,7 +1365,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['description'], 'Browser studio compatible')
         self.assertEqual(detail_response.data['payment_address'], '0xfeedbeef')
         self.assertEqual(detail_response.data['owner_id'], owner.id)
-        self.assertNotIn('stream_key', detail_response.data)
+        self.assertEqual(detail_response.data['stream_key'], public_stream.stream_key)
 
     def test_public_cannot_retrieve_private_live_stream(self):
         owner = self.create_user('private-streamer@example.com')
@@ -1820,6 +1821,238 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(first_end.status_code, status.HTTP_200_OK)
         repeated_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(repeated_end.status_code, status.HTTP_409_CONFLICT)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class SellerStoreProductAPITestCase(APITestCase):
+    def create_user(self, email='seller@example.com', **extra_fields):
+        defaults = {'first_name': 'Seller', 'last_name': 'User'}
+        defaults.update(extra_fields)
+        return User.objects.create_user(email=email, password='strong-pass-123', **defaults)
+
+    def authenticate(self, email='seller@example.com'):
+        user = self.create_user(email=email)
+        self.client.force_authenticate(user=user)
+        return user
+
+    def test_owner_can_create_and_update_store(self):
+        owner = self.authenticate()
+        create_response = self.client.post(
+            reverse('store-me'),
+            {'name': 'My Store', 'slug': 'my-store', 'description': 'First store'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['owner_id'], owner.id)
+        self.assertEqual(create_response.data['owner_name'], owner.display_name)
+        self.assertEqual(create_response.data['slug'], 'my-store')
+
+        patch_response = self.client.patch(
+            reverse('store-me'),
+            {'description': 'Updated description', 'is_active': False},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['description'], 'Updated description')
+        self.assertFalse(patch_response.data['is_active'])
+
+    def test_owner_can_create_update_and_delete_product(self):
+        owner = self.authenticate(email='product-owner@example.com')
+        store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-store')
+
+        create_response = self.client.post(
+            reverse('store-me-products'),
+            {
+                'title': 'Shirt',
+                'slug': 'shirt',
+                'description': 'Cotton shirt',
+                'price_amount': '19.99',
+                'price_currency': 'USD',
+                'stock_quantity': 10,
+                'status': Product.STATUS_ACTIVE,
+            },
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        product_id = create_response.data['id']
+        self.assertEqual(create_response.data['store_id'], store.id)
+
+        patch_response = self.client.patch(
+            reverse('store-me-product-detail', args=[product_id]),
+            {'stock_quantity': 5, 'status': Product.STATUS_INACTIVE},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['stock_quantity'], 5)
+        self.assertEqual(patch_response.data['status'], Product.STATUS_INACTIVE)
+
+        delete_response = self.client.delete(reverse('store-me-product-detail', args=[product_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Product.objects.filter(pk=product_id).exists())
+
+    def test_owner_only_permissions_and_public_visibility(self):
+        owner = self.create_user('owner@example.com')
+        other = self.create_user('other@example.com')
+        store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-shop', is_active=True)
+        active_product = Product.objects.create(
+            store=store,
+            title='Active Product',
+            slug='active-product',
+            price_amount='10.00',
+            price_currency='USD',
+            stock_quantity=3,
+            status=Product.STATUS_ACTIVE,
+        )
+        Product.objects.create(
+            store=store,
+            title='Draft Product',
+            slug='draft-product',
+            price_amount='11.00',
+            price_currency='USD',
+            stock_quantity=3,
+            status=Product.STATUS_DRAFT,
+        )
+
+        self.client.force_authenticate(user=other)
+        forbidden_response = self.client.get(reverse('store-me-product-detail', args=[active_product.id]))
+        self.assertEqual(forbidden_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.client.force_authenticate(user=None)
+        public_store_response = self.client.get(reverse('public-store-detail', args=[store.slug]))
+        self.assertEqual(public_store_response.status_code, status.HTTP_200_OK)
+        public_products_response = self.client.get(reverse('public-store-products', args=[store.slug]))
+        self.assertEqual(public_products_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(public_products_response.data), 1)
+        self.assertEqual(public_products_response.data[0]['status'], Product.STATUS_ACTIVE)
+
+        store.is_active = False
+        store.save(update_fields=['is_active'])
+        hidden_store_response = self.client.get(reverse('public-store-detail', args=[store.slug]))
+        self.assertEqual(hidden_store_response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class LiveStreamProductBindingAPITestCase(APITestCase):
+    def create_user(self, email, is_creator=True):
+        return User.objects.create_user(
+            email=email,
+            password='strong-pass-123',
+            first_name='Live',
+            last_name='Seller',
+            is_creator=is_creator,
+        )
+
+    def test_owner_can_bind_product_to_own_stream(self):
+        owner = self.create_user('stream-owner@example.com')
+        self.client.force_authenticate(user=owner)
+        store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-live-store')
+        product = Product.objects.create(
+            store=store,
+            title='Bound Product',
+            slug='bound-product',
+            description='Shown on stream',
+            price_amount='29.00',
+            price_currency='USD',
+            stock_quantity=5,
+            status=Product.STATUS_ACTIVE,
+        )
+        stream = LiveStream.objects.create(owner=owner, title='Owner stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+
+        response = self.client.post(
+            reverse('live-stream-products-manage', args=[stream.id]),
+            {'product_id': product.id, 'sort_order': 2, 'is_pinned': True},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['sort_order'], 2)
+        self.assertTrue(response.data['is_pinned'])
+        self.assertEqual(response.data['product']['id'], product.id)
+        self.assertEqual(response.data['product']['store']['slug'], store.slug)
+
+    def test_cannot_bind_another_sellers_product(self):
+        owner = self.create_user('stream-owner-two@example.com')
+        other = self.create_user('other-seller@example.com')
+        owner_store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-two-store')
+        other_store = SellerStore.objects.create(owner=other, name='Other Store', slug='other-store')
+        product = Product.objects.create(
+            store=other_store,
+            title='Other Product',
+            slug='other-product',
+            price_amount='19.00',
+            price_currency='USD',
+            stock_quantity=4,
+            status=Product.STATUS_ACTIVE,
+        )
+        stream = LiveStream.objects.create(owner=owner, title='Owner stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=owner)
+
+        response = self.client.post(
+            reverse('live-stream-products-manage', args=[stream.id]),
+            {'product_id': product.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(LiveStreamProduct.objects.filter(stream=stream, product__store=owner_store).exists())
+
+    def test_public_endpoint_returns_only_active_listings(self):
+        owner = self.create_user('public-live-owner@example.com')
+        store = SellerStore.objects.create(owner=owner, name='Public Store', slug='public-live-store')
+        active_product = Product.objects.create(
+            store=store,
+            title='Active Product',
+            slug='active-live-product',
+            price_amount='15.00',
+            price_currency='USD',
+            stock_quantity=4,
+            status=Product.STATUS_ACTIVE,
+        )
+        inactive_product = Product.objects.create(
+            store=store,
+            title='Inactive Product',
+            slug='inactive-live-product',
+            price_amount='16.00',
+            price_currency='USD',
+            stock_quantity=4,
+            status=Product.STATUS_INACTIVE,
+        )
+        stream = LiveStream.objects.create(owner=owner, title='Public stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        LiveStreamProduct.objects.create(stream=stream, product=active_product, is_active=True)
+        LiveStreamProduct.objects.create(stream=stream, product=inactive_product, is_active=True)
+        LiveStreamProduct.objects.create(stream=stream, product=active_product, is_active=False, sort_order=9)
+
+        response = self.client.get(reverse('live-stream-products-public', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['product']['id'], active_product.id)
+
+    def test_sort_ordering_for_public_endpoint(self):
+        owner = self.create_user('sort-owner@example.com')
+        store = SellerStore.objects.create(owner=owner, name='Sort Store', slug='sort-store')
+        p1 = Product.objects.create(
+            store=store,
+            title='Product One',
+            slug='product-one',
+            price_amount='10.00',
+            price_currency='USD',
+            stock_quantity=4,
+            status=Product.STATUS_ACTIVE,
+        )
+        p2 = Product.objects.create(
+            store=store,
+            title='Product Two',
+            slug='product-two',
+            price_amount='11.00',
+            price_currency='USD',
+            stock_quantity=4,
+            status=Product.STATUS_ACTIVE,
+        )
+        stream = LiveStream.objects.create(owner=owner, title='Sorted stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        first = LiveStreamProduct.objects.create(stream=stream, product=p1, sort_order=5, is_pinned=False)
+        second = LiveStreamProduct.objects.create(stream=stream, product=p2, sort_order=1, is_pinned=True)
+
+        response = self.client.get(reverse('live-stream-products-public', args=[stream.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['binding_id'], second.id)
+        self.assertEqual(response.data[1]['binding_id'], first.id)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

@@ -1,6 +1,9 @@
 from django.urls import path
 
 from apps.accounts.views import (
+    LiveStreamProductManageDetailAPIView,
+    LiveStreamProductManageListCreateAPIView,
+    LiveStreamProductPublicListAPIView,
     LiveStreamPrepareAPIView,
     LiveStreamCreateAPIView,
     LiveStreamDetailAPIView,
@@ -15,6 +18,13 @@ urlpatterns = [
     path('create/', LiveStreamCreateAPIView.as_view(), name='live-stream-create'),
     path('<int:pk>/', LiveStreamDetailAPIView.as_view(), name='live-stream-detail'),
     path('<int:pk>/status/', LiveStreamStatusDetailAPIView.as_view(), name='live-stream-status'),
+    path('<int:pk>/products/', LiveStreamProductPublicListAPIView.as_view(), name='live-stream-products-public'),
+    path('<int:pk>/products/manage/', LiveStreamProductManageListCreateAPIView.as_view(), name='live-stream-products-manage'),
+    path(
+        '<int:pk>/products/manage/<int:binding_id>/',
+        LiveStreamProductManageDetailAPIView.as_view(),
+        name='live-stream-products-manage-detail',
+    ),
     path('<int:pk>/prepare/', LiveStreamPrepareAPIView.as_view(), name='live-stream-prepare'),
     path('<int:pk>/update/', LiveStreamUpdateAPIView.as_view(), name='live-stream-update'),
     path('<int:pk>/start/', LiveStreamStatusAPIView.as_view(new_status='live'), name='live-stream-start'),
