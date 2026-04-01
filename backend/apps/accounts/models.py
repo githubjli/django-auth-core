@@ -250,6 +250,64 @@ class CommentLike(models.Model):
         ]
 
 
+class SellerStore(models.Model):
+    owner = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='seller_store',
+    )
+    name = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=120, unique=True)
+    description = models.TextField(blank=True)
+    logo = models.FileField(upload_to='stores/logos/', blank=True)
+    banner = models.FileField(upload_to='stores/banners/', blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Product(models.Model):
+    STATUS_DRAFT = 'draft'
+    STATUS_ACTIVE = 'active'
+    STATUS_INACTIVE = 'inactive'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_INACTIVE, 'Inactive'),
+    ]
+
+    store = models.ForeignKey(
+        SellerStore,
+        on_delete=models.CASCADE,
+        related_name='products',
+    )
+    title = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=120)
+    description = models.TextField(blank=True)
+    cover_image = models.FileField(upload_to='stores/products/', blank=True)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=3, default='USD')
+    stock_quantity = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['store', 'slug'], name='unique_product_slug_per_store')
+        ]
+
+    def __str__(self) -> str:
+        return self.title
+
+
 class LiveStream(models.Model):
     STATUS_IDLE = 'idle'
     STATUS_LIVE = 'live'
@@ -296,3 +354,187 @@ class LiveStream(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+
+class LiveStreamProduct(models.Model):
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.CASCADE,
+        related_name='product_bindings',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='live_stream_bindings',
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    is_pinned = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    start_at = models.DateTimeField(null=True, blank=True)
+    end_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['sort_order', '-is_pinned', '-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['stream', 'product'],
+                condition=models.Q(is_active=True),
+                name='unique_active_stream_product_binding',
+            ),
+        ]
+
+
+class LiveChatRoom(models.Model):
+    stream = models.OneToOneField(
+        LiveStream,
+        on_delete=models.CASCADE,
+        related_name='chat_room',
+    )
+    is_enabled = models.BooleanField(default=True)
+    slow_mode_seconds = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class LiveChatMessage(models.Model):
+    TYPE_TEXT = 'text'
+    TYPE_SYSTEM = 'system'
+    TYPE_PRODUCT = 'product'
+    TYPE_PAYMENT = 'payment'
+    MESSAGE_TYPE_CHOICES = [
+        (TYPE_TEXT, 'Text'),
+        (TYPE_SYSTEM, 'System'),
+        (TYPE_PRODUCT, 'Product'),
+        (TYPE_PAYMENT, 'Payment'),
+    ]
+
+    room = models.ForeignKey(
+        LiveChatRoom,
+        on_delete=models.CASCADE,
+        related_name='messages',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='live_chat_messages',
+    )
+    message_type = models.CharField(max_length=20, choices=MESSAGE_TYPE_CHOICES, default=TYPE_TEXT)
+    content = models.TextField(blank=True)
+    is_deleted = models.BooleanField(default=False)
+    is_pinned = models.BooleanField(default=False)
+    reply_to = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='replies',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='chat_messages',
+    )
+    payment_reference = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+
+
+class StreamPaymentMethod(models.Model):
+    TYPE_WATCH_QR = 'watch_qr'
+    TYPE_PAY_QR = 'pay_qr'
+    TYPE_PAID_PROGRAM_QR = 'paid_program_qr'
+    TYPE_CRYPTO_ADDRESS = 'crypto_address'
+    METHOD_TYPE_CHOICES = [
+        (TYPE_WATCH_QR, 'Watch QR'),
+        (TYPE_PAY_QR, 'Pay QR'),
+        (TYPE_PAID_PROGRAM_QR, 'Paid Programming QR'),
+        (TYPE_CRYPTO_ADDRESS, 'Crypto Address'),
+    ]
+
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.CASCADE,
+        related_name='payment_methods',
+    )
+    method_type = models.CharField(max_length=32, choices=METHOD_TYPE_CHOICES)
+    title = models.CharField(max_length=255)
+    qr_image = models.FileField(upload_to='live/payment_qr/', null=True, blank=True)
+    qr_text = models.TextField(null=True, blank=True)
+    wallet_address = models.TextField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', '-created_at', '-id']
+
+
+class PaymentOrder(models.Model):
+    TYPE_TIP = 'tip'
+    TYPE_PRODUCT = 'product'
+    TYPE_PAID_PROGRAM = 'paid_program'
+    ORDER_TYPE_CHOICES = [
+        (TYPE_TIP, 'Tip'),
+        (TYPE_PRODUCT, 'Product'),
+        (TYPE_PAID_PROGRAM, 'Paid Program'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_FAILED = 'failed'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_FAILED, 'Failed'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    payment_method = models.ForeignKey(
+        StreamPaymentMethod,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    order_type = models.CharField(max_length=24, choices=ORDER_TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default='USD')
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    external_reference = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']

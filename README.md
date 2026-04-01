@@ -95,6 +95,21 @@ REDIS_URL=redis://127.0.0.1:6379/0
 - `make test` - run the current auth/accounts test suite (`apps.accounts`)
 - `make check` - run Django system checks
 
+## Live chat websocket (additive to REST)
+
+- REST chat endpoints remain supported under `/api/live/<id>/chat/messages/`.
+- Websocket endpoint: `ws://<host>/ws/live/<id>/chat/?token=<jwt_access_token>`
+- Client send shape:
+  - `{ "action": "post_message", "data": { "message_type": "text", "content": "hello" } }`
+- Server event shape:
+  - `{ "type": "message_created|message_updated|message_deleted", "message": {...} }`
+- Websocket requires authenticated JWT token in query string.
+- Channel layer uses Redis via `REDIS_URL`.
+
+## Live viewer data notes
+
+Current live detail endpoints (`GET /api/live/<id>/` and `GET /api/live/<id>/status/`) expose a stable snake_case `viewer_count` field suitable for a Viewer & Chat panel.
+
 ## Auth Core APIs (JWT)
 
 Base path: `/api/auth`
