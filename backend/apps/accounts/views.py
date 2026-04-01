@@ -15,6 +15,8 @@ from apps.accounts.models import (
     ChannelSubscription,
     CommentLike,
     LiveStream,
+    Product,
+    SellerStore,
     Video,
     VideoComment,
     VideoLike,
@@ -30,7 +32,9 @@ from apps.accounts.serializers import (
     LiveStreamSerializer,
     EmailTokenObtainPairSerializer,
     PublicCategorySerializer,
+    ProductSerializer,
     RegisterSerializer,
+    SellerStoreSerializer,
     UserSerializer,
     VideoCommentCreateSerializer,
     VideoCommentSerializer,
@@ -231,6 +235,110 @@ class AdminVideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         return annotate_videos_for_request(Video.objects.all(), self.request)
 
 
+class SellerStoreMeAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def get(self, request):
+        store = SellerStore.objects.filter(owner=request.user).select_related('owner').first()
+        if store is None:
+            return Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SellerStoreSerializer(store, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        if SellerStore.objects.filter(owner=request.user).exists():
+            return Response({'detail': 'Store already exists.'}, status=status.HTTP_409_CONFLICT)
+        serializer = SellerStoreSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        store = serializer.save(owner=request.user)
+        response_serializer = SellerStoreSerializer(store, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+    def patch(self, request):
+        store = SellerStore.objects.filter(owner=request.user).select_related('owner').first()
+        if store is None:
+            return Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SellerStoreSerializer(store, data=request.data, partial=True, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        store = serializer.save()
+        response_serializer = SellerStoreSerializer(store, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+
+class SellerStoreMeProductListCreateAPIView(generics.ListCreateAPIView):
+    serializer_class = ProductSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+    pagination_class = None
+
+    def _store(self):
+        return SellerStore.objects.filter(owner=self.request.user).first()
+
+    def get_queryset(self):
+        store = self._store()
+        if store is None:
+            return Product.objects.none()
+        return Product.objects.filter(store=store).order_by('-created_at', '-id')
+
+    def list(self, request, *args, **kwargs):
+        if self._store() is None:
+            return Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return super().list(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        store = self._store()
+        if store is None:
+            return Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(store=store)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+class SellerStoreMeProductDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = ProductSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def get_queryset(self):
+        return Product.objects.filter(store__owner=self.request.user).select_related('store')
+
+
+class PublicSellerStoreDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = SellerStoreSerializer
+    permission_classes = [permissions.AllowAny]
+    lookup_field = 'slug'
+
+    def get_queryset(self):
+        queryset = SellerStore.objects.select_related('owner')
+        user = getattr(self.request, 'user', None)
+        if user and user.is_authenticated:
+            return queryset.filter(Q(is_active=True) | Q(owner=user)).distinct()
+        return queryset.filter(is_active=True)
+
+
+class PublicSellerStoreProductListAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, slug):
+        user = getattr(request, 'user', None)
+        if user and user.is_authenticated:
+            store = SellerStore.objects.filter(slug=slug).filter(Q(is_active=True) | Q(owner=user)).first()
+        else:
+            store = SellerStore.objects.filter(slug=slug, is_active=True).first()
+        if store is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        products = Product.objects.filter(store=store).order_by('-created_at', '-id')
+        if not (user and user.is_authenticated and store.owner_id == user.id):
+            products = products.filter(status=Product.STATUS_ACTIVE)
+
+        serializer = ProductSerializer(products, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
 
 class LiveStreamListAPIView(generics.ListAPIView):
     serializer_class = LiveStreamSerializer
@@ -268,6 +376,13 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
                 Q(visibility=LiveStream.VISIBILITY_PUBLIC) | Q(owner=user)
             ).distinct()
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
+
+    def retrieve(self, request, *args, **kwargs):
+        stream = self.get_object()
+        serializer = self.get_serializer(stream)
+        payload = dict(serializer.data)
+        payload['stream_key'] = stream.stream_key
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):

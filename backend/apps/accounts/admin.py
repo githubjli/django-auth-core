@@ -5,6 +5,8 @@ from apps.accounts.models import (
     Category,
     ChannelSubscription,
     LiveStream,
+    Product,
+    SellerStore,
     User,
     Video,
     VideoComment,
@@ -153,3 +155,34 @@ class VideoCommentAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('like_count', 'reply_count', 'created_at', 'updated_at')
     autocomplete_fields = ('video', 'user', 'parent')
+
+
+@admin.register(SellerStore)
+class SellerStoreAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'slug', 'owner', 'is_active', 'created_at', 'updated_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('name', 'slug', 'owner__email', 'owner__first_name', 'owner__last_name')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('owner',)
+
+
+@admin.register(Product)
+class ProductAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'title',
+        'slug',
+        'store',
+        'price_amount',
+        'price_currency',
+        'stock_quantity',
+        'status',
+        'created_at',
+        'updated_at',
+    )
+    list_filter = ('status', 'price_currency', 'created_at')
+    search_fields = ('title', 'slug', 'store__name', 'store__slug', 'store__owner__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('store',)

@@ -250,6 +250,64 @@ class CommentLike(models.Model):
         ]
 
 
+class SellerStore(models.Model):
+    owner = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='seller_store',
+    )
+    name = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=120, unique=True)
+    description = models.TextField(blank=True)
+    logo = models.FileField(upload_to='stores/logos/', blank=True)
+    banner = models.FileField(upload_to='stores/banners/', blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Product(models.Model):
+    STATUS_DRAFT = 'draft'
+    STATUS_ACTIVE = 'active'
+    STATUS_INACTIVE = 'inactive'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_INACTIVE, 'Inactive'),
+    ]
+
+    store = models.ForeignKey(
+        SellerStore,
+        on_delete=models.CASCADE,
+        related_name='products',
+    )
+    title = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=120)
+    description = models.TextField(blank=True)
+    cover_image = models.FileField(upload_to='stores/products/', blank=True)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=3, default='USD')
+    stock_quantity = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['store', 'slug'], name='unique_product_slug_per_store')
+        ]
+
+    def __str__(self) -> str:
+        return self.title
+
+
 class LiveStream(models.Model):
     STATUS_IDLE = 'idle'
     STATUS_LIVE = 'live'

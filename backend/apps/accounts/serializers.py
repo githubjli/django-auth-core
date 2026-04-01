@@ -6,6 +6,8 @@ from apps.accounts.models import (
     Category,
     ChannelSubscription,
     LiveStream,
+    Product,
+    SellerStore,
     Video,
     VideoComment,
     VideoLike,
@@ -392,6 +394,89 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         normalized = adapter.normalize_stream_fields(obj)
         obj._normalized_live_fields = normalized
         return normalized
+
+
+class SellerStoreSerializer(serializers.ModelSerializer):
+    owner_id = serializers.IntegerField(source='owner.id', read_only=True)
+    owner_name = serializers.CharField(source='owner.display_name', read_only=True)
+    logo_url = serializers.SerializerMethodField()
+    banner_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SellerStore
+        fields = (
+            'id',
+            'owner_id',
+            'owner_name',
+            'name',
+            'slug',
+            'description',
+            'logo',
+            'logo_url',
+            'banner',
+            'banner_url',
+            'is_active',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = (
+            'id',
+            'owner_id',
+            'owner_name',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_logo_url(self, obj):
+        return self._build_absolute_file_url(obj.logo)
+
+    def get_banner_url(self, obj):
+        return self._build_absolute_file_url(obj.banner)
+
+    def _build_absolute_file_url(self, field_file):
+        request = self.context.get('request')
+        if not field_file:
+            return None
+        if request is None:
+            return field_file.url
+        return request.build_absolute_uri(field_file.url)
+
+
+class ProductSerializer(serializers.ModelSerializer):
+    store_id = serializers.IntegerField(source='store.id', read_only=True)
+    cover_image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = (
+            'id',
+            'store_id',
+            'title',
+            'slug',
+            'description',
+            'cover_image',
+            'cover_image_url',
+            'price_amount',
+            'price_currency',
+            'stock_quantity',
+            'status',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = (
+            'id',
+            'store_id',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_cover_image_url(self, obj):
+        request = self.context.get('request')
+        if not obj.cover_image:
+            return None
+        if request is None:
+            return obj.cover_image.url
+        return request.build_absolute_uri(obj.cover_image.url)
 
 
 class AdminVideoSerializer(VideoSerializer):
