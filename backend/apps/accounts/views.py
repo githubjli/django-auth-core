@@ -269,6 +269,13 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
             ).distinct()
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
+    def retrieve(self, request, *args, **kwargs):
+        stream = self.get_object()
+        serializer = self.get_serializer(stream)
+        payload = dict(serializer.data)
+        payload['stream_key'] = stream.stream_key
+        return Response(payload, status=status.HTTP_200_OK)
+
 
 class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
     serializer_class = LiveStreamSerializer
