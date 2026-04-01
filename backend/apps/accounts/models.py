@@ -477,3 +477,64 @@ class StreamPaymentMethod(models.Model):
 
     class Meta:
         ordering = ['sort_order', '-created_at', '-id']
+
+
+class PaymentOrder(models.Model):
+    TYPE_TIP = 'tip'
+    TYPE_PRODUCT = 'product'
+    TYPE_PAID_PROGRAM = 'paid_program'
+    ORDER_TYPE_CHOICES = [
+        (TYPE_TIP, 'Tip'),
+        (TYPE_PRODUCT, 'Product'),
+        (TYPE_PAID_PROGRAM, 'Paid Program'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_FAILED = 'failed'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_FAILED, 'Failed'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    payment_method = models.ForeignKey(
+        StreamPaymentMethod,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    order_type = models.CharField(max_length=24, choices=ORDER_TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default='USD')
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    external_reference = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']

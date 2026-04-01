@@ -9,6 +9,7 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    PaymentOrder,
     Product,
     SellerStore,
     StreamPaymentMethod,
@@ -628,6 +629,56 @@ class StreamPaymentMethodSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.qr_image.url
         return request.build_absolute_uri(obj.qr_image.url)
+
+
+class PaymentOrderCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentOrder
+        fields = (
+            'id',
+            'product',
+            'payment_method',
+            'order_type',
+            'amount',
+            'currency',
+            'external_reference',
+            'status',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('id', 'status', 'created_at', 'updated_at')
+
+    def validate(self, attrs):
+        order_type = attrs.get('order_type')
+        product = attrs.get('product')
+        if order_type == PaymentOrder.TYPE_PRODUCT and not product:
+            raise serializers.ValidationError({'product': ['This field is required for product orders.']})
+        return attrs
+
+
+class PaymentOrderSerializer(serializers.ModelSerializer):
+    user_id = serializers.IntegerField(source='user.id', read_only=True, allow_null=True)
+    stream_id = serializers.IntegerField(source='stream.id', read_only=True, allow_null=True)
+    product_id = serializers.IntegerField(source='product.id', read_only=True, allow_null=True)
+    payment_method_id = serializers.IntegerField(source='payment_method.id', read_only=True, allow_null=True)
+
+    class Meta:
+        model = PaymentOrder
+        fields = (
+            'id',
+            'user_id',
+            'stream_id',
+            'product_id',
+            'payment_method_id',
+            'order_type',
+            'amount',
+            'currency',
+            'status',
+            'external_reference',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = fields
 
 
 class AdminVideoSerializer(VideoSerializer):

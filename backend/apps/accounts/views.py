@@ -21,6 +21,7 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    PaymentOrder,
     Product,
     SellerStore,
     StreamPaymentMethod,
@@ -45,6 +46,8 @@ from apps.accounts.serializers import (
     EmailTokenObtainPairSerializer,
     PublicCategorySerializer,
     ProductSerializer,
+    PaymentOrderCreateSerializer,
+    PaymentOrderSerializer,
     RegisterSerializer,
     SellerStoreSerializer,
     StreamPaymentMethodSerializer,
@@ -169,6 +172,15 @@ class AccountPreferencesAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AccountPaymentOrderListAPIView(generics.ListAPIView):
+    serializer_class = PaymentOrderSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return PaymentOrder.objects.filter(user=self.request.user).select_related('stream', 'product', 'payment_method')
 
 
 class AdminUserListAPIView(generics.ListAPIView):
@@ -686,6 +698,70 @@ class LivePaymentMethodPublicListAPIView(APIView):
             for item in serializer.data
         ]
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class LivePaymentOrderCreateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def post(self, request, pk):
+        stream = generics.get_object_or_404(LiveStream, pk=pk)
+        serializer = PaymentOrderCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = serializer.save(
+            user=request.user,
+            stream=stream,
+            status=PaymentOrder.STATUS_PENDING,
+        )
+        response_serializer = PaymentOrderSerializer(order)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class LivePaymentOrderDetailAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk, order_id):
+        order = generics.get_object_or_404(
+            PaymentOrder.objects.select_related('stream', 'product', 'payment_method', 'user'),
+            pk=order_id,
+            stream_id=pk,
+        )
+        can_view = request.user.is_staff or order.user_id == request.user.id or order.stream.owner_id == request.user.id
+        if not can_view:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PaymentOrderSerializer(order)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class LivePaymentOrderMarkPaidAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk, order_id):
+        order = generics.get_object_or_404(
+            PaymentOrder.objects.select_related('stream', 'user', 'product'),
+            pk=order_id,
+            stream_id=pk,
+        )
+        if not (request.user.is_staff or order.stream.owner_id == request.user.id):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if order.status != PaymentOrder.STATUS_PAID:
+            order.status = PaymentOrder.STATUS_PAID
+            order.save(update_fields=['status', 'updated_at'])
+
+            chat_room = getattr(order.stream, 'chat_room', None)
+            if chat_room and chat_room.is_enabled:
+                content = f'Payment received: {order.amount} {order.currency}'
+                LiveChatMessage.objects.create(
+                    room=chat_room,
+                    user=None,
+                    message_type=LiveChatMessage.TYPE_PAYMENT,
+                    content=content,
+                    product=order.product,
+                    payment_reference=order.external_reference or str(order.id),
+                )
+
+        serializer = PaymentOrderSerializer(order)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 

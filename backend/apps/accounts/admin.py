@@ -8,6 +8,7 @@ from apps.accounts.models import (
     LiveChatMessage,
     LiveChatRoom,
     LiveStreamProduct,
+    PaymentOrder,
     StreamPaymentMethod,
     Product,
     SellerStore,
@@ -249,3 +250,23 @@ class StreamPaymentMethodAdmin(admin.ModelAdmin):
     ordering = ('sort_order', '-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('stream',)
+
+
+@admin.register(PaymentOrder)
+class PaymentOrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'order_type',
+        'status',
+        'amount',
+        'currency',
+        'stream',
+        'product',
+        'user',
+        'created_at',
+    )
+    list_filter = ('order_type', 'status', 'currency', 'created_at')
+    search_fields = ('external_reference', 'user__email', 'stream__title', 'product__title')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('user', 'stream', 'product', 'payment_method')

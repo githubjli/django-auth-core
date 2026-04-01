@@ -20,6 +20,7 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    PaymentOrder,
     Product,
     SellerStore,
     StreamPaymentMethod,
@@ -2246,6 +2247,109 @@ class LivePaymentMethodAPITestCase(APITestCase):
             {'id', 'method_type', 'title', 'qr_image_url', 'qr_text', 'wallet_address', 'sort_order'},
         )
         self.assertEqual(response.data[0]['method_type'], StreamPaymentMethod.TYPE_WATCH_QR)
+
+
+class PaymentOrderAPITestCase(APITestCase):
+    def create_user(self, email, is_creator=True, is_staff=False):
+        return User.objects.create_user(
+            email=email,
+            password='strong-pass-123',
+            first_name='Order',
+            last_name='User',
+            is_creator=is_creator,
+            is_staff=is_staff,
+        )
+
+    def test_create_pending_tip_order(self):
+        owner = self.create_user('order-owner@example.com')
+        buyer = self.create_user('order-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Order stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=buyer)
+
+        response = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {'order_type': PaymentOrder.TYPE_TIP, 'amount': '5.00', 'currency': 'USD'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], PaymentOrder.STATUS_PENDING)
+        self.assertEqual(response.data['order_type'], PaymentOrder.TYPE_TIP)
+
+    def test_owner_or_staff_can_mark_paid(self):
+        owner = self.create_user('mark-owner@example.com')
+        buyer = self.create_user('mark-buyer@example.com')
+        staff = self.create_user('mark-staff@example.com', is_staff=True)
+        stream = LiveStream.objects.create(owner=owner, title='Mark stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        order = PaymentOrder.objects.create(
+            user=buyer,
+            stream=stream,
+            order_type=PaymentOrder.TYPE_TIP,
+            amount='7.50',
+            currency='USD',
+            status=PaymentOrder.STATUS_PENDING,
+        )
+
+        self.client.force_authenticate(user=owner)
+        owner_mark = self.client.post(reverse('live-payment-order-mark-paid', args=[stream.id, order.id]), format='json')
+        self.assertEqual(owner_mark.status_code, status.HTTP_200_OK)
+        self.assertEqual(owner_mark.data['status'], PaymentOrder.STATUS_PAID)
+
+        order.status = PaymentOrder.STATUS_PENDING
+        order.save(update_fields=['status'])
+        self.client.force_authenticate(user=staff)
+        staff_mark = self.client.post(reverse('live-payment-order-mark-paid', args=[stream.id, order.id]), format='json')
+        self.assertEqual(staff_mark.status_code, status.HTTP_200_OK)
+        self.assertEqual(staff_mark.data['status'], PaymentOrder.STATUS_PAID)
+
+    def test_permissions_and_visibility(self):
+        owner = self.create_user('perm-owner@example.com')
+        buyer = self.create_user('perm-buyer@example.com')
+        other = self.create_user('perm-other@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Perm stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        order = PaymentOrder.objects.create(
+            user=buyer,
+            stream=stream,
+            order_type=PaymentOrder.TYPE_TIP,
+            amount='3.00',
+            currency='USD',
+        )
+
+        self.client.force_authenticate(user=other)
+        denied = self.client.get(reverse('live-payment-order-detail', args=[stream.id, order.id]))
+        self.assertEqual(denied.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.client.force_authenticate(user=buyer)
+        allowed = self.client.get(reverse('live-payment-order-detail', args=[stream.id, order.id]))
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        list_response = self.client.get(reverse('account-payment-orders'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+
+    def test_mark_paid_creates_payment_chat_message_when_room_exists(self):
+        owner = self.create_user('chat-hook-owner@example.com')
+        buyer = self.create_user('chat-hook-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Chat hook stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        room = LiveChatRoom.objects.create(stream=stream, is_enabled=True)
+        order = PaymentOrder.objects.create(
+            user=buyer,
+            stream=stream,
+            order_type=PaymentOrder.TYPE_TIP,
+            amount='9.00',
+            currency='USD',
+            external_reference='tip-123',
+        )
+
+        self.client.force_authenticate(user=owner)
+        response = self.client.post(reverse('live-payment-order-mark-paid', args=[stream.id, order.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], PaymentOrder.STATUS_PAID)
+        self.assertTrue(
+            LiveChatMessage.objects.filter(
+                room=room,
+                message_type=LiveChatMessage.TYPE_PAYMENT,
+                payment_reference='tip-123',
+            ).exists()
+        )
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
