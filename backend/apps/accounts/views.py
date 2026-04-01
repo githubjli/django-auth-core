@@ -5,6 +5,7 @@ from django.db import IntegrityError
 from django.db.models import Count, Exists, F, OuterRef, Q
 from datetime import timedelta
 import logging
+from asgiref.sync import async_to_sync
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -56,6 +57,11 @@ from apps.accounts.services import AntMediaLiveAdapter, generate_video_thumbnail
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+try:
+    from channels.layers import get_channel_layer
+except ModuleNotFoundError:  # pragma: no cover
+    def get_channel_layer():
+        return None
 LEGACY_CATEGORY_SLUG_ALIASES = {
     'tech': 'technology',
 }
@@ -561,15 +567,42 @@ class LiveChatMessageModerationAPIView(APIView):
         message.is_pinned = not message.is_pinned
         message.save(update_fields=['is_pinned'])
         serializer = LiveChatMessageSerializer(message, context={'request': request})
+        channel_layer = get_channel_layer()
+        if channel_layer is not None:
+            try:
+                async_to_sync(channel_layer.group_send)(
+                    f'live_chat_{pk}',
+                    {
+                        'type': 'chat.message',
+                        'event': 'message_updated',
+                        'message': serializer.data,
+                    },
+                )
+            except Exception:  # pragma: no cover
+                logger.debug('live chat ws broadcast failed for pin action', exc_info=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def delete(self, request, pk, message_id):
         message = self._message(request, pk, message_id)
         if message is None:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        deleted_id = message.id
         message.is_deleted = True
         message.content = ''
         message.save(update_fields=['is_deleted', 'content'])
+        channel_layer = get_channel_layer()
+        if channel_layer is not None:
+            try:
+                async_to_sync(channel_layer.group_send)(
+                    f'live_chat_{pk}',
+                    {
+                        'type': 'chat.message',
+                        'event': 'message_deleted',
+                        'message': {'id': deleted_id},
+                    },
+                )
+            except Exception:  # pragma: no cover
+                logger.debug('live chat ws broadcast failed for delete action', exc_info=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

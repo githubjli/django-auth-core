@@ -541,11 +541,14 @@ class LiveChatMessageCreateSerializer(serializers.Serializer):
     product_id = serializers.IntegerField(required=False)
 
     def validate(self, attrs):
-        if attrs.get('message_type', LiveChatMessage.TYPE_TEXT) == LiveChatMessage.TYPE_TEXT:
+        message_type = attrs.get('message_type', LiveChatMessage.TYPE_TEXT)
+        if message_type == LiveChatMessage.TYPE_TEXT:
             content = (attrs.get('content') or '').strip()
             if not content:
                 raise serializers.ValidationError({'content': ['Text messages cannot be empty.']})
             attrs['content'] = content
+        if message_type == LiveChatMessage.TYPE_PRODUCT and not attrs.get('product_id'):
+            raise serializers.ValidationError({'product_id': ['This field is required for product messages.']})
         return attrs
 
 

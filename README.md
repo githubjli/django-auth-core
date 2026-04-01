@@ -95,28 +95,20 @@ REDIS_URL=redis://127.0.0.1:6379/0
 - `make test` - run the current auth/accounts test suite (`apps.accounts`)
 - `make check` - run Django system checks
 
-## Live viewer/chat backend contract notes
+## Live chat websocket (additive to REST)
 
-Current live detail endpoints (`GET /api/live/<id>/` and `GET /api/live/<id>/status/`) already expose a stable snake_case `viewer_count` field suitable for a Viewer & Chat panel.
+- REST chat endpoints remain supported under `/api/live/<id>/chat/messages/`.
+- Websocket endpoint: `ws://<host>/ws/live/<id>/chat/?token=<jwt_access_token>`
+- Client send shape:
+  - `{ "action": "post_message", "data": { "message_type": "text", "content": "hello" } }`
+- Server event shape:
+  - `{ "type": "message_created|message_updated|message_deleted", "message": {...} }`
+- Websocket requires authenticated JWT token in query string.
+- Channel layer uses Redis via `REDIS_URL`.
 
-There is currently no dedicated live-chat backend API under `/api/live/` for:
-- listing live chat messages
-- posting live chat messages
-- polling/realtime chat updates
+## Live viewer data notes
 
-Recommended minimal future API contract (additive):
-- `GET /api/live/<id>/chat/messages/?after_id=<message_id>&limit=50`
-  - returns `{ "results": [...], "next_after_id": <last_id|null> }`
-- `POST /api/live/<id>/chat/messages/`
-  - accepts `{ "content": "..." }`
-  - returns created message payload
-
-Recommended message shape:
-- `id` (monotonic server id)
-- `live_id`
-- `user` `{ id, name, avatar_url }`
-- `content`
-- `created_at`
+Current live detail endpoints (`GET /api/live/<id>/` and `GET /api/live/<id>/status/`) expose a stable snake_case `viewer_count` field suitable for a Viewer & Chat panel.
 
 ## Auth Core APIs (JWT)
 
