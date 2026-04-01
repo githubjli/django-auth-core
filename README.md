@@ -95,6 +95,29 @@ REDIS_URL=redis://127.0.0.1:6379/0
 - `make test` - run the current auth/accounts test suite (`apps.accounts`)
 - `make check` - run Django system checks
 
+## Live viewer/chat backend contract notes
+
+Current live detail endpoints (`GET /api/live/<id>/` and `GET /api/live/<id>/status/`) already expose a stable snake_case `viewer_count` field suitable for a Viewer & Chat panel.
+
+There is currently no dedicated live-chat backend API under `/api/live/` for:
+- listing live chat messages
+- posting live chat messages
+- polling/realtime chat updates
+
+Recommended minimal future API contract (additive):
+- `GET /api/live/<id>/chat/messages/?after_id=<message_id>&limit=50`
+  - returns `{ "results": [...], "next_after_id": <last_id|null> }`
+- `POST /api/live/<id>/chat/messages/`
+  - accepts `{ "content": "..." }`
+  - returns created message payload
+
+Recommended message shape:
+- `id` (monotonic server id)
+- `live_id`
+- `user` `{ id, name, avatar_url }`
+- `content`
+- `created_at`
+
 ## Auth Core APIs (JWT)
 
 Base path: `/api/auth`
