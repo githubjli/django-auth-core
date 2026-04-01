@@ -3,6 +3,7 @@ from django.conf import settings
 from django.utils import timezone
 from django.db import IntegrityError
 from django.db.models import Count, Exists, F, OuterRef, Q
+from datetime import timedelta
 import logging
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
@@ -15,6 +16,8 @@ from apps.accounts.models import (
     Category,
     ChannelSubscription,
     CommentLike,
+    LiveChatMessage,
+    LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
     Product,
@@ -35,6 +38,8 @@ from apps.accounts.serializers import (
     LiveStreamProductListingSerializer,
     LiveStreamProductManageCreateSerializer,
     LiveStreamProductManageUpdateSerializer,
+    LiveChatMessageCreateSerializer,
+    LiveChatMessageSerializer,
     EmailTokenObtainPairSerializer,
     PublicCategorySerializer,
     ProductSerializer,
@@ -443,6 +448,129 @@ class LiveStreamProductPublicListAPIView(APIView):
         )
         serializer = LiveStreamProductListingSerializer(queryset, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class LiveChatMessageListCreateAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def _stream_for_read(self, request, pk):
+        stream = generics.get_object_or_404(LiveStream.objects.select_related('owner'), pk=pk)
+        if stream.visibility == LiveStream.VISIBILITY_PRIVATE:
+            user = getattr(request, 'user', None)
+            if not (user and user.is_authenticated and user.id == stream.owner_id):
+                return None
+        return stream
+
+    def _stream_for_write(self, request, pk):
+        stream = self._stream_for_read(request, pk)
+        user = getattr(request, 'user', None)
+        if stream is None or not (user and user.is_authenticated):
+            return None
+        if stream.visibility != LiveStream.VISIBILITY_PUBLIC and user.id != stream.owner_id:
+            return None
+        return stream
+
+    def _room(self, stream):
+        room, _ = LiveChatRoom.objects.get_or_create(stream=stream)
+        return room
+
+    def get(self, request, pk):
+        stream = self._stream_for_read(request, pk)
+        if stream is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        room = self._room(stream)
+        if not room.is_enabled:
+            return Response({'results': [], 'next_after_id': None}, status=status.HTTP_200_OK)
+
+        after_id = request.query_params.get('after_id')
+        try:
+            limit = int(request.query_params.get('limit', 50) or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        if limit <= 0:
+            limit = 50
+        limit = min(limit, 100)
+        queryset = LiveChatMessage.objects.filter(room=room, is_deleted=False).select_related('user', 'product', 'product__store')
+        if after_id and str(after_id).isdigit():
+            queryset = queryset.filter(id__gt=int(after_id))
+        messages = list(queryset.order_by('id')[:limit])
+        serializer = LiveChatMessageSerializer(messages, many=True, context={'request': request})
+        next_after_id = messages[-1].id if messages else None
+        return Response({'results': serializer.data, 'next_after_id': next_after_id}, status=status.HTTP_200_OK)
+
+    def post(self, request, pk):
+        stream = self._stream_for_write(request, pk)
+        if stream is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        room = self._room(stream)
+        if not room.is_enabled:
+            return Response({'detail': 'Chat is disabled for this stream.'}, status=status.HTTP_409_CONFLICT)
+
+        serializer = LiveChatMessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        if room.slow_mode_seconds > 0:
+            cutoff = timezone.now() - timedelta(seconds=room.slow_mode_seconds)
+            recent_exists = LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists()
+            if recent_exists:
+                return Response({'detail': 'Slow mode is enabled. Please wait before sending again.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        reply_to = None
+        reply_to_id = serializer.validated_data.get('reply_to_id')
+        if reply_to_id:
+            reply_to = generics.get_object_or_404(LiveChatMessage, pk=reply_to_id, room=room)
+
+        product = None
+        product_id = serializer.validated_data.get('product_id')
+        if serializer.validated_data.get('message_type') == LiveChatMessage.TYPE_PRODUCT:
+            if not product_id:
+                return Response({'product_id': ['This field is required for product messages.']}, status=status.HTTP_400_BAD_REQUEST)
+            product = generics.get_object_or_404(Product.objects.select_related('store'), pk=product_id, status=Product.STATUS_ACTIVE)
+
+        message = LiveChatMessage.objects.create(
+            room=room,
+            user=user,
+            message_type=serializer.validated_data.get('message_type', LiveChatMessage.TYPE_TEXT),
+            content=serializer.validated_data.get('content', ''),
+            reply_to=reply_to,
+            product=product,
+        )
+        response_serializer = LiveChatMessageSerializer(message, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class LiveChatMessageModerationAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _message(self, request, pk, message_id):
+        message = generics.get_object_or_404(
+            LiveChatMessage.objects.select_related('room__stream'),
+            pk=message_id,
+            room__stream_id=pk,
+        )
+        is_owner = message.room.stream.owner_id == request.user.id
+        if not (is_owner or request.user.is_staff):
+            return None
+        return message
+
+    def patch(self, request, pk, message_id):
+        message = self._message(request, pk, message_id)
+        if message is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        message.is_pinned = not message.is_pinned
+        message.save(update_fields=['is_pinned'])
+        serializer = LiveChatMessageSerializer(message, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, pk, message_id):
+        message = self._message(request, pk, message_id)
+        if message is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        message.is_deleted = True
+        message.content = ''
+        message.save(update_fields=['is_deleted', 'content'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 

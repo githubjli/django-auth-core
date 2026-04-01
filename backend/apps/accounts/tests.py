@@ -14,7 +14,16 @@ from apps.accounts.content import (
     map_live_to_content,
     map_video_to_content,
 )
-from apps.accounts.models import Category, LiveStream, LiveStreamProduct, Product, SellerStore, Video
+from apps.accounts.models import (
+    Category,
+    LiveChatMessage,
+    LiveChatRoom,
+    LiveStream,
+    LiveStreamProduct,
+    Product,
+    SellerStore,
+    Video,
+)
 from apps.accounts.serializers import LiveStreamSerializer
 
 User = get_user_model()
@@ -2053,6 +2062,115 @@ class LiveStreamProductBindingAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data[0]['binding_id'], second.id)
         self.assertEqual(response.data[1]['binding_id'], first.id)
+
+
+class LiveChatAPITestCase(APITestCase):
+    def create_user(self, email, is_creator=True, is_staff=False):
+        return User.objects.create_user(
+            email=email,
+            password='strong-pass-123',
+            first_name='Chat',
+            last_name='User',
+            is_creator=is_creator,
+            is_staff=is_staff,
+        )
+
+    def test_create_and_fetch_messages(self):
+        owner = self.create_user('chat-owner@example.com')
+        viewer = self.create_user('chat-viewer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Chat stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+
+        self.client.force_authenticate(user=viewer)
+        post_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'Hello chat'},
+            format='json',
+        )
+        self.assertEqual(post_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(post_response.data['content'], 'Hello chat')
+        self.assertEqual(post_response.data['user']['id'], viewer.id)
+
+        self.client.force_authenticate(user=None)
+        get_response = self.client.get(reverse('live-chat-messages', args=[stream.id]))
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(get_response.data['results']), 1)
+        self.assertEqual(get_response.data['results'][0]['content'], 'Hello chat')
+        self.assertEqual(get_response.data['next_after_id'], get_response.data['results'][0]['id'])
+
+    def test_after_id_pagination(self):
+        owner = self.create_user('chat-after-owner@example.com')
+        viewer = self.create_user('chat-after-viewer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='After stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        room = LiveChatRoom.objects.create(stream=stream, is_enabled=True)
+        m1 = LiveChatMessage.objects.create(room=room, user=viewer, message_type='text', content='one')
+        LiveChatMessage.objects.create(room=room, user=viewer, message_type='text', content='two')
+
+        response = self.client.get(reverse('live-chat-messages', args=[stream.id]), {'after_id': m1.id, 'limit': 50})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['results']), 1)
+        self.assertEqual(response.data['results'][0]['content'], 'two')
+
+    def test_pin_delete_permissions(self):
+        owner = self.create_user('chat-mod-owner@example.com')
+        viewer = self.create_user('chat-mod-viewer@example.com')
+        other = self.create_user('chat-mod-other@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Mod stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        room = LiveChatRoom.objects.create(stream=stream, is_enabled=True)
+        message = LiveChatMessage.objects.create(room=room, user=viewer, message_type='text', content='mod me')
+
+        self.client.force_authenticate(user=other)
+        forbidden_pin = self.client.patch(reverse('live-chat-message-pin', args=[stream.id, message.id]), format='json')
+        self.assertEqual(forbidden_pin.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.client.force_authenticate(user=owner)
+        ok_pin = self.client.patch(reverse('live-chat-message-pin', args=[stream.id, message.id]), format='json')
+        self.assertEqual(ok_pin.status_code, status.HTTP_200_OK)
+        self.assertTrue(ok_pin.data['is_pinned'])
+
+        ok_delete = self.client.delete(reverse('live-chat-message-delete', args=[stream.id, message.id]))
+        self.assertEqual(ok_delete.status_code, status.HTTP_204_NO_CONTENT)
+        message.refresh_from_db()
+        self.assertTrue(message.is_deleted)
+
+    def test_disabled_chat_behavior(self):
+        owner = self.create_user('chat-disabled-owner@example.com')
+        viewer = self.create_user('chat-disabled-viewer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Disabled chat stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        LiveChatRoom.objects.create(stream=stream, is_enabled=False)
+
+        self.client.force_authenticate(user=viewer)
+        post_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'blocked'},
+            format='json',
+        )
+        self.assertEqual(post_response.status_code, status.HTTP_409_CONFLICT)
+
+        self.client.force_authenticate(user=None)
+        get_response = self.client.get(reverse('live-chat-messages', args=[stream.id]))
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data, {'results': [], 'next_after_id': None})
+
+    def test_message_validation(self):
+        owner = self.create_user('chat-validation-owner@example.com')
+        viewer = self.create_user('chat-validation-viewer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Validation stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=viewer)
+
+        empty_text = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': '   '},
+            format='json',
+        )
+        self.assertEqual(empty_text.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('content', empty_text.data)
+
+        too_long = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'x' * 1001},
+            format='json',
+        )
+        self.assertEqual(too_long.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

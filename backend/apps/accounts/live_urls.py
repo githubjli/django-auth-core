@@ -1,6 +1,8 @@
 from django.urls import path
 
 from apps.accounts.views import (
+    LiveChatMessageListCreateAPIView,
+    LiveChatMessageModerationAPIView,
     LiveStreamProductManageDetailAPIView,
     LiveStreamProductManageListCreateAPIView,
     LiveStreamProductPublicListAPIView,
@@ -19,6 +21,9 @@ urlpatterns = [
     path('<int:pk>/', LiveStreamDetailAPIView.as_view(), name='live-stream-detail'),
     path('<int:pk>/status/', LiveStreamStatusDetailAPIView.as_view(), name='live-stream-status'),
     path('<int:pk>/products/', LiveStreamProductPublicListAPIView.as_view(), name='live-stream-products-public'),
+    path('<int:pk>/chat/messages/', LiveChatMessageListCreateAPIView.as_view(), name='live-chat-messages'),
+    path('<int:pk>/chat/messages/<int:message_id>/pin/', LiveChatMessageModerationAPIView.as_view(), name='live-chat-message-pin'),
+    path('<int:pk>/chat/messages/<int:message_id>/', LiveChatMessageModerationAPIView.as_view(), name='live-chat-message-delete'),
     path('<int:pk>/products/manage/', LiveStreamProductManageListCreateAPIView.as_view(), name='live-stream-products-manage'),
     path(
         '<int:pk>/products/manage/<int:binding_id>/',
