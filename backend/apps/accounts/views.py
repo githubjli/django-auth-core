@@ -269,6 +269,13 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
             ).distinct()
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
+    def retrieve(self, request, *args, **kwargs):
+        stream = self.get_object()
+        serializer = self.get_serializer(stream)
+        payload = dict(serializer.data)
+        payload['stream_key'] = stream.stream_key
+        return Response(payload, status=status.HTTP_200_OK)
+
 
 class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
     serializer_class = LiveStreamSerializer
@@ -327,6 +334,11 @@ class LiveStreamStatusAPIView(APIView):
 
 
 class LiveStreamPrepareAPIView(APIView):
+    """Prepare a live stream and return the backend-owned publish stream id.
+
+    Contract: the frontend should publish to Ant Media using the stream id from
+    this response (`stream_key` and `publish_session.ant_media.stream_id`).
+    """
     permission_classes = [permissions.IsAuthenticated, IsCreator]
 
     def post(self, request, pk):
@@ -389,7 +401,9 @@ class LiveStreamPrepareAPIView(APIView):
                     'ant_media': {
                         'websocket_url': ant_media_config.get('websocket_url'),
                         'adaptor_script_url': ant_media_config.get('adaptor_script_url'),
-                        'stream_id': ant_media_config.get('stream_id') or stream.stream_key,
+                        # Keep this tied to persisted backend state to avoid any
+                        # ambiguity about publish stream-id ownership.
+                        'stream_id': stream.stream_key,
                     },
                 },
             },

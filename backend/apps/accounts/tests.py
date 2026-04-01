@@ -1272,6 +1272,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['category_name'], 'Technology')
         self.assertEqual(detail_response.data['status_source'], 'django_control')
         self.assertEqual(detail_response.data['status'], 'ready')
+        self.assertEqual(detail_response.data['stream_key'], LiveStream.objects.get(pk=stream_id).stream_key)
         self.assertTrue(detail_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertNotEqual(detail_response.data['watch_url'], detail_response.data['playback_url'])
 
@@ -1364,7 +1365,7 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['description'], 'Browser studio compatible')
         self.assertEqual(detail_response.data['payment_address'], '0xfeedbeef')
         self.assertEqual(detail_response.data['owner_id'], owner.id)
-        self.assertNotIn('stream_key', detail_response.data)
+        self.assertEqual(detail_response.data['stream_key'], public_stream.stream_key)
 
     def test_public_cannot_retrieve_private_live_stream(self):
         owner = self.create_user('private-streamer@example.com')
