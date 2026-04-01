@@ -5,6 +5,9 @@ from apps.accounts.models import (
     Category,
     ChannelSubscription,
     LiveStream,
+    LiveChatMessage,
+    LiveChatRoom,
+    LiveStreamProduct,
     Product,
     SellerStore,
     User,
@@ -186,3 +189,43 @@ class ProductAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('store',)
+
+
+@admin.register(LiveStreamProduct)
+class LiveStreamProductAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'stream',
+        'product',
+        'sort_order',
+        'is_pinned',
+        'is_active',
+        'start_at',
+        'end_at',
+        'created_at',
+    )
+    list_filter = ('is_active', 'is_pinned', 'created_at')
+    search_fields = ('stream__title', 'product__title', 'stream__owner__email', 'product__store__owner__email')
+    ordering = ('sort_order', '-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('stream', 'product')
+
+
+@admin.register(LiveChatRoom)
+class LiveChatRoomAdmin(admin.ModelAdmin):
+    list_display = ('id', 'stream', 'is_enabled', 'slow_mode_seconds', 'created_at')
+    list_filter = ('is_enabled', 'created_at')
+    search_fields = ('stream__title', 'stream__owner__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('stream',)
+
+
+@admin.register(LiveChatMessage)
+class LiveChatMessageAdmin(admin.ModelAdmin):
+    list_display = ('id', 'room', 'user', 'message_type', 'is_pinned', 'is_deleted', 'created_at')
+    list_filter = ('message_type', 'is_pinned', 'is_deleted', 'created_at')
+    search_fields = ('content', 'room__stream__title', 'user__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('room', 'user', 'reply_to', 'product')

@@ -5,7 +5,10 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.accounts.models import (
     Category,
     ChannelSubscription,
+    LiveChatMessage,
+    LiveChatRoom,
     LiveStream,
+    LiveStreamProduct,
     Product,
     SellerStore,
     Video,
@@ -477,6 +480,123 @@ class ProductSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.cover_image.url
         return request.build_absolute_uri(obj.cover_image.url)
+
+
+class LiveStreamProductListingSerializer(serializers.ModelSerializer):
+    binding_id = serializers.IntegerField(source='id', read_only=True)
+    product = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LiveStreamProduct
+        fields = (
+            'binding_id',
+            'sort_order',
+            'is_pinned',
+            'product',
+        )
+        read_only_fields = fields
+
+    def get_product(self, obj):
+        request = self.context.get('request')
+        product = obj.product
+        cover_image_url = None
+        if product.cover_image:
+            cover_image_url = product.cover_image.url if request is None else request.build_absolute_uri(product.cover_image.url)
+        return {
+            'id': product.id,
+            'title': product.title,
+            'description': product.description,
+            'cover_image_url': cover_image_url,
+            'price_amount': str(product.price_amount),
+            'price_currency': product.price_currency,
+            'store': {
+                'id': product.store.id,
+                'name': product.store.name,
+                'slug': product.store.slug,
+            },
+        }
+
+
+class LiveStreamProductManageCreateSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    sort_order = serializers.IntegerField(min_value=0, required=False, default=0)
+    is_pinned = serializers.BooleanField(required=False, default=False)
+    is_active = serializers.BooleanField(required=False, default=True)
+    start_at = serializers.DateTimeField(required=False, allow_null=True)
+    end_at = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class LiveStreamProductManageUpdateSerializer(serializers.Serializer):
+    sort_order = serializers.IntegerField(min_value=0, required=False)
+    is_pinned = serializers.BooleanField(required=False)
+    is_active = serializers.BooleanField(required=False)
+    start_at = serializers.DateTimeField(required=False, allow_null=True)
+    end_at = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class LiveChatMessageCreateSerializer(serializers.Serializer):
+    message_type = serializers.ChoiceField(choices=LiveChatMessage.MESSAGE_TYPE_CHOICES, required=False, default=LiveChatMessage.TYPE_TEXT)
+    content = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    reply_to_id = serializers.IntegerField(required=False)
+    product_id = serializers.IntegerField(required=False)
+
+    def validate(self, attrs):
+        if attrs.get('message_type', LiveChatMessage.TYPE_TEXT) == LiveChatMessage.TYPE_TEXT:
+            content = (attrs.get('content') or '').strip()
+            if not content:
+                raise serializers.ValidationError({'content': ['Text messages cannot be empty.']})
+            attrs['content'] = content
+        return attrs
+
+
+class LiveChatMessageSerializer(serializers.ModelSerializer):
+    live_id = serializers.IntegerField(source='room.stream_id', read_only=True)
+    user = serializers.SerializerMethodField()
+    product = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LiveChatMessage
+        fields = (
+            'id',
+            'live_id',
+            'message_type',
+            'content',
+            'created_at',
+            'is_pinned',
+            'user',
+            'product',
+        )
+        read_only_fields = fields
+
+    def get_user(self, obj):
+        if obj.user is None:
+            return None
+        return {
+            'id': obj.user.id,
+            'name': obj.user.display_name,
+            'avatar_url': None,
+        }
+
+    def get_product(self, obj):
+        if obj.message_type != LiveChatMessage.TYPE_PRODUCT or obj.product is None:
+            return None
+        request = self.context.get('request')
+        cover_image_url = None
+        if obj.product.cover_image:
+            cover_image_url = obj.product.cover_image.url if request is None else request.build_absolute_uri(obj.product.cover_image.url)
+        return {
+            'id': obj.product.id,
+            'title': obj.product.title,
+            'description': obj.product.description,
+            'cover_image_url': cover_image_url,
+            'price_amount': str(obj.product.price_amount),
+            'price_currency': obj.product.price_currency,
+            'store': {
+                'id': obj.product.store.id,
+                'name': obj.product.store.name,
+                'slug': obj.product.store.slug,
+            },
+        }
 
 
 class AdminVideoSerializer(VideoSerializer):

@@ -354,3 +354,95 @@ class LiveStream(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+
+class LiveStreamProduct(models.Model):
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.CASCADE,
+        related_name='product_bindings',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='live_stream_bindings',
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    is_pinned = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    start_at = models.DateTimeField(null=True, blank=True)
+    end_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['sort_order', '-is_pinned', '-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['stream', 'product'],
+                condition=models.Q(is_active=True),
+                name='unique_active_stream_product_binding',
+            ),
+        ]
+
+
+class LiveChatRoom(models.Model):
+    stream = models.OneToOneField(
+        LiveStream,
+        on_delete=models.CASCADE,
+        related_name='chat_room',
+    )
+    is_enabled = models.BooleanField(default=True)
+    slow_mode_seconds = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class LiveChatMessage(models.Model):
+    TYPE_TEXT = 'text'
+    TYPE_SYSTEM = 'system'
+    TYPE_PRODUCT = 'product'
+    TYPE_PAYMENT = 'payment'
+    MESSAGE_TYPE_CHOICES = [
+        (TYPE_TEXT, 'Text'),
+        (TYPE_SYSTEM, 'System'),
+        (TYPE_PRODUCT, 'Product'),
+        (TYPE_PAYMENT, 'Payment'),
+    ]
+
+    room = models.ForeignKey(
+        LiveChatRoom,
+        on_delete=models.CASCADE,
+        related_name='messages',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='live_chat_messages',
+    )
+    message_type = models.CharField(max_length=20, choices=MESSAGE_TYPE_CHOICES, default=TYPE_TEXT)
+    content = models.TextField(blank=True)
+    is_deleted = models.BooleanField(default=False)
+    is_pinned = models.BooleanField(default=False)
+    reply_to = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='replies',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='chat_messages',
+    )
+    payment_reference = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
