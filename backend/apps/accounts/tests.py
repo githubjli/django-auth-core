@@ -14,7 +14,7 @@ from apps.accounts.content import (
     map_live_to_content,
     map_video_to_content,
 )
-from apps.accounts.models import Category, LiveStream, Video
+from apps.accounts.models import Category, LiveStream, Product, SellerStore, Video
 from apps.accounts.serializers import LiveStreamSerializer
 
 User = get_user_model()
@@ -1821,6 +1821,114 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(first_end.status_code, status.HTTP_200_OK)
         repeated_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(repeated_end.status_code, status.HTTP_409_CONFLICT)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class SellerStoreProductAPITestCase(APITestCase):
+    def create_user(self, email='seller@example.com', **extra_fields):
+        defaults = {'first_name': 'Seller', 'last_name': 'User'}
+        defaults.update(extra_fields)
+        return User.objects.create_user(email=email, password='strong-pass-123', **defaults)
+
+    def authenticate(self, email='seller@example.com'):
+        user = self.create_user(email=email)
+        self.client.force_authenticate(user=user)
+        return user
+
+    def test_owner_can_create_and_update_store(self):
+        owner = self.authenticate()
+        create_response = self.client.post(
+            reverse('store-me'),
+            {'name': 'My Store', 'slug': 'my-store', 'description': 'First store'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['owner_id'], owner.id)
+        self.assertEqual(create_response.data['owner_name'], owner.display_name)
+        self.assertEqual(create_response.data['slug'], 'my-store')
+
+        patch_response = self.client.patch(
+            reverse('store-me'),
+            {'description': 'Updated description', 'is_active': False},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['description'], 'Updated description')
+        self.assertFalse(patch_response.data['is_active'])
+
+    def test_owner_can_create_update_and_delete_product(self):
+        owner = self.authenticate(email='product-owner@example.com')
+        store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-store')
+
+        create_response = self.client.post(
+            reverse('store-me-products'),
+            {
+                'title': 'Shirt',
+                'slug': 'shirt',
+                'description': 'Cotton shirt',
+                'price_amount': '19.99',
+                'price_currency': 'USD',
+                'stock_quantity': 10,
+                'status': Product.STATUS_ACTIVE,
+            },
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        product_id = create_response.data['id']
+        self.assertEqual(create_response.data['store_id'], store.id)
+
+        patch_response = self.client.patch(
+            reverse('store-me-product-detail', args=[product_id]),
+            {'stock_quantity': 5, 'status': Product.STATUS_INACTIVE},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['stock_quantity'], 5)
+        self.assertEqual(patch_response.data['status'], Product.STATUS_INACTIVE)
+
+        delete_response = self.client.delete(reverse('store-me-product-detail', args=[product_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Product.objects.filter(pk=product_id).exists())
+
+    def test_owner_only_permissions_and_public_visibility(self):
+        owner = self.create_user('owner@example.com')
+        other = self.create_user('other@example.com')
+        store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-shop', is_active=True)
+        active_product = Product.objects.create(
+            store=store,
+            title='Active Product',
+            slug='active-product',
+            price_amount='10.00',
+            price_currency='USD',
+            stock_quantity=3,
+            status=Product.STATUS_ACTIVE,
+        )
+        Product.objects.create(
+            store=store,
+            title='Draft Product',
+            slug='draft-product',
+            price_amount='11.00',
+            price_currency='USD',
+            stock_quantity=3,
+            status=Product.STATUS_DRAFT,
+        )
+
+        self.client.force_authenticate(user=other)
+        forbidden_response = self.client.get(reverse('store-me-product-detail', args=[active_product.id]))
+        self.assertEqual(forbidden_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.client.force_authenticate(user=None)
+        public_store_response = self.client.get(reverse('public-store-detail', args=[store.slug]))
+        self.assertEqual(public_store_response.status_code, status.HTTP_200_OK)
+        public_products_response = self.client.get(reverse('public-store-products', args=[store.slug]))
+        self.assertEqual(public_products_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(public_products_response.data), 1)
+        self.assertEqual(public_products_response.data[0]['status'], Product.STATUS_ACTIVE)
+
+        store.is_active = False
+        store.save(update_fields=['is_active'])
+        hidden_store_response = self.client.get(reverse('public-store-detail', args=[store.slug]))
+        self.assertEqual(hidden_store_response.status_code, status.HTTP_404_NOT_FOUND)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
