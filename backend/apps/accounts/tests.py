@@ -440,6 +440,44 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
         self.assertIsNone(clear_response.data['avatar_url'])
 
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_profile_avatar_contract_prefers_avatar_url_and_reflects_get_after_updates(self):
+        user = self.create_user('avatar-contract@example.com')
+        self.client.force_authenticate(user=user)
+
+        initial_get = self.client.get(reverse('account-profile'))
+        self.assertEqual(initial_get.status_code, status.HTTP_200_OK)
+        self.assertIsNone(initial_get.data['avatar'])
+        self.assertIsNone(initial_get.data['avatar_url'])
+
+        upload_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png')},
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(upload_response.data['avatar'])
+        self.assertIsNotNone(upload_response.data['avatar_url'])
+        self.assertTrue(upload_response.data['avatar_url'].startswith('http://testserver/media/avatars/'))
+
+        get_after_upload = self.client.get(reverse('account-profile'))
+        self.assertEqual(get_after_upload.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(get_after_upload.data['avatar'])
+        self.assertTrue(get_after_upload.data['avatar_url'].startswith('http://testserver/media/avatars/'))
+
+        clear_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar_clear': True},
+            format='json',
+        )
+        self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(clear_response.data['avatar_url'])
+
+        get_after_clear = self.client.get(reverse('account-profile'))
+        self.assertEqual(get_after_clear.status_code, status.HTTP_200_OK)
+        self.assertIsNone(get_after_clear.data['avatar'])
+        self.assertIsNone(get_after_clear.data['avatar_url'])
+
     def test_profile_patch_keeps_email_read_only(self):
         user = self.create_user('email-readonly@example.com')
         self.client.force_authenticate(user=user)

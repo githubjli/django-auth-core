@@ -60,6 +60,9 @@ The internal unified content mapping layer is not part of this public contract y
 - Response:
   - existing fields:
     - `display_name`, `first_name`, `last_name`, `avatar`, `avatar_url`, `bio`
+    - avatar field notes:
+      - `avatar`: underlying file field value (nullable)
+      - `avatar_url`: preferred frontend display field; fully qualified URL when avatar exists, else `null`
   - additive identity/role fields:
     - `id`, `email`, `is_creator`, `is_seller`, `is_admin`
   - additive capability fields:
@@ -80,6 +83,9 @@ The internal unified content mapping layer is not part of this public contract y
     - `bio`
     - `avatar` (multipart upload)
     - `avatar_clear` (boolean; when true clears existing avatar)
+  - avatar behavior:
+    - after upload/update, `avatar_url` immediately reflects the latest value
+    - after clear (`avatar_clear=true`), both `avatar` and `avatar_url` become `null`
   - **backward-compatible editable fields**:
     - `first_name`, `last_name`
   - **read-only / ignored on write**:
