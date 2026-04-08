@@ -58,15 +58,51 @@ The internal unified content mapping layer is not part of this public contract y
 ### `GET /api/account/profile`
 - Auth: required
 - Response:
-  - `display_name`, `first_name`, `last_name`, `avatar`, `avatar_url`, `bio`
+  - existing fields:
+    - `display_name`, `first_name`, `last_name`, `avatar`, `avatar_url`, `bio`
+    - avatar field notes:
+      - `avatar`: underlying file field value (nullable)
+      - `avatar_url`: preferred frontend display field; fully qualified URL when avatar exists, else `null`
+  - additive identity/role fields:
+    - `id`, `email`, `is_creator`, `is_seller`, `is_admin`
+  - additive capability fields:
+    - `can_create_live`, `can_manage_store`, `can_accept_payments`
+  - additive seller summary:
+    - `seller_store` object or `null`
+      - when present: `id`, `name`, `slug`, `is_active`
+  - additive counts summary:
+    - `counts` object:
+      - `videos`, `live_streams`, `products`, `payment_methods`, `orders`
 
 ### `PATCH /api/account/profile`
 - Auth: required
 - Content types: JSON/form/multipart
 - Body (partial update):
-  - **optional**: `first_name`, `last_name`, `avatar`, `bio`
+  - **editable (safe)**:
+    - `display_name` (updates underlying `first_name`/`last_name`)
+    - `bio`
+    - `avatar` (multipart upload)
+    - `avatar_clear` (boolean; when true clears existing avatar)
+  - avatar behavior:
+    - after upload/update, `avatar_url` immediately reflects the latest value
+    - after clear (`avatar_clear=true`), both `avatar` and `avatar_url` become `null`
+  - **backward-compatible editable fields**:
+    - `first_name`, `last_name`
+  - **read-only / ignored on write**:
+    - `email`, `id`, role/capability/summary fields (`is_*`, `can_*`, `seller_store`, `counts`)
 - Response:
   - same shape as `GET /profile`
+  - note: newly added dashboard/profile summary fields are read-only additive fields
+
+### `POST /api/account/change-password/`
+- Auth: required
+- Request body:
+  - **required**: `current_password`, `new_password`
+- Validation:
+  - `current_password` must match authenticated user password
+  - `new_password` validated by Django password validators
+- Response (200):
+  - `{ "detail": "Password updated successfully." }`
 
 ### `GET /api/account/preferences`
 - Auth: required
@@ -247,7 +283,67 @@ Status field meanings:
 
 ---
 
-## F. Admin endpoints (`/api/admin`)
+## F. Live Commerce / Payments endpoints (`/api/live` + `/api/account`)
+
+### `GET /api/live/{id}/payment-methods/`
+- Auth: public (private stream remains owner-only visibility)
+- Response: active payment methods only (viewer-safe trimmed fields):
+  - `id`, `method_type`, `title`, `qr_image_url`, `qr_text`, `wallet_address`, `sort_order`
+
+### `POST /api/live/{id}/payments/orders/`
+- Auth: required
+- Request body:
+  - required: `order_type`, `amount`
+  - optional: `currency`, `product`, `payment_method`, `external_reference`
+  - optional idempotency: `client_request_id` or `idempotency_key`
+- Validation hardening:
+  - private streams are not orderable by non-owners
+  - `payment_method` (if provided) must belong to the target live stream and be active
+  - `product` required when `order_type=product`
+  - `product` (if provided) must be active, store-active, and currently active for the target stream binding
+- Idempotency behavior:
+  - if same authenticated user repeats the same payload for the same stream and same request key, server reuses prior order and returns `200`
+  - if same key is reused with a different payload, returns `409`
+- Response:
+  - `201` for newly created order, `200` for idempotent replay
+  - order object fields listed below
+
+### `GET /api/live/{id}/payments/orders/{order_id}/`
+- Auth: required
+- Access: buyer, stream owner, or staff
+- Response: payment order object
+
+### `POST /api/live/{id}/payments/orders/{order_id}/mark-paid/`
+- Auth: required
+- Access: stream owner or staff
+- Body:
+  - optional: `note` (<=1000 chars)
+- Behavior:
+  - transition `pending -> paid` sets `paid_at`, `paid_by`, optional `paid_note`
+  - repeated calls remain idempotent for `status`; optional note can be backfilled if currently empty
+- Response: payment order object
+
+### `GET /api/account/payment-orders/`
+- Auth: required
+- Response: **paginated** payment order list
+- Query params (optional):
+  - `status`: `pending|paid|failed|cancelled`
+  - `live_stream`: integer stream id
+  - `product`: integer product id
+  - `date_from`: `YYYY-MM-DD`
+  - `date_to`: `YYYY-MM-DD`
+  - `page`, `page_size`
+
+Payment order object fields:
+- `id`, `user_id`, `stream_id`, `product_id`, `payment_method_id`,
+- `order_type`, `amount`, `currency`, `status`,
+- `client_request_id`, `external_reference`,
+- `paid_at`, `paid_by_id`, `paid_note`,
+- `created_at`, `updated_at`
+
+---
+
+## G. Admin endpoints (`/api/admin`)
 
 Auth: staff/superuser required.
 
@@ -277,7 +373,7 @@ Admin video object fields:
 
 ---
 
-## G. Public endpoints (`/api/public/...`)
+## H. Public endpoints (`/api/public/...`)
 
 ### Categories
 #### `GET /api/public/categories/`

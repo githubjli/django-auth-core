@@ -532,9 +532,26 @@ class PaymentOrder(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=10, default='USD')
     status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    client_request_id = models.CharField(max_length=128, blank=True, default='')
     external_reference = models.CharField(max_length=255, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    paid_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders_marked_paid',
+    )
+    paid_note = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'stream', 'client_request_id'],
+                condition=~models.Q(client_request_id=''),
+                name='unique_payment_order_request_id_per_user_stream',
+            ),
+        ]
