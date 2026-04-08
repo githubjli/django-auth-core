@@ -632,6 +632,9 @@ class StreamPaymentMethodSerializer(serializers.ModelSerializer):
 
 
 class PaymentOrderCreateSerializer(serializers.ModelSerializer):
+    client_request_id = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=128, write_only=True)
+
     class Meta:
         model = PaymentOrder
         fields = (
@@ -641,6 +644,8 @@ class PaymentOrderCreateSerializer(serializers.ModelSerializer):
             'order_type',
             'amount',
             'currency',
+            'client_request_id',
+            'idempotency_key',
             'external_reference',
             'status',
             'created_at',
@@ -649,10 +654,46 @@ class PaymentOrderCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'status', 'created_at', 'updated_at')
 
     def validate(self, attrs):
+        stream = self.context.get('stream')
+        if stream is None:
+            raise serializers.ValidationError({'detail': ['Missing stream context.']})
+
+        provided_request_id = (attrs.get('client_request_id') or '').strip()
+        provided_idempotency_key = (attrs.get('idempotency_key') or '').strip()
+        if provided_request_id and provided_idempotency_key and provided_request_id != provided_idempotency_key:
+            raise serializers.ValidationError(
+                {'idempotency_key': ['Must match client_request_id when both are provided.']}
+            )
+        attrs['client_request_id'] = provided_request_id or provided_idempotency_key
+
         order_type = attrs.get('order_type')
         product = attrs.get('product')
         if order_type == PaymentOrder.TYPE_PRODUCT and not product:
             raise serializers.ValidationError({'product': ['This field is required for product orders.']})
+
+        payment_method = attrs.get('payment_method')
+        if payment_method:
+            if payment_method.stream_id != stream.id:
+                raise serializers.ValidationError(
+                    {'payment_method': ['Payment method must belong to the target stream.']}
+                )
+            if not payment_method.is_active:
+                raise serializers.ValidationError({'payment_method': ['Payment method is inactive.']})
+
+        if product:
+            if product.status != Product.STATUS_ACTIVE:
+                raise serializers.ValidationError({'product': ['Product is not available for purchase.']})
+            if not product.store.is_active:
+                raise serializers.ValidationError({'product': ['Product store is inactive.']})
+            active_binding_exists = LiveStreamProduct.objects.filter(
+                stream=stream,
+                product=product,
+                is_active=True,
+            ).exists()
+            if not active_binding_exists:
+                raise serializers.ValidationError(
+                    {'product': ['Product is not active for this live stream.']}
+                )
         return attrs
 
 
@@ -661,6 +702,7 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
     stream_id = serializers.IntegerField(source='stream.id', read_only=True, allow_null=True)
     product_id = serializers.IntegerField(source='product.id', read_only=True, allow_null=True)
     payment_method_id = serializers.IntegerField(source='payment_method.id', read_only=True, allow_null=True)
+    paid_by_id = serializers.IntegerField(source='paid_by.id', read_only=True, allow_null=True)
 
     class Meta:
         model = PaymentOrder
@@ -674,7 +716,11 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
             'amount',
             'currency',
             'status',
+            'client_request_id',
             'external_reference',
+            'paid_at',
+            'paid_by_id',
+            'paid_note',
             'created_at',
             'updated_at',
         )

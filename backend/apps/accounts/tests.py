@@ -2275,6 +2275,125 @@ class PaymentOrderAPITestCase(APITestCase):
         self.assertEqual(response.data['status'], PaymentOrder.STATUS_PENDING)
         self.assertEqual(response.data['order_type'], PaymentOrder.TYPE_TIP)
 
+    def test_create_order_idempotency_reuses_existing_order(self):
+        owner = self.create_user('idempotent-owner@example.com')
+        buyer = self.create_user('idempotent-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Idempotent stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=buyer)
+
+        payload = {
+            'order_type': PaymentOrder.TYPE_TIP,
+            'amount': '5.00',
+            'currency': 'USD',
+            'client_request_id': 'req-001',
+        }
+        first = self.client.post(reverse('live-payment-order-create', args=[stream.id]), payload, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self.client.post(reverse('live-payment-order-create', args=[stream.id]), payload, format='json')
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data['id'], second.data['id'])
+
+    def test_create_order_idempotency_rejects_payload_conflict(self):
+        owner = self.create_user('idempotent-conflict-owner@example.com')
+        buyer = self.create_user('idempotent-conflict-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Idempotent conflict stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=buyer)
+
+        first = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_TIP,
+                'amount': '5.00',
+                'currency': 'USD',
+                'client_request_id': 'req-conflict',
+            },
+            format='json',
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        conflict = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_TIP,
+                'amount': '8.00',
+                'currency': 'USD',
+                'client_request_id': 'req-conflict',
+            },
+            format='json',
+        )
+        self.assertEqual(conflict.status_code, status.HTTP_409_CONFLICT)
+
+    def test_create_order_validates_payment_method_and_product_binding(self):
+        owner = self.create_user('validation-owner@example.com')
+        buyer = self.create_user('validation-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Validation stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        other_stream = LiveStream.objects.create(owner=owner, title='Other stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        store = SellerStore.objects.create(owner=owner, name='Store', slug='validation-store')
+        product = Product.objects.create(
+            store=store,
+            title='Bound Product',
+            slug='bound-product',
+            price_amount='10.00',
+            price_currency='USD',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+        pm = StreamPaymentMethod.objects.create(
+            stream=stream,
+            method_type=StreamPaymentMethod.TYPE_PAY_QR,
+            title='PM',
+            is_active=True,
+        )
+        other_pm = StreamPaymentMethod.objects.create(
+            stream=other_stream,
+            method_type=StreamPaymentMethod.TYPE_PAY_QR,
+            title='Other PM',
+            is_active=True,
+        )
+
+        self.client.force_authenticate(user=buyer)
+        valid_response = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_PRODUCT,
+                'amount': '10.00',
+                'currency': 'USD',
+                'product': product.id,
+                'payment_method': pm.id,
+            },
+            format='json',
+        )
+        self.assertEqual(valid_response.status_code, status.HTTP_201_CREATED)
+
+        invalid_pm = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_PRODUCT,
+                'amount': '10.00',
+                'currency': 'USD',
+                'product': product.id,
+                'payment_method': other_pm.id,
+            },
+            format='json',
+        )
+        self.assertEqual(invalid_pm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('payment_method', invalid_pm.data)
+
+    def test_create_order_rejects_private_stream_for_non_owner(self):
+        owner = self.create_user('private-owner@example.com')
+        buyer = self.create_user('private-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Private stream', visibility=LiveStream.VISIBILITY_PRIVATE)
+        self.client.force_authenticate(user=buyer)
+
+        response = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {'order_type': PaymentOrder.TYPE_TIP, 'amount': '1.00', 'currency': 'USD'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_owner_or_staff_can_mark_paid(self):
         owner = self.create_user('mark-owner@example.com')
         buyer = self.create_user('mark-buyer@example.com')
@@ -2290,16 +2409,27 @@ class PaymentOrderAPITestCase(APITestCase):
         )
 
         self.client.force_authenticate(user=owner)
-        owner_mark = self.client.post(reverse('live-payment-order-mark-paid', args=[stream.id, order.id]), format='json')
+        owner_mark = self.client.post(
+            reverse('live-payment-order-mark-paid', args=[stream.id, order.id]),
+            {'note': 'verified on-chain'},
+            format='json',
+        )
         self.assertEqual(owner_mark.status_code, status.HTTP_200_OK)
         self.assertEqual(owner_mark.data['status'], PaymentOrder.STATUS_PAID)
+        self.assertIsNotNone(owner_mark.data['paid_at'])
+        self.assertEqual(owner_mark.data['paid_by_id'], owner.id)
+        self.assertEqual(owner_mark.data['paid_note'], 'verified on-chain')
 
         order.status = PaymentOrder.STATUS_PENDING
-        order.save(update_fields=['status'])
+        order.paid_at = None
+        order.paid_by = None
+        order.paid_note = ''
+        order.save(update_fields=['status', 'paid_at', 'paid_by', 'paid_note'])
         self.client.force_authenticate(user=staff)
         staff_mark = self.client.post(reverse('live-payment-order-mark-paid', args=[stream.id, order.id]), format='json')
         self.assertEqual(staff_mark.status_code, status.HTTP_200_OK)
         self.assertEqual(staff_mark.data['status'], PaymentOrder.STATUS_PAID)
+        self.assertEqual(staff_mark.data['paid_by_id'], staff.id)
 
     def test_permissions_and_visibility(self):
         owner = self.create_user('perm-owner@example.com')
@@ -2323,7 +2453,57 @@ class PaymentOrderAPITestCase(APITestCase):
         self.assertEqual(allowed.status_code, status.HTTP_200_OK)
         list_response = self.client.get(reverse('account-payment-orders'))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data['count'], 1)
+        self.assertEqual(len(list_response.data['results']), 1)
+
+    def test_account_payment_orders_support_filters(self):
+        owner = self.create_user('filter-owner@example.com')
+        buyer = self.create_user('filter-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Filter stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        other_stream = LiveStream.objects.create(owner=owner, title='Filter stream 2', visibility=LiveStream.VISIBILITY_PUBLIC)
+        store = SellerStore.objects.create(owner=owner, name='Filter Store', slug='filter-store')
+        product = Product.objects.create(
+            store=store,
+            title='Filter Product',
+            slug='filter-product',
+            price_amount='12.00',
+            price_currency='USD',
+            stock_quantity=3,
+            status=Product.STATUS_ACTIVE,
+        )
+
+        paid_order = PaymentOrder.objects.create(
+            user=buyer,
+            stream=stream,
+            product=product,
+            order_type=PaymentOrder.TYPE_PRODUCT,
+            amount='12.00',
+            currency='USD',
+            status=PaymentOrder.STATUS_PAID,
+        )
+        PaymentOrder.objects.create(
+            user=buyer,
+            stream=other_stream,
+            order_type=PaymentOrder.TYPE_TIP,
+            amount='3.00',
+            currency='USD',
+            status=PaymentOrder.STATUS_PENDING,
+        )
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(
+            reverse('account-payment-orders'),
+            {
+                'status': PaymentOrder.STATUS_PAID,
+                'live_stream': stream.id,
+                'product': product.id,
+                'date_from': paid_order.created_at.date().isoformat(),
+                'date_to': paid_order.created_at.date().isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['id'], paid_order.id)
 
     def test_mark_paid_creates_payment_chat_message_when_room_exists(self):
         owner = self.create_user('chat-hook-owner@example.com')
