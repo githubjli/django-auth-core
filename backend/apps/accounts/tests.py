@@ -115,11 +115,51 @@ class AuthAPITestCase(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_response.data['access']}")
         me_response = self.client.get(reverse('auth-me'))
         self.assertEqual(me_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(me_response.data.keys()), {'id', 'email', 'first_name', 'last_name', 'is_creator'})
+        self.assertEqual(
+            set(me_response.data.keys()),
+            {'id', 'email', 'display_name', 'first_name', 'last_name', 'avatar', 'avatar_url', 'is_creator', 'is_admin'},
+        )
 
     def test_me_requires_authentication(self):
         response = self.client.get(reverse('auth-me'))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_me_reflects_latest_avatar_after_profile_update(self):
+        user = self.create_user('me-avatar@example.com')
+        self.client.force_authenticate(user=user)
+
+        initial = self.client.get(reverse('auth-me'))
+        self.assertEqual(initial.status_code, status.HTTP_200_OK)
+        self.assertIsNone(initial.data['avatar'])
+        self.assertIsNone(initial.data['avatar_url'])
+
+        patch_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png')},
+            format='multipart',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+
+        me_after_upload = self.client.get(reverse('auth-me'))
+        profile_after_upload = self.client.get(reverse('account-profile'))
+        self.assertEqual(me_after_upload.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_after_upload.status_code, status.HTTP_200_OK)
+        self.assertTrue(me_after_upload.data['avatar_url'].startswith('http://testserver/media/avatars/'))
+        self.assertEqual(me_after_upload.data['avatar_url'], profile_after_upload.data['avatar_url'])
+
+        clear_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar_clear': True},
+            format='json',
+        )
+        self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
+
+        me_after_clear = self.client.get(reverse('auth-me'))
+        profile_after_clear = self.client.get(reverse('account-profile'))
+        self.assertIsNone(me_after_clear.data['avatar'])
+        self.assertIsNone(me_after_clear.data['avatar_url'])
+        self.assertEqual(me_after_clear.data['avatar_url'], profile_after_clear.data['avatar_url'])
 
     def test_admin_login_with_custom_user(self):
         user = self.create_user(
@@ -302,6 +342,19 @@ class AccountMenuAPITestCase(APITestCase):
 
         get_response = self.client.get(reverse('account-profile'))
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data['id'], user.id)
+        self.assertEqual(get_response.data['email'], user.email)
+        self.assertFalse(get_response.data['is_creator'])
+        self.assertFalse(get_response.data['is_seller'])
+        self.assertFalse(get_response.data['is_admin'])
+        self.assertFalse(get_response.data['can_create_live'])
+        self.assertFalse(get_response.data['can_manage_store'])
+        self.assertFalse(get_response.data['can_accept_payments'])
+        self.assertIsNone(get_response.data['seller_store'])
+        self.assertEqual(
+            get_response.data['counts'],
+            {'videos': 0, 'live_streams': 0, 'products': 0, 'payment_methods': 0, 'orders': 0},
+        )
         self.assertEqual(get_response.data['display_name'], 'Menu User')
         self.assertIsNone(get_response.data['avatar_url'])
 
@@ -319,6 +372,202 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertEqual(patch_response.data['display_name'], 'Updated Name')
         self.assertEqual(patch_response.data['bio'], 'About me')
         self.assertIn('/media/avatars/', patch_response.data['avatar_url'])
+        self.assertEqual(patch_response.data['id'], user.id)
+        self.assertEqual(patch_response.data['email'], user.email)
+
+    def test_profile_creator_without_store_shows_capabilities(self):
+        user = self.create_user('creator@example.com', is_creator=True)
+        self.client.force_authenticate(user=user)
+
+        LiveStream.objects.create(owner=user, title='Creator live')
+        response = self.client.get(reverse('account-profile'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_creator'])
+        self.assertFalse(response.data['is_seller'])
+        self.assertFalse(response.data['can_manage_store'])
+        self.assertTrue(response.data['can_create_live'])
+        self.assertTrue(response.data['can_accept_payments'])
+        self.assertEqual(response.data['counts']['live_streams'], 1)
+        self.assertEqual(response.data['counts']['products'], 0)
+
+    def test_profile_seller_with_active_store_summary_and_counts(self):
+        user = self.create_user('seller@example.com')
+        self.client.force_authenticate(user=user)
+        store = SellerStore.objects.create(owner=user, name='Seller Store', slug='seller-store', is_active=True)
+        product = Product.objects.create(
+            store=store,
+            title='Seller Product',
+            slug='seller-product',
+            price_amount='11.00',
+            price_currency='USD',
+            stock_quantity=5,
+            status=Product.STATUS_ACTIVE,
+        )
+        stream = LiveStream.objects.create(owner=user, title='Seller live')
+        StreamPaymentMethod.objects.create(
+            stream=stream,
+            method_type=StreamPaymentMethod.TYPE_PAY_QR,
+            title='Seller PM',
+            is_active=True,
+        )
+        PaymentOrder.objects.create(
+            user=user,
+            stream=stream,
+            product=product,
+            order_type=PaymentOrder.TYPE_PRODUCT,
+            amount='11.00',
+            currency='USD',
+        )
+        Video.objects.create(
+            owner=user,
+            title='Seller video',
+            file=SimpleUploadedFile('seller.mp4', b'video-bytes', content_type='video/mp4'),
+        )
+
+        response = self.client.get(reverse('account-profile'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_seller'])
+        self.assertTrue(response.data['can_manage_store'])
+        self.assertTrue(response.data['can_accept_payments'])
+        self.assertEqual(
+            response.data['seller_store'],
+            {
+                'id': store.id,
+                'name': 'Seller Store',
+                'slug': 'seller-store',
+                'is_active': True,
+            },
+        )
+        self.assertEqual(response.data['counts']['videos'], 1)
+        self.assertEqual(response.data['counts']['live_streams'], 1)
+        self.assertEqual(response.data['counts']['products'], 1)
+        self.assertEqual(response.data['counts']['payment_methods'], 1)
+        self.assertEqual(response.data['counts']['orders'], 1)
+
+    def test_profile_staff_user_has_admin_flag(self):
+        user = self.create_user('staff@example.com', is_staff=True)
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('account-profile'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_admin'])
+
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_profile_patch_supports_display_name_and_avatar_clear(self):
+        user = self.create_user('display-name@example.com', first_name='Old', last_name='Name')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.patch(
+            reverse('account-profile'),
+            {
+                'display_name': 'New Display',
+                'bio': '',
+                'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['display_name'], 'New Display')
+        self.assertEqual(response.data['first_name'], 'New')
+        self.assertEqual(response.data['last_name'], 'Display')
+        self.assertEqual(response.data['bio'], '')
+        self.assertIsNotNone(response.data['avatar_url'])
+
+        clear_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar_clear': True},
+            format='json',
+        )
+        self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(clear_response.data['avatar_url'])
+
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_profile_avatar_contract_prefers_avatar_url_and_reflects_get_after_updates(self):
+        user = self.create_user('avatar-contract@example.com')
+        self.client.force_authenticate(user=user)
+
+        initial_get = self.client.get(reverse('account-profile'))
+        self.assertEqual(initial_get.status_code, status.HTTP_200_OK)
+        self.assertIsNone(initial_get.data['avatar'])
+        self.assertIsNone(initial_get.data['avatar_url'])
+
+        upload_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png')},
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(upload_response.data['avatar'])
+        self.assertIsNotNone(upload_response.data['avatar_url'])
+        self.assertTrue(upload_response.data['avatar_url'].startswith('http://testserver/media/avatars/'))
+
+        get_after_upload = self.client.get(reverse('account-profile'))
+        self.assertEqual(get_after_upload.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(get_after_upload.data['avatar'])
+        self.assertTrue(get_after_upload.data['avatar_url'].startswith('http://testserver/media/avatars/'))
+
+        clear_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar_clear': True},
+            format='json',
+        )
+        self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(clear_response.data['avatar_url'])
+
+        get_after_clear = self.client.get(reverse('account-profile'))
+        self.assertEqual(get_after_clear.status_code, status.HTTP_200_OK)
+        self.assertIsNone(get_after_clear.data['avatar'])
+        self.assertIsNone(get_after_clear.data['avatar_url'])
+
+    def test_profile_patch_keeps_email_read_only(self):
+        user = self.create_user('email-readonly@example.com')
+        self.client.force_authenticate(user=user)
+        response = self.client.patch(
+            reverse('account-profile'),
+            {'email': 'new-email@example.com', 'bio': 'new bio'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['email'], 'email-readonly@example.com')
+        user.refresh_from_db()
+        self.assertEqual(user.email, 'email-readonly@example.com')
+
+    def test_change_password_success(self):
+        user = self.create_user('change-password@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('account-change-password'),
+            {'current_password': 'strong-pass-123', 'new_password': 'new-Strong-pass-456'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['detail'], 'Password updated successfully.')
+        user.refresh_from_db()
+        self.assertTrue(user.check_password('new-Strong-pass-456'))
+
+    def test_change_password_rejects_wrong_current_password(self):
+        user = self.create_user('change-password-wrong@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('account-change-password'),
+            {'current_password': 'wrong-password', 'new_password': 'new-Strong-pass-456'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('current_password', response.data)
+
+    def test_change_password_rejects_weak_password(self):
+        user = self.create_user('change-password-weak@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('account-change-password'),
+            {'current_password': 'strong-pass-123', 'new_password': '123'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('new_password', response.data)
 
     def test_preferences_get_and_patch(self):
         user = self.create_user('prefs@example.com')
@@ -2275,6 +2524,125 @@ class PaymentOrderAPITestCase(APITestCase):
         self.assertEqual(response.data['status'], PaymentOrder.STATUS_PENDING)
         self.assertEqual(response.data['order_type'], PaymentOrder.TYPE_TIP)
 
+    def test_create_order_idempotency_reuses_existing_order(self):
+        owner = self.create_user('idempotent-owner@example.com')
+        buyer = self.create_user('idempotent-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Idempotent stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=buyer)
+
+        payload = {
+            'order_type': PaymentOrder.TYPE_TIP,
+            'amount': '5.00',
+            'currency': 'USD',
+            'client_request_id': 'req-001',
+        }
+        first = self.client.post(reverse('live-payment-order-create', args=[stream.id]), payload, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self.client.post(reverse('live-payment-order-create', args=[stream.id]), payload, format='json')
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data['id'], second.data['id'])
+
+    def test_create_order_idempotency_rejects_payload_conflict(self):
+        owner = self.create_user('idempotent-conflict-owner@example.com')
+        buyer = self.create_user('idempotent-conflict-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Idempotent conflict stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=buyer)
+
+        first = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_TIP,
+                'amount': '5.00',
+                'currency': 'USD',
+                'client_request_id': 'req-conflict',
+            },
+            format='json',
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        conflict = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_TIP,
+                'amount': '8.00',
+                'currency': 'USD',
+                'client_request_id': 'req-conflict',
+            },
+            format='json',
+        )
+        self.assertEqual(conflict.status_code, status.HTTP_409_CONFLICT)
+
+    def test_create_order_validates_payment_method_and_product_binding(self):
+        owner = self.create_user('validation-owner@example.com')
+        buyer = self.create_user('validation-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Validation stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        other_stream = LiveStream.objects.create(owner=owner, title='Other stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        store = SellerStore.objects.create(owner=owner, name='Store', slug='validation-store')
+        product = Product.objects.create(
+            store=store,
+            title='Bound Product',
+            slug='bound-product',
+            price_amount='10.00',
+            price_currency='USD',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+        pm = StreamPaymentMethod.objects.create(
+            stream=stream,
+            method_type=StreamPaymentMethod.TYPE_PAY_QR,
+            title='PM',
+            is_active=True,
+        )
+        other_pm = StreamPaymentMethod.objects.create(
+            stream=other_stream,
+            method_type=StreamPaymentMethod.TYPE_PAY_QR,
+            title='Other PM',
+            is_active=True,
+        )
+
+        self.client.force_authenticate(user=buyer)
+        valid_response = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_PRODUCT,
+                'amount': '10.00',
+                'currency': 'USD',
+                'product': product.id,
+                'payment_method': pm.id,
+            },
+            format='json',
+        )
+        self.assertEqual(valid_response.status_code, status.HTTP_201_CREATED)
+
+        invalid_pm = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {
+                'order_type': PaymentOrder.TYPE_PRODUCT,
+                'amount': '10.00',
+                'currency': 'USD',
+                'product': product.id,
+                'payment_method': other_pm.id,
+            },
+            format='json',
+        )
+        self.assertEqual(invalid_pm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('payment_method', invalid_pm.data)
+
+    def test_create_order_rejects_private_stream_for_non_owner(self):
+        owner = self.create_user('private-owner@example.com')
+        buyer = self.create_user('private-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Private stream', visibility=LiveStream.VISIBILITY_PRIVATE)
+        self.client.force_authenticate(user=buyer)
+
+        response = self.client.post(
+            reverse('live-payment-order-create', args=[stream.id]),
+            {'order_type': PaymentOrder.TYPE_TIP, 'amount': '1.00', 'currency': 'USD'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_owner_or_staff_can_mark_paid(self):
         owner = self.create_user('mark-owner@example.com')
         buyer = self.create_user('mark-buyer@example.com')
@@ -2290,16 +2658,27 @@ class PaymentOrderAPITestCase(APITestCase):
         )
 
         self.client.force_authenticate(user=owner)
-        owner_mark = self.client.post(reverse('live-payment-order-mark-paid', args=[stream.id, order.id]), format='json')
+        owner_mark = self.client.post(
+            reverse('live-payment-order-mark-paid', args=[stream.id, order.id]),
+            {'note': 'verified on-chain'},
+            format='json',
+        )
         self.assertEqual(owner_mark.status_code, status.HTTP_200_OK)
         self.assertEqual(owner_mark.data['status'], PaymentOrder.STATUS_PAID)
+        self.assertIsNotNone(owner_mark.data['paid_at'])
+        self.assertEqual(owner_mark.data['paid_by_id'], owner.id)
+        self.assertEqual(owner_mark.data['paid_note'], 'verified on-chain')
 
         order.status = PaymentOrder.STATUS_PENDING
-        order.save(update_fields=['status'])
+        order.paid_at = None
+        order.paid_by = None
+        order.paid_note = ''
+        order.save(update_fields=['status', 'paid_at', 'paid_by', 'paid_note'])
         self.client.force_authenticate(user=staff)
         staff_mark = self.client.post(reverse('live-payment-order-mark-paid', args=[stream.id, order.id]), format='json')
         self.assertEqual(staff_mark.status_code, status.HTTP_200_OK)
         self.assertEqual(staff_mark.data['status'], PaymentOrder.STATUS_PAID)
+        self.assertEqual(staff_mark.data['paid_by_id'], staff.id)
 
     def test_permissions_and_visibility(self):
         owner = self.create_user('perm-owner@example.com')
@@ -2323,7 +2702,57 @@ class PaymentOrderAPITestCase(APITestCase):
         self.assertEqual(allowed.status_code, status.HTTP_200_OK)
         list_response = self.client.get(reverse('account-payment-orders'))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data['count'], 1)
+        self.assertEqual(len(list_response.data['results']), 1)
+
+    def test_account_payment_orders_support_filters(self):
+        owner = self.create_user('filter-owner@example.com')
+        buyer = self.create_user('filter-buyer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Filter stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        other_stream = LiveStream.objects.create(owner=owner, title='Filter stream 2', visibility=LiveStream.VISIBILITY_PUBLIC)
+        store = SellerStore.objects.create(owner=owner, name='Filter Store', slug='filter-store')
+        product = Product.objects.create(
+            store=store,
+            title='Filter Product',
+            slug='filter-product',
+            price_amount='12.00',
+            price_currency='USD',
+            stock_quantity=3,
+            status=Product.STATUS_ACTIVE,
+        )
+
+        paid_order = PaymentOrder.objects.create(
+            user=buyer,
+            stream=stream,
+            product=product,
+            order_type=PaymentOrder.TYPE_PRODUCT,
+            amount='12.00',
+            currency='USD',
+            status=PaymentOrder.STATUS_PAID,
+        )
+        PaymentOrder.objects.create(
+            user=buyer,
+            stream=other_stream,
+            order_type=PaymentOrder.TYPE_TIP,
+            amount='3.00',
+            currency='USD',
+            status=PaymentOrder.STATUS_PENDING,
+        )
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(
+            reverse('account-payment-orders'),
+            {
+                'status': PaymentOrder.STATUS_PAID,
+                'live_stream': stream.id,
+                'product': product.id,
+                'date_from': paid_order.created_at.date().isoformat(),
+                'date_to': paid_order.created_at.date().isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['id'], paid_order.id)
 
     def test_mark_paid_creates_payment_chat_message_when_room_exists(self):
         owner = self.create_user('chat-hook-owner@example.com')
