@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.db import IntegrityError
 from django.db.models import Count, Exists, F, OuterRef, Q
 from datetime import timedelta
@@ -33,6 +34,7 @@ from apps.accounts.models import (
 )
 from apps.accounts.permissions import IsCreator, IsStaffOrSuperuser
 from apps.accounts.serializers import (
+    AccountPasswordChangeSerializer,
     AccountPreferencesSerializer,
     AccountProfileSerializer,
     AdminUserSerializer,
@@ -113,6 +115,12 @@ class CommentPagination(PageNumberPagination):
     max_page_size = 100
 
 
+class PaymentOrderPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
 class RegisterAPIView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
@@ -131,7 +139,7 @@ class MeAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        serializer = UserSerializer(request.user)
+        serializer = UserSerializer(request.user, context={'request': request})
         return Response(serializer.data)
 
 
@@ -174,13 +182,52 @@ class AccountPreferencesAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class AccountPasswordChangeAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = AccountPasswordChangeSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        request.user.set_password(serializer.validated_data['new_password'])
+        request.user.save(update_fields=['password'])
+        return Response({'detail': 'Password updated successfully.'}, status=status.HTTP_200_OK)
+
+
 class AccountPaymentOrderListAPIView(generics.ListAPIView):
     serializer_class = PaymentOrderSerializer
     permission_classes = [permissions.IsAuthenticated]
-    pagination_class = None
+    pagination_class = PaymentOrderPagination
 
     def get_queryset(self):
-        return PaymentOrder.objects.filter(user=self.request.user).select_related('stream', 'product', 'payment_method')
+        queryset = PaymentOrder.objects.filter(user=self.request.user).select_related(
+            'stream',
+            'product',
+            'payment_method',
+            'paid_by',
+        )
+
+        status_filter = self.request.query_params.get('status')
+        if status_filter in {choice for choice, _ in PaymentOrder.STATUS_CHOICES}:
+            queryset = queryset.filter(status=status_filter)
+
+        stream_id = self.request.query_params.get('live_stream')
+        if stream_id and str(stream_id).isdigit():
+            queryset = queryset.filter(stream_id=int(stream_id))
+
+        product_id = self.request.query_params.get('product')
+        if product_id and str(product_id).isdigit():
+            queryset = queryset.filter(product_id=int(product_id))
+
+        date_from = parse_date(self.request.query_params.get('date_from') or '')
+        if date_from:
+            queryset = queryset.filter(created_at__date__gte=date_from)
+
+        date_to = parse_date(self.request.query_params.get('date_to') or '')
+        if date_to:
+            queryset = queryset.filter(created_at__date__lte=date_to)
+
+        return queryset
 
 
 class AdminUserListAPIView(generics.ListAPIView):
@@ -706,13 +753,35 @@ class LivePaymentOrderCreateAPIView(APIView):
 
     def post(self, request, pk):
         stream = generics.get_object_or_404(LiveStream, pk=pk)
-        serializer = PaymentOrderCreateSerializer(data=request.data)
+        if stream.visibility == LiveStream.VISIBILITY_PRIVATE and stream.owner_id != request.user.id:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PaymentOrderCreateSerializer(data=request.data, context={'stream': stream})
         serializer.is_valid(raise_exception=True)
-        order = serializer.save(
-            user=request.user,
-            stream=stream,
-            status=PaymentOrder.STATUS_PENDING,
-        )
+
+        client_request_id = serializer.validated_data.get('client_request_id') or ''
+        if client_request_id:
+            existing_order = PaymentOrder.objects.filter(
+                user=request.user,
+                stream=stream,
+                client_request_id=client_request_id,
+            ).select_related('stream', 'product', 'payment_method', 'paid_by').first()
+            if existing_order is not None:
+                same_payload = (
+                    existing_order.order_type == serializer.validated_data.get('order_type')
+                    and existing_order.amount == serializer.validated_data.get('amount')
+                    and existing_order.currency == serializer.validated_data.get('currency')
+                    and existing_order.product_id == getattr(serializer.validated_data.get('product'), 'id', None)
+                    and existing_order.payment_method_id == getattr(serializer.validated_data.get('payment_method'), 'id', None)
+                )
+                if not same_payload:
+                    return Response(
+                        {'detail': 'client_request_id was already used with different payload.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                response_serializer = PaymentOrderSerializer(existing_order)
+                return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        order = serializer.save(user=request.user, stream=stream, status=PaymentOrder.STATUS_PENDING)
         response_serializer = PaymentOrderSerializer(order)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -744,9 +813,16 @@ class LivePaymentOrderMarkPaidAPIView(APIView):
         )
         if not (request.user.is_staff or order.stream.owner_id == request.user.id):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        paid_note = (request.data.get('note') or '').strip()
+        if paid_note and len(paid_note) > 1000:
+            return Response({'note': ['Ensure this field has no more than 1000 characters.']}, status=status.HTTP_400_BAD_REQUEST)
         if order.status != PaymentOrder.STATUS_PAID:
             order.status = PaymentOrder.STATUS_PAID
-            order.save(update_fields=['status', 'updated_at'])
+            order.paid_at = timezone.now()
+            order.paid_by = request.user
+            if paid_note:
+                order.paid_note = paid_note
+            order.save(update_fields=['status', 'paid_at', 'paid_by', 'paid_note', 'updated_at'])
 
             chat_room = getattr(order.stream, 'chat_room', None)
             if chat_room and chat_room.is_enabled:
@@ -759,6 +835,9 @@ class LivePaymentOrderMarkPaidAPIView(APIView):
                     product=order.product,
                     payment_reference=order.external_reference or str(order.id),
                 )
+        elif paid_note and not order.paid_note:
+            order.paid_note = paid_note
+            order.save(update_fields=['paid_note', 'updated_at'])
 
         serializer = PaymentOrderSerializer(order)
         return Response(serializer.data, status=status.HTTP_200_OK)
