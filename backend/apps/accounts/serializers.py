@@ -364,7 +364,12 @@ class VideoSerializer(serializers.ModelSerializer):
         )
 
     def get_owner_avatar_url(self, obj):
-        return None
+        request = self.context.get('request')
+        if not obj.owner.avatar:
+            return None
+        if request is None:
+            return obj.owner.avatar.url
+        return request.build_absolute_uri(obj.owner.avatar.url)
 
     def get_file_url(self, obj):
         return self._build_absolute_file_url(obj.file)
@@ -409,6 +414,8 @@ class VideoSerializer(serializers.ModelSerializer):
 class LiveStreamSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source='owner.id', read_only=True)
     owner_name = serializers.CharField(source='owner.display_name', read_only=True)
+    owner_avatar_url = serializers.SerializerMethodField()
+    creator = serializers.SerializerMethodField()
     category_name = serializers.CharField(source='category.name', read_only=True)
     category = OptionalSlugRelatedField(
         slug_field='slug',
@@ -440,6 +447,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'id',
             'owner_id',
             'owner_name',
+            'owner_avatar_url',
+            'creator',
             'title',
             'description',
             'payment_address',
@@ -471,6 +480,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'id',
             'owner_id',
             'owner_name',
+            'owner_avatar_url',
+            'creator',
             'category_name',
             'status',
             'django_status',
@@ -496,6 +507,21 @@ class LiveStreamSerializer(serializers.ModelSerializer):
 
     def get_rtmp_url(self, obj):
         return self._normalized(obj).get('rtmp_url')
+
+    def get_owner_avatar_url(self, obj):
+        request = self.context.get('request')
+        if not obj.owner.avatar:
+            return None
+        if request is None:
+            return obj.owner.avatar.url
+        return request.build_absolute_uri(obj.owner.avatar.url)
+
+    def get_creator(self, obj):
+        return {
+            'id': obj.owner_id,
+            'name': obj.owner.display_name,
+            'avatar_url': self.get_owner_avatar_url(obj),
+        }
 
     def get_playback_url(self, obj):
         return self._normalized(obj).get('playback_url')

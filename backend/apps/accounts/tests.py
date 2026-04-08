@@ -952,7 +952,9 @@ class VideoAPITestCase(APITestCase):
         )
 
     def test_public_video_contract_fields_are_stable_for_frontend(self):
-        self.authenticate()
+        owner = self.authenticate()
+        owner.avatar = SimpleUploadedFile('owner-avatar.png', b'avatar-bytes', content_type='image/png')
+        owner.save(update_fields=['avatar'])
         video = self.client.post(
             reverse('video-list-create'),
             {
@@ -976,12 +978,14 @@ class VideoAPITestCase(APITestCase):
         self.assertTrue(expected_keys.issubset(set(detail_response.data.keys())))
         self.assertEqual(detail_response.data['category'], 'technology')
         self.assertFalse(detail_response.data['is_liked'])
+        self.assertTrue(detail_response.data['owner_avatar_url'].startswith('http://testserver/media/avatars/'))
 
         list_response = self.client.get(reverse('public-video-list'))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertIn('count', list_response.data)
         self.assertIn('results', list_response.data)
         self.assertTrue(expected_keys.issubset(set(list_response.data['results'][0].keys())))
+        self.assertTrue(list_response.data['results'][0]['owner_avatar_url'].startswith('http://testserver/media/avatars/'))
 
     def test_owner_can_patch_video_metadata_and_manual_thumbnail(self):
         self.authenticate()
@@ -1577,7 +1581,7 @@ class LiveStreamAPITestCase(APITestCase):
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         expected_keys = {
-            'id', 'owner_id', 'owner_name', 'title', 'description', 'payment_address',
+            'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'creator', 'title', 'description', 'payment_address',
             'category', 'visibility', 'status', 'django_status', 'effective_status', 'status_source',
             'raw_ant_media_status',
             'rtmp_url', 'playback_url', 'watch_url', 'thumbnail_url', 'preview_image_url', 'snapshot_url',
@@ -1612,6 +1616,8 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(list_response.data[0]['id'], public_stream.id)
         self.assertEqual(list_response.data[0]['owner_id'], owner.id)
         self.assertEqual(list_response.data[0]['owner_name'], owner.email)
+        self.assertIn('owner_avatar_url', list_response.data[0])
+        self.assertIn('creator', list_response.data[0])
         self.assertEqual(list_response.data[0]['visibility'], LiveStream.VISIBILITY_PUBLIC)
         self.assertEqual(list_response.data[0]['status'], 'ready')
         self.assertEqual(list_response.data[0]['status_source'], 'django_control')
@@ -1625,7 +1631,30 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['description'], 'Browser studio compatible')
         self.assertEqual(detail_response.data['payment_address'], '0xfeedbeef')
         self.assertEqual(detail_response.data['owner_id'], owner.id)
+        self.assertIn('owner_avatar_url', detail_response.data)
+        self.assertEqual(detail_response.data['creator']['id'], owner.id)
         self.assertEqual(detail_response.data['stream_key'], public_stream.stream_key)
+
+    def test_live_list_and_detail_expose_creator_avatar_when_owner_has_avatar(self):
+        owner = self.create_user('avatar-streamer@example.com')
+        owner.avatar = SimpleUploadedFile('owner-avatar.png', b'avatar-bytes', content_type='image/png')
+        owner.save(update_fields=['avatar'])
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Avatar stream',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+        )
+
+        list_response = self.client.get(reverse('live-stream-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data[0]['id'], stream.id)
+        self.assertTrue(list_response.data[0]['owner_avatar_url'].startswith('http://testserver/media/avatars/'))
+        self.assertTrue(list_response.data[0]['creator']['avatar_url'].startswith('http://testserver/media/avatars/'))
+
+        detail_response = self.client.get(reverse('live-stream-detail', args=[stream.id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(detail_response.data['owner_avatar_url'].startswith('http://testserver/media/avatars/'))
+        self.assertTrue(detail_response.data['creator']['avatar_url'].startswith('http://testserver/media/avatars/'))
 
     def test_public_cannot_retrieve_private_live_stream(self):
         owner = self.create_user('private-streamer@example.com')

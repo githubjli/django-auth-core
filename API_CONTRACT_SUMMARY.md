@@ -262,7 +262,7 @@ The internal unified content mapping layer is not part of this public contract y
 - Note: this is a Django-side control action; it does not guarantee direct media-server ingest control.
 
 Live stream object fields:
-- `id`, `owner_id`, `owner_name`, `title`, `description`, `payment_address`, `category`, `category_name`, `visibility`,
+- `id`, `owner_id`, `owner_name`, `owner_avatar_url`, `creator`, `title`, `description`, `payment_address`, `category`, `category_name`, `visibility`,
 - `status`, `django_status`, `effective_status`, `status_source`, `raw_ant_media_status`,
 - `rtmp_url`, `playback_url`, `watch_url`, `thumbnail_url`, `preview_image_url`, `snapshot_url`,
 - `viewer_count`, `can_start`, `can_end`, `sync_ok`, `sync_error`, `message`,
@@ -277,6 +277,9 @@ Status field meanings:
 - `watch_url`: canonical frontend watch/share URL for this live room (viewer-facing route)
 - `playback_url`: media playback URL (HLS `.m3u8`), intentionally separate from `watch_url`
 - `stream_key` is intentionally excluded from list/detail/status/update live object responses and is only returned by owner-only `prepare`.
+- `owner_avatar_url`: uploader/creator avatar display URL (nullable)
+- `creator`: additive nested creator summary:
+  - `id`, `name`, `avatar_url`
 
 `effective_status` is computed:
 - if Ant Media synced status = `broadcasting` => `live`
@@ -427,6 +430,9 @@ Admin video object fields:
 Common public video object fields:
 - `id`, `owner_id`, `owner_name`, `owner_avatar_url`, `title`, `description`, `description_preview`, `category`, `category_name`, `category_slug`,
 - `like_count`, `comment_count`, `view_count`, `is_liked`, `file`, `file_url`, `thumbnail`, `thumbnail_url`, `created_at`
+- avatar notes:
+  - `owner_avatar_url` is the preferred uploader avatar display field (nullable)
+  - when present, URL is directly usable by frontend image components
 
 ---
 
