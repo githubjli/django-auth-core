@@ -43,16 +43,36 @@ class UserSerializer(serializers.ModelSerializer):
 class AccountProfileSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(read_only=True)
     avatar_url = serializers.SerializerMethodField()
+    id = serializers.IntegerField(read_only=True)
+    email = serializers.EmailField(read_only=True)
+    is_creator = serializers.BooleanField(read_only=True)
+    is_seller = serializers.SerializerMethodField()
+    is_admin = serializers.SerializerMethodField()
+    can_create_live = serializers.SerializerMethodField()
+    can_manage_store = serializers.SerializerMethodField()
+    can_accept_payments = serializers.SerializerMethodField()
+    seller_store = serializers.SerializerMethodField()
+    counts = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = (
+            'id',
+            'email',
             'display_name',
             'first_name',
             'last_name',
             'avatar',
             'avatar_url',
             'bio',
+            'is_creator',
+            'is_seller',
+            'is_admin',
+            'can_create_live',
+            'can_manage_store',
+            'can_accept_payments',
+            'seller_store',
+            'counts',
         )
 
     def get_avatar_url(self, obj):
@@ -62,6 +82,61 @@ class AccountProfileSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.avatar.url
         return request.build_absolute_uri(obj.avatar.url)
+
+    def get_is_seller(self, obj):
+        return self._summary(obj)['is_seller']
+
+    def get_is_admin(self, obj):
+        return self._summary(obj)['is_admin']
+
+    def get_can_create_live(self, obj):
+        return self._summary(obj)['can_create_live']
+
+    def get_can_manage_store(self, obj):
+        return self._summary(obj)['can_manage_store']
+
+    def get_can_accept_payments(self, obj):
+        return self._summary(obj)['can_accept_payments']
+
+    def get_seller_store(self, obj):
+        return self._summary(obj)['seller_store']
+
+    def get_counts(self, obj):
+        return self._summary(obj)['counts']
+
+    def _summary(self, obj):
+        summary = getattr(obj, '_account_profile_summary_cache', None)
+        if summary is not None:
+            return summary
+
+        seller_store = SellerStore.objects.filter(owner=obj).only('id', 'name', 'slug', 'is_active').first()
+        product_count = Product.objects.filter(store__owner=obj).count()
+        payment_method_count = StreamPaymentMethod.objects.filter(stream__owner=obj).count()
+        summary = {
+            'is_seller': seller_store is not None,
+            'is_admin': bool(obj.is_staff or obj.is_superuser),
+            'can_create_live': bool(obj.is_creator),
+            'can_manage_store': seller_store is not None,
+            'can_accept_payments': bool(obj.is_creator or seller_store is not None),
+            'seller_store': (
+                {
+                    'id': seller_store.id,
+                    'name': seller_store.name,
+                    'slug': seller_store.slug,
+                    'is_active': seller_store.is_active,
+                }
+                if seller_store is not None else None
+            ),
+            'counts': {
+                'videos': Video.objects.filter(owner=obj).count(),
+                'live_streams': LiveStream.objects.filter(owner=obj).count(),
+                'products': product_count,
+                'payment_methods': payment_method_count,
+                'orders': PaymentOrder.objects.filter(user=obj).count(),
+            },
+        }
+        obj._account_profile_summary_cache = summary
+        return summary
 
 
 class AccountPreferencesSerializer(serializers.ModelSerializer):

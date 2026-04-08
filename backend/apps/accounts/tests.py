@@ -302,6 +302,19 @@ class AccountMenuAPITestCase(APITestCase):
 
         get_response = self.client.get(reverse('account-profile'))
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data['id'], user.id)
+        self.assertEqual(get_response.data['email'], user.email)
+        self.assertFalse(get_response.data['is_creator'])
+        self.assertFalse(get_response.data['is_seller'])
+        self.assertFalse(get_response.data['is_admin'])
+        self.assertFalse(get_response.data['can_create_live'])
+        self.assertFalse(get_response.data['can_manage_store'])
+        self.assertFalse(get_response.data['can_accept_payments'])
+        self.assertIsNone(get_response.data['seller_store'])
+        self.assertEqual(
+            get_response.data['counts'],
+            {'videos': 0, 'live_streams': 0, 'products': 0, 'payment_methods': 0, 'orders': 0},
+        )
         self.assertEqual(get_response.data['display_name'], 'Menu User')
         self.assertIsNone(get_response.data['avatar_url'])
 
@@ -319,6 +332,84 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertEqual(patch_response.data['display_name'], 'Updated Name')
         self.assertEqual(patch_response.data['bio'], 'About me')
         self.assertIn('/media/avatars/', patch_response.data['avatar_url'])
+        self.assertEqual(patch_response.data['id'], user.id)
+        self.assertEqual(patch_response.data['email'], user.email)
+
+    def test_profile_creator_without_store_shows_capabilities(self):
+        user = self.create_user('creator@example.com', is_creator=True)
+        self.client.force_authenticate(user=user)
+
+        LiveStream.objects.create(owner=user, title='Creator live')
+        response = self.client.get(reverse('account-profile'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_creator'])
+        self.assertFalse(response.data['is_seller'])
+        self.assertFalse(response.data['can_manage_store'])
+        self.assertTrue(response.data['can_create_live'])
+        self.assertTrue(response.data['can_accept_payments'])
+        self.assertEqual(response.data['counts']['live_streams'], 1)
+        self.assertEqual(response.data['counts']['products'], 0)
+
+    def test_profile_seller_with_active_store_summary_and_counts(self):
+        user = self.create_user('seller@example.com')
+        self.client.force_authenticate(user=user)
+        store = SellerStore.objects.create(owner=user, name='Seller Store', slug='seller-store', is_active=True)
+        product = Product.objects.create(
+            store=store,
+            title='Seller Product',
+            slug='seller-product',
+            price_amount='11.00',
+            price_currency='USD',
+            stock_quantity=5,
+            status=Product.STATUS_ACTIVE,
+        )
+        stream = LiveStream.objects.create(owner=user, title='Seller live')
+        StreamPaymentMethod.objects.create(
+            stream=stream,
+            method_type=StreamPaymentMethod.TYPE_PAY_QR,
+            title='Seller PM',
+            is_active=True,
+        )
+        PaymentOrder.objects.create(
+            user=user,
+            stream=stream,
+            product=product,
+            order_type=PaymentOrder.TYPE_PRODUCT,
+            amount='11.00',
+            currency='USD',
+        )
+        Video.objects.create(
+            owner=user,
+            title='Seller video',
+            file=SimpleUploadedFile('seller.mp4', b'video-bytes', content_type='video/mp4'),
+        )
+
+        response = self.client.get(reverse('account-profile'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_seller'])
+        self.assertTrue(response.data['can_manage_store'])
+        self.assertTrue(response.data['can_accept_payments'])
+        self.assertEqual(
+            response.data['seller_store'],
+            {
+                'id': store.id,
+                'name': 'Seller Store',
+                'slug': 'seller-store',
+                'is_active': True,
+            },
+        )
+        self.assertEqual(response.data['counts']['videos'], 1)
+        self.assertEqual(response.data['counts']['live_streams'], 1)
+        self.assertEqual(response.data['counts']['products'], 1)
+        self.assertEqual(response.data['counts']['payment_methods'], 1)
+        self.assertEqual(response.data['counts']['orders'], 1)
+
+    def test_profile_staff_user_has_admin_flag(self):
+        user = self.create_user('staff@example.com', is_staff=True)
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('account-profile'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_admin'])
 
     def test_preferences_get_and_patch(self):
         user = self.create_user('prefs@example.com')

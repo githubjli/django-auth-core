@@ -58,7 +58,18 @@ The internal unified content mapping layer is not part of this public contract y
 ### `GET /api/account/profile`
 - Auth: required
 - Response:
-  - `display_name`, `first_name`, `last_name`, `avatar`, `avatar_url`, `bio`
+  - existing fields:
+    - `display_name`, `first_name`, `last_name`, `avatar`, `avatar_url`, `bio`
+  - additive identity/role fields:
+    - `id`, `email`, `is_creator`, `is_seller`, `is_admin`
+  - additive capability fields:
+    - `can_create_live`, `can_manage_store`, `can_accept_payments`
+  - additive seller summary:
+    - `seller_store` object or `null`
+      - when present: `id`, `name`, `slug`, `is_active`
+  - additive counts summary:
+    - `counts` object:
+      - `videos`, `live_streams`, `products`, `payment_methods`, `orders`
 
 ### `PATCH /api/account/profile`
 - Auth: required
@@ -67,6 +78,7 @@ The internal unified content mapping layer is not part of this public contract y
   - **optional**: `first_name`, `last_name`, `avatar`, `bio`
 - Response:
   - same shape as `GET /profile`
+  - note: newly added dashboard/profile summary fields are read-only additive fields
 
 ### `GET /api/account/preferences`
 - Auth: required
