@@ -115,11 +115,51 @@ class AuthAPITestCase(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_response.data['access']}")
         me_response = self.client.get(reverse('auth-me'))
         self.assertEqual(me_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(me_response.data.keys()), {'id', 'email', 'first_name', 'last_name', 'is_creator'})
+        self.assertEqual(
+            set(me_response.data.keys()),
+            {'id', 'email', 'display_name', 'first_name', 'last_name', 'avatar', 'avatar_url', 'is_creator', 'is_admin'},
+        )
 
     def test_me_requires_authentication(self):
         response = self.client.get(reverse('auth-me'))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_me_reflects_latest_avatar_after_profile_update(self):
+        user = self.create_user('me-avatar@example.com')
+        self.client.force_authenticate(user=user)
+
+        initial = self.client.get(reverse('auth-me'))
+        self.assertEqual(initial.status_code, status.HTTP_200_OK)
+        self.assertIsNone(initial.data['avatar'])
+        self.assertIsNone(initial.data['avatar_url'])
+
+        patch_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png')},
+            format='multipart',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+
+        me_after_upload = self.client.get(reverse('auth-me'))
+        profile_after_upload = self.client.get(reverse('account-profile'))
+        self.assertEqual(me_after_upload.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_after_upload.status_code, status.HTTP_200_OK)
+        self.assertTrue(me_after_upload.data['avatar_url'].startswith('http://testserver/media/avatars/'))
+        self.assertEqual(me_after_upload.data['avatar_url'], profile_after_upload.data['avatar_url'])
+
+        clear_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar_clear': True},
+            format='json',
+        )
+        self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
+
+        me_after_clear = self.client.get(reverse('auth-me'))
+        profile_after_clear = self.client.get(reverse('account-profile'))
+        self.assertIsNone(me_after_clear.data['avatar'])
+        self.assertIsNone(me_after_clear.data['avatar_url'])
+        self.assertEqual(me_after_clear.data['avatar_url'], profile_after_clear.data['avatar_url'])
 
     def test_admin_login_with_custom_user(self):
         user = self.create_user(

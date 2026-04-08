@@ -49,7 +49,13 @@ The internal unified content mapping layer is not part of this public contract y
 ### `GET /api/auth/me`
 - Auth: required
 - Response (200):
-  - `id`, `email`, `first_name`, `last_name`, `is_creator`
+  - existing:
+    - `id`, `email`, `first_name`, `last_name`, `is_creator`
+  - additive current-user display fields:
+    - `display_name`
+    - `avatar` (nullable file field value)
+    - `avatar_url` (preferred frontend display field; fully qualified URL when avatar exists)
+    - `is_admin` (derived from `is_staff || is_superuser`)
 
 ---
 

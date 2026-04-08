@@ -35,10 +35,35 @@ class OptionalSlugRelatedField(serializers.SlugRelatedField):
 
 
 class UserSerializer(serializers.ModelSerializer):
+    display_name = serializers.CharField(read_only=True)
+    avatar_url = serializers.SerializerMethodField()
+    is_admin = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ('id', 'email', 'first_name', 'last_name', 'is_creator')
+        fields = (
+            'id',
+            'email',
+            'display_name',
+            'first_name',
+            'last_name',
+            'avatar',
+            'avatar_url',
+            'is_creator',
+            'is_admin',
+        )
         read_only_fields = ('id',)
+
+    def get_avatar_url(self, obj):
+        request = self.context.get('request')
+        if not obj.avatar:
+            return None
+        if request is None:
+            return obj.avatar.url
+        return request.build_absolute_uri(obj.avatar.url)
+
+    def get_is_admin(self, obj):
+        return bool(obj.is_staff or obj.is_superuser)
 
 
 class AccountProfileSerializer(serializers.ModelSerializer):
