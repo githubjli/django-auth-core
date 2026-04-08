@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -41,8 +42,9 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class AccountProfileSerializer(serializers.ModelSerializer):
-    display_name = serializers.CharField(read_only=True)
+    display_name = serializers.CharField(required=False, allow_blank=True)
     avatar_url = serializers.SerializerMethodField()
+    avatar_clear = serializers.BooleanField(write_only=True, required=False, default=False)
     id = serializers.IntegerField(read_only=True)
     email = serializers.EmailField(read_only=True)
     is_creator = serializers.BooleanField(read_only=True)
@@ -63,8 +65,21 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'first_name',
             'last_name',
             'avatar',
+            'avatar_clear',
             'avatar_url',
             'bio',
+            'is_creator',
+            'is_seller',
+            'is_admin',
+            'can_create_live',
+            'can_manage_store',
+            'can_accept_payments',
+            'seller_store',
+            'counts',
+        )
+        read_only_fields = (
+            'id',
+            'email',
             'is_creator',
             'is_seller',
             'is_admin',
@@ -137,6 +152,49 @@ class AccountProfileSerializer(serializers.ModelSerializer):
         }
         obj._account_profile_summary_cache = summary
         return summary
+
+    def update(self, instance, validated_data):
+        avatar_clear = bool(validated_data.pop('avatar_clear', False))
+        display_name = validated_data.pop('display_name', None)
+
+        if display_name is not None:
+            normalized_name = display_name.strip()
+            if not normalized_name:
+                instance.first_name = ''
+                instance.last_name = ''
+            else:
+                parts = normalized_name.split(None, 1)
+                instance.first_name = parts[0]
+                instance.last_name = parts[1] if len(parts) > 1 else ''
+
+        for field in ('first_name', 'last_name', 'bio'):
+            if field in validated_data:
+                setattr(instance, field, validated_data[field])
+
+        if 'avatar' in validated_data:
+            instance.avatar = validated_data['avatar']
+        if avatar_clear and instance.avatar:
+            instance.avatar.delete(save=False)
+            instance.avatar = ''
+
+        instance.save()
+        return instance
+
+
+class AccountPasswordChangeSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True)
+
+    def validate_current_password(self, value):
+        user = self.context['request'].user
+        if not user.check_password(value):
+            raise serializers.ValidationError('Current password is incorrect.')
+        return value
+
+    def validate_new_password(self, value):
+        user = self.context['request'].user
+        validate_password(value, user=user)
+        return value
 
 
 class AccountPreferencesSerializer(serializers.ModelSerializer):

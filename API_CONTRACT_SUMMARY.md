@@ -75,10 +75,28 @@ The internal unified content mapping layer is not part of this public contract y
 - Auth: required
 - Content types: JSON/form/multipart
 - Body (partial update):
-  - **optional**: `first_name`, `last_name`, `avatar`, `bio`
+  - **editable (safe)**:
+    - `display_name` (updates underlying `first_name`/`last_name`)
+    - `bio`
+    - `avatar` (multipart upload)
+    - `avatar_clear` (boolean; when true clears existing avatar)
+  - **backward-compatible editable fields**:
+    - `first_name`, `last_name`
+  - **read-only / ignored on write**:
+    - `email`, `id`, role/capability/summary fields (`is_*`, `can_*`, `seller_store`, `counts`)
 - Response:
   - same shape as `GET /profile`
   - note: newly added dashboard/profile summary fields are read-only additive fields
+
+### `POST /api/account/change-password/`
+- Auth: required
+- Request body:
+  - **required**: `current_password`, `new_password`
+- Validation:
+  - `current_password` must match authenticated user password
+  - `new_password` validated by Django password validators
+- Response (200):
+  - `{ "detail": "Password updated successfully." }`
 
 ### `GET /api/account/preferences`
 - Auth: required

@@ -34,6 +34,7 @@ from apps.accounts.models import (
 )
 from apps.accounts.permissions import IsCreator, IsStaffOrSuperuser
 from apps.accounts.serializers import (
+    AccountPasswordChangeSerializer,
     AccountPreferencesSerializer,
     AccountProfileSerializer,
     AdminUserSerializer,
@@ -179,6 +180,18 @@ class AccountPreferencesAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AccountPasswordChangeAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = AccountPasswordChangeSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        request.user.set_password(serializer.validated_data['new_password'])
+        request.user.save(update_fields=['password'])
+        return Response({'detail': 'Password updated successfully.'}, status=status.HTTP_200_OK)
 
 
 class AccountPaymentOrderListAPIView(generics.ListAPIView):

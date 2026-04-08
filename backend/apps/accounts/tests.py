@@ -411,6 +411,86 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['is_admin'])
 
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_profile_patch_supports_display_name_and_avatar_clear(self):
+        user = self.create_user('display-name@example.com', first_name='Old', last_name='Name')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.patch(
+            reverse('account-profile'),
+            {
+                'display_name': 'New Display',
+                'bio': '',
+                'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png'),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['display_name'], 'New Display')
+        self.assertEqual(response.data['first_name'], 'New')
+        self.assertEqual(response.data['last_name'], 'Display')
+        self.assertEqual(response.data['bio'], '')
+        self.assertIsNotNone(response.data['avatar_url'])
+
+        clear_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar_clear': True},
+            format='json',
+        )
+        self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(clear_response.data['avatar_url'])
+
+    def test_profile_patch_keeps_email_read_only(self):
+        user = self.create_user('email-readonly@example.com')
+        self.client.force_authenticate(user=user)
+        response = self.client.patch(
+            reverse('account-profile'),
+            {'email': 'new-email@example.com', 'bio': 'new bio'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['email'], 'email-readonly@example.com')
+        user.refresh_from_db()
+        self.assertEqual(user.email, 'email-readonly@example.com')
+
+    def test_change_password_success(self):
+        user = self.create_user('change-password@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('account-change-password'),
+            {'current_password': 'strong-pass-123', 'new_password': 'new-Strong-pass-456'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['detail'], 'Password updated successfully.')
+        user.refresh_from_db()
+        self.assertTrue(user.check_password('new-Strong-pass-456'))
+
+    def test_change_password_rejects_wrong_current_password(self):
+        user = self.create_user('change-password-wrong@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('account-change-password'),
+            {'current_password': 'wrong-password', 'new_password': 'new-Strong-pass-456'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('current_password', response.data)
+
+    def test_change_password_rejects_weak_password(self):
+        user = self.create_user('change-password-weak@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('account-change-password'),
+            {'current_password': 'strong-pass-123', 'new_password': '123'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('new_password', response.data)
+
     def test_preferences_get_and_patch(self):
         user = self.create_user('prefs@example.com')
         self.client.force_authenticate(user=user)
