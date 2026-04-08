@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -41,18 +42,52 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class AccountProfileSerializer(serializers.ModelSerializer):
-    display_name = serializers.CharField(read_only=True)
+    display_name = serializers.CharField(required=False, allow_blank=True)
     avatar_url = serializers.SerializerMethodField()
+    avatar_clear = serializers.BooleanField(write_only=True, required=False, default=False)
+    id = serializers.IntegerField(read_only=True)
+    email = serializers.EmailField(read_only=True)
+    is_creator = serializers.BooleanField(read_only=True)
+    is_seller = serializers.SerializerMethodField()
+    is_admin = serializers.SerializerMethodField()
+    can_create_live = serializers.SerializerMethodField()
+    can_manage_store = serializers.SerializerMethodField()
+    can_accept_payments = serializers.SerializerMethodField()
+    seller_store = serializers.SerializerMethodField()
+    counts = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = (
+            'id',
+            'email',
             'display_name',
             'first_name',
             'last_name',
             'avatar',
+            'avatar_clear',
             'avatar_url',
             'bio',
+            'is_creator',
+            'is_seller',
+            'is_admin',
+            'can_create_live',
+            'can_manage_store',
+            'can_accept_payments',
+            'seller_store',
+            'counts',
+        )
+        read_only_fields = (
+            'id',
+            'email',
+            'is_creator',
+            'is_seller',
+            'is_admin',
+            'can_create_live',
+            'can_manage_store',
+            'can_accept_payments',
+            'seller_store',
+            'counts',
         )
 
     def get_avatar_url(self, obj):
@@ -62,6 +97,104 @@ class AccountProfileSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.avatar.url
         return request.build_absolute_uri(obj.avatar.url)
+
+    def get_is_seller(self, obj):
+        return self._summary(obj)['is_seller']
+
+    def get_is_admin(self, obj):
+        return self._summary(obj)['is_admin']
+
+    def get_can_create_live(self, obj):
+        return self._summary(obj)['can_create_live']
+
+    def get_can_manage_store(self, obj):
+        return self._summary(obj)['can_manage_store']
+
+    def get_can_accept_payments(self, obj):
+        return self._summary(obj)['can_accept_payments']
+
+    def get_seller_store(self, obj):
+        return self._summary(obj)['seller_store']
+
+    def get_counts(self, obj):
+        return self._summary(obj)['counts']
+
+    def _summary(self, obj):
+        summary = getattr(obj, '_account_profile_summary_cache', None)
+        if summary is not None:
+            return summary
+
+        seller_store = SellerStore.objects.filter(owner=obj).only('id', 'name', 'slug', 'is_active').first()
+        product_count = Product.objects.filter(store__owner=obj).count()
+        payment_method_count = StreamPaymentMethod.objects.filter(stream__owner=obj).count()
+        summary = {
+            'is_seller': seller_store is not None,
+            'is_admin': bool(obj.is_staff or obj.is_superuser),
+            'can_create_live': bool(obj.is_creator),
+            'can_manage_store': seller_store is not None,
+            'can_accept_payments': bool(obj.is_creator or seller_store is not None),
+            'seller_store': (
+                {
+                    'id': seller_store.id,
+                    'name': seller_store.name,
+                    'slug': seller_store.slug,
+                    'is_active': seller_store.is_active,
+                }
+                if seller_store is not None else None
+            ),
+            'counts': {
+                'videos': Video.objects.filter(owner=obj).count(),
+                'live_streams': LiveStream.objects.filter(owner=obj).count(),
+                'products': product_count,
+                'payment_methods': payment_method_count,
+                'orders': PaymentOrder.objects.filter(user=obj).count(),
+            },
+        }
+        obj._account_profile_summary_cache = summary
+        return summary
+
+    def update(self, instance, validated_data):
+        avatar_clear = bool(validated_data.pop('avatar_clear', False))
+        display_name = validated_data.pop('display_name', None)
+
+        if display_name is not None:
+            normalized_name = display_name.strip()
+            if not normalized_name:
+                instance.first_name = ''
+                instance.last_name = ''
+            else:
+                parts = normalized_name.split(None, 1)
+                instance.first_name = parts[0]
+                instance.last_name = parts[1] if len(parts) > 1 else ''
+
+        for field in ('first_name', 'last_name', 'bio'):
+            if field in validated_data:
+                setattr(instance, field, validated_data[field])
+
+        if 'avatar' in validated_data:
+            instance.avatar = validated_data['avatar']
+        if avatar_clear and instance.avatar:
+            instance.avatar.delete(save=False)
+            instance.avatar = ''
+
+        instance.save()
+        return instance
+
+
+class AccountPasswordChangeSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True)
+
+    def validate_current_password(self, value):
+        user = self.context['request'].user
+        if not user.check_password(value):
+            raise serializers.ValidationError('Current password is incorrect.')
+        return value
+
+    def validate_new_password(self, value):
+        user = self.context['request'].user
+        validate_password(value, user=user)
+        return value
 
 
 class AccountPreferencesSerializer(serializers.ModelSerializer):
@@ -632,6 +765,9 @@ class StreamPaymentMethodSerializer(serializers.ModelSerializer):
 
 
 class PaymentOrderCreateSerializer(serializers.ModelSerializer):
+    client_request_id = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=128, write_only=True)
+
     class Meta:
         model = PaymentOrder
         fields = (
@@ -641,6 +777,8 @@ class PaymentOrderCreateSerializer(serializers.ModelSerializer):
             'order_type',
             'amount',
             'currency',
+            'client_request_id',
+            'idempotency_key',
             'external_reference',
             'status',
             'created_at',
@@ -649,10 +787,46 @@ class PaymentOrderCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'status', 'created_at', 'updated_at')
 
     def validate(self, attrs):
+        stream = self.context.get('stream')
+        if stream is None:
+            raise serializers.ValidationError({'detail': ['Missing stream context.']})
+
+        provided_request_id = (attrs.get('client_request_id') or '').strip()
+        provided_idempotency_key = (attrs.get('idempotency_key') or '').strip()
+        if provided_request_id and provided_idempotency_key and provided_request_id != provided_idempotency_key:
+            raise serializers.ValidationError(
+                {'idempotency_key': ['Must match client_request_id when both are provided.']}
+            )
+        attrs['client_request_id'] = provided_request_id or provided_idempotency_key
+
         order_type = attrs.get('order_type')
         product = attrs.get('product')
         if order_type == PaymentOrder.TYPE_PRODUCT and not product:
             raise serializers.ValidationError({'product': ['This field is required for product orders.']})
+
+        payment_method = attrs.get('payment_method')
+        if payment_method:
+            if payment_method.stream_id != stream.id:
+                raise serializers.ValidationError(
+                    {'payment_method': ['Payment method must belong to the target stream.']}
+                )
+            if not payment_method.is_active:
+                raise serializers.ValidationError({'payment_method': ['Payment method is inactive.']})
+
+        if product:
+            if product.status != Product.STATUS_ACTIVE:
+                raise serializers.ValidationError({'product': ['Product is not available for purchase.']})
+            if not product.store.is_active:
+                raise serializers.ValidationError({'product': ['Product store is inactive.']})
+            active_binding_exists = LiveStreamProduct.objects.filter(
+                stream=stream,
+                product=product,
+                is_active=True,
+            ).exists()
+            if not active_binding_exists:
+                raise serializers.ValidationError(
+                    {'product': ['Product is not active for this live stream.']}
+                )
         return attrs
 
 
@@ -661,6 +835,7 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
     stream_id = serializers.IntegerField(source='stream.id', read_only=True, allow_null=True)
     product_id = serializers.IntegerField(source='product.id', read_only=True, allow_null=True)
     payment_method_id = serializers.IntegerField(source='payment_method.id', read_only=True, allow_null=True)
+    paid_by_id = serializers.IntegerField(source='paid_by.id', read_only=True, allow_null=True)
 
     class Meta:
         model = PaymentOrder
@@ -674,7 +849,11 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
             'amount',
             'currency',
             'status',
+            'client_request_id',
             'external_reference',
+            'paid_at',
+            'paid_by_id',
+            'paid_note',
             'created_at',
             'updated_at',
         )
