@@ -2893,9 +2893,19 @@ class BillingAPITestCase(APITestCase):
         self.assertEqual(plans_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(plans_response.data), 1)
         self.assertEqual(plans_response.data[0]['id'], monthly.id)
+        self.assertEqual(plans_response.data[0]['amount'], '9.99')
+        self.assertEqual(plans_response.data[0]['currency'], 'USD')
+        self.assertEqual(plans_response.data[0]['interval'], BillingPlan.INTERVAL_MONTH)
+        self.assertIn('code', plans_response.data[0])
+        self.assertIn('name', plans_response.data[0])
+        self.assertIn('description', plans_response.data[0])
 
         user = self.create_user()
         self.client.force_authenticate(user=user)
+
+        me_empty_response = self.client.get(reverse('billing-subscription-me'))
+        self.assertEqual(me_empty_response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(me_empty_response.data)
 
         create_response = self.client.post(
             reverse('billing-subscription-create'),
@@ -2903,17 +2913,23 @@ class BillingAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(create_response.data['status'], BillingSubscription.STATUS_ACTIVE)
+        self.assertEqual(create_response.data['status'], 'active')
+        self.assertEqual(create_response.data['raw_status'], BillingSubscription.STATUS_ACTIVE)
+        self.assertIn('current_period_start', create_response.data)
+        self.assertIn('current_period_end', create_response.data)
+        self.assertIn('cancel_at', create_response.data)
+        self.assertEqual(create_response.data['plan']['interval'], BillingPlan.INTERVAL_MONTH)
         subscription_id = create_response.data['id']
 
         me_response = self.client.get(reverse('billing-subscription-me'))
         self.assertEqual(me_response.status_code, status.HTTP_200_OK)
-        self.assertIsNotNone(me_response.data['active_subscription'])
-        self.assertEqual(me_response.data['active_subscription']['id'], subscription_id)
+        self.assertIsNotNone(me_response.data)
+        self.assertEqual(me_response.data['id'], subscription_id)
 
         cancel_response = self.client.post(reverse('billing-subscription-cancel', args=[subscription_id]), format='json')
         self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(cancel_response.data['status'], BillingSubscription.STATUS_CANCELLED)
+        self.assertEqual(cancel_response.data['status'], 'cancel_at_period_end')
+        self.assertEqual(cancel_response.data['raw_status'], BillingSubscription.STATUS_CANCELLED)
         self.assertFalse(cancel_response.data['auto_renew'])
 
 

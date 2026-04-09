@@ -1310,9 +1310,9 @@ class BillingMySubscriptionAPIView(APIView):
             status=BillingSubscription.STATUS_ACTIVE,
         ).select_related('plan').first()
         if subscription is None:
-            return Response({'active_subscription': None}, status=status.HTTP_200_OK)
+            return Response(None, status=status.HTTP_200_OK)
         serializer = BillingSubscriptionSerializer(subscription)
-        return Response({'active_subscription': serializer.data}, status=status.HTTP_200_OK)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class BillingSubscriptionCancelAPIView(APIView):

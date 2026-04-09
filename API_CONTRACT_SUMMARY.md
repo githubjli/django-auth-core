@@ -374,7 +374,10 @@ Payment order object fields:
 ### `GET /api/billing/plans/`
 - Auth: public
 - Response: non-paginated list of active plans
-  - `id`, `code`, `name`, `description`, `billing_interval`, `price_amount`, `price_currency`, `is_active`
+  - preferred frontend keys:
+    - `id`, `code`, `name`, `description`, `amount`, `currency`, `interval`
+  - backward-compatible keys:
+    - `billing_interval`, `price_amount`, `price_currency`, `is_active`
 
 ### `POST /api/billing/subscriptions/`
 - Auth: required
@@ -385,7 +388,8 @@ Payment order object fields:
 ### `GET /api/billing/subscriptions/me/`
 - Auth: required
 - Response:
-  - `{ "active_subscription": subscription_object | null }`
+  - `null` when no active subscription
+  - otherwise latest active `subscription_object`
 
 ### `POST /api/billing/subscriptions/{id}/cancel/`
 - Auth: required (owner-only subscription)
@@ -395,7 +399,10 @@ Payment order object fields:
 - Response: subscription object
 
 Subscription object fields:
-- `id`, `status`, `auto_renew`, `started_at`, `current_period_end`, `cancelled_at`, `created_at`, `updated_at`, `plan`
+- preferred frontend keys:
+  - `id`, `status`, `auto_renew`, `current_period_start`, `current_period_end`, `cancel_at`, `plan`
+- additive compatibility keys:
+  - `raw_status`, `started_at`, `cancelled_at`, `created_at`, `updated_at`
 
 ---
 

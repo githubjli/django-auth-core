@@ -914,6 +914,10 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
 
 
 class BillingPlanSerializer(serializers.ModelSerializer):
+    amount = serializers.DecimalField(source='price_amount', max_digits=12, decimal_places=2, read_only=True)
+    currency = serializers.CharField(source='price_currency', read_only=True)
+    interval = serializers.CharField(source='billing_interval', read_only=True)
+
     class Meta:
         model = BillingPlan
         fields = (
@@ -921,6 +925,9 @@ class BillingPlanSerializer(serializers.ModelSerializer):
             'code',
             'name',
             'description',
+            'amount',
+            'currency',
+            'interval',
             'billing_interval',
             'price_amount',
             'price_currency',
@@ -942,6 +949,10 @@ class BillingSubscriptionCreateSerializer(serializers.Serializer):
 
 
 class BillingSubscriptionSerializer(serializers.ModelSerializer):
+    status = serializers.SerializerMethodField()
+    current_period_start = serializers.DateTimeField(source='started_at', read_only=True)
+    cancel_at = serializers.DateTimeField(source='cancelled_at', read_only=True)
+    raw_status = serializers.CharField(source='status', read_only=True)
     plan = BillingPlanSerializer(read_only=True)
 
     class Meta:
@@ -949,7 +960,10 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
         fields = (
             'id',
             'status',
+            'raw_status',
             'auto_renew',
+            'current_period_start',
+            'cancel_at',
             'started_at',
             'current_period_end',
             'cancelled_at',
@@ -958,6 +972,14 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
             'plan',
         )
         read_only_fields = fields
+
+    def get_status(self, obj):
+        # Frontend-compatible status mapping.
+        if obj.status in {BillingSubscription.STATUS_CANCELLED, BillingSubscription.STATUS_EXPIRED}:
+            return 'cancel_at_period_end'
+        if obj.status == BillingSubscription.STATUS_ACTIVE and not obj.auto_renew:
+            return 'cancel_at_period_end'
+        return 'active'
 
 
 class AdminVideoSerializer(VideoSerializer):
