@@ -4,6 +4,7 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from apps.accounts.models import (
     Category,
     ChannelSubscription,
+    CommentLike,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
@@ -16,6 +17,7 @@ from apps.accounts.models import (
     Video,
     VideoComment,
     VideoLike,
+    VideoView,
 )
 
 
@@ -132,6 +134,16 @@ class VideoLikeAdmin(admin.ModelAdmin):
     autocomplete_fields = ('video', 'user')
 
 
+@admin.register(VideoView)
+class VideoViewAdmin(admin.ModelAdmin):
+    list_display = ('id', 'video', 'viewer', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('video__title', 'viewer__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('video', 'viewer')
+
+
 @admin.register(ChannelSubscription)
 class ChannelSubscriptionAdmin(admin.ModelAdmin):
     list_display = ('id', 'channel', 'subscriber', 'created_at')
@@ -160,6 +172,16 @@ class VideoCommentAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('like_count', 'reply_count', 'created_at', 'updated_at')
     autocomplete_fields = ('video', 'user', 'parent')
+
+
+@admin.register(CommentLike)
+class CommentLikeAdmin(admin.ModelAdmin):
+    list_display = ('id', 'comment', 'user', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('comment__content', 'comment__video__title', 'user__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('comment', 'user')
 
 
 @admin.register(SellerStore)

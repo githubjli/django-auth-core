@@ -518,6 +518,32 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertIsNone(get_after_clear.data['avatar'])
         self.assertIsNone(get_after_clear.data['avatar_url'])
 
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_profile_patch_display_name_only_keeps_existing_avatar_fields(self):
+        user = self.create_user('display-name-only@example.com', first_name='Old', last_name='Name')
+        self.client.force_authenticate(user=user)
+
+        upload_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png')},
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(upload_response.data['avatar'])
+        self.assertIsNotNone(upload_response.data['avatar_url'])
+
+        display_name_only_response = self.client.patch(
+            reverse('account-profile'),
+            {'display_name': 'Updated Display Name'},
+            format='json',
+        )
+        self.assertEqual(display_name_only_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(display_name_only_response.data['display_name'], 'Updated Display Name')
+        self.assertEqual(display_name_only_response.data['first_name'], 'Updated')
+        self.assertEqual(display_name_only_response.data['last_name'], 'Display Name')
+        self.assertEqual(display_name_only_response.data['avatar'], upload_response.data['avatar'])
+        self.assertEqual(display_name_only_response.data['avatar_url'], upload_response.data['avatar_url'])
+
     def test_profile_patch_keeps_email_read_only(self):
         user = self.create_user('email-readonly@example.com')
         self.client.force_authenticate(user=user)
