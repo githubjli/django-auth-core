@@ -555,3 +555,60 @@ class PaymentOrder(models.Model):
                 name='unique_payment_order_request_id_per_user_stream',
             ),
         ]
+
+
+class BillingPlan(models.Model):
+    INTERVAL_MONTH = 'month'
+    INTERVAL_YEAR = 'year'
+    INTERVAL_CHOICES = [
+        (INTERVAL_MONTH, 'Monthly'),
+        (INTERVAL_YEAR, 'Yearly'),
+    ]
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    billing_interval = models.CharField(max_length=16, choices=INTERVAL_CHOICES, default=INTERVAL_MONTH)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=10, default='USD')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['price_amount', 'id']
+
+    def __str__(self) -> str:
+        return f'{self.name} ({self.billing_interval})'
+
+
+class BillingSubscription(models.Model):
+    STATUS_ACTIVE = 'active'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_CANCELLED, 'Cancelled'),
+        (STATUS_EXPIRED, 'Expired'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='billing_subscriptions',
+    )
+    plan = models.ForeignKey(
+        BillingPlan,
+        on_delete=models.PROTECT,
+        related_name='subscriptions',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    auto_renew = models.BooleanField(default=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    current_period_end = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
