@@ -15,6 +15,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from apps.accounts.models import (
+    BillingPlan,
+    BillingSubscription,
     Category,
     ChannelSubscription,
     CommentLike,
@@ -39,6 +41,9 @@ from apps.accounts.serializers import (
     AccountProfileSerializer,
     AdminUserSerializer,
     AdminVideoSerializer,
+    BillingPlanSerializer,
+    BillingSubscriptionCreateSerializer,
+    BillingSubscriptionSerializer,
     LiveStreamSerializer,
     LiveStreamProductListingSerializer,
     LiveStreamProductManageCreateSerializer,
@@ -1230,6 +1235,102 @@ class ChannelSubscriptionAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class CreatorFollowAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        creator = generics.get_object_or_404(User, pk=pk)
+        if creator.pk == request.user.pk:
+            return Response({'detail': 'You cannot follow yourself.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        _, created = ChannelSubscription.objects.get_or_create(channel=creator, subscriber=request.user)
+        if created:
+            User.objects.filter(pk=creator.pk).update(subscriber_count=F('subscriber_count') + 1)
+        creator.refresh_from_db(fields=['subscriber_count'])
+        return Response(
+            {
+                'creator_id': creator.pk,
+                'follower_count': creator.subscriber_count,
+                'viewer_is_following': True,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        creator = generics.get_object_or_404(User, pk=pk)
+        deleted_count, _ = ChannelSubscription.objects.filter(channel=creator, subscriber=request.user).delete()
+        if deleted_count:
+            User.objects.filter(pk=creator.pk, subscriber_count__gt=0).update(subscriber_count=F('subscriber_count') - 1)
+        creator.refresh_from_db(fields=['subscriber_count'])
+        return Response(
+            {
+                'creator_id': creator.pk,
+                'follower_count': creator.subscriber_count,
+                'viewer_is_following': False,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class BillingPlanListAPIView(generics.ListAPIView):
+    serializer_class = BillingPlanSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+
+    def get_queryset(self):
+        return BillingPlan.objects.filter(is_active=True).order_by('price_amount', 'id')
+
+
+class BillingSubscriptionCreateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = BillingSubscriptionCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        plan = serializer.validated_data['plan']
+        subscription = BillingSubscription.objects.create(
+            user=request.user,
+            plan=plan,
+            status=BillingSubscription.STATUS_ACTIVE,
+            auto_renew=True,
+        )
+        response_serializer = BillingSubscriptionSerializer(subscription)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class BillingMySubscriptionAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        subscription = BillingSubscription.objects.filter(
+            user=request.user,
+            status=BillingSubscription.STATUS_ACTIVE,
+        ).select_related('plan').first()
+        if subscription is None:
+            return Response({'active_subscription': None}, status=status.HTTP_200_OK)
+        serializer = BillingSubscriptionSerializer(subscription)
+        return Response({'active_subscription': serializer.data}, status=status.HTTP_200_OK)
+
+
+class BillingSubscriptionCancelAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        subscription = generics.get_object_or_404(
+            BillingSubscription.objects.select_related('plan'),
+            pk=pk,
+            user=request.user,
+        )
+        if subscription.status == BillingSubscription.STATUS_ACTIVE:
+            subscription.status = BillingSubscription.STATUS_CANCELLED
+            subscription.auto_renew = False
+            subscription.cancelled_at = timezone.now()
+            subscription.save(update_fields=['status', 'auto_renew', 'cancelled_at', 'updated_at'])
+        serializer = BillingSubscriptionSerializer(subscription)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class PublicVideoCommentListAPIView(generics.ListAPIView):

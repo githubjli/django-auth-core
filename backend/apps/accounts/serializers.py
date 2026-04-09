@@ -4,6 +4,8 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from apps.accounts.models import (
+    BillingPlan,
+    BillingSubscription,
     Category,
     ChannelSubscription,
     LiveChatMessage,
@@ -911,6 +913,53 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class BillingPlanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BillingPlan
+        fields = (
+            'id',
+            'code',
+            'name',
+            'description',
+            'billing_interval',
+            'price_amount',
+            'price_currency',
+            'is_active',
+        )
+        read_only_fields = fields
+
+
+class BillingSubscriptionCreateSerializer(serializers.Serializer):
+    plan_id = serializers.IntegerField()
+
+    def validate(self, attrs):
+        plan_id = attrs['plan_id']
+        plan = BillingPlan.objects.filter(pk=plan_id, is_active=True).first()
+        if plan is None:
+            raise serializers.ValidationError({'plan_id': ['Active billing plan not found.']})
+        attrs['plan'] = plan
+        return attrs
+
+
+class BillingSubscriptionSerializer(serializers.ModelSerializer):
+    plan = BillingPlanSerializer(read_only=True)
+
+    class Meta:
+        model = BillingSubscription
+        fields = (
+            'id',
+            'status',
+            'auto_renew',
+            'started_at',
+            'current_period_end',
+            'cancelled_at',
+            'created_at',
+            'updated_at',
+            'plan',
+        )
+        read_only_fields = fields
+
+
 class AdminVideoSerializer(VideoSerializer):
     owner_email = serializers.EmailField(source='owner.email', read_only=True)
 
@@ -947,6 +996,9 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     like_count = serializers.IntegerField(read_only=True)
     comment_count = serializers.IntegerField(read_only=True)
     viewer_has_liked = serializers.SerializerMethodField()
+    viewer_is_following = serializers.SerializerMethodField()
+    follower_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
+    # Backward-compatible aliases; keep for existing frontend payload consumers.
     viewer_is_subscribed = serializers.SerializerMethodField()
     channel_id = serializers.IntegerField(source='owner.id', read_only=True)
     subscriber_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
@@ -960,7 +1012,7 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
             return bool(prefetched)
         return VideoLike.objects.filter(video=obj, user=request.user).exists()
 
-    def get_viewer_is_subscribed(self, obj):
+    def get_viewer_is_following(self, obj):
         request = self.context.get('request')
         if request is None or not request.user.is_authenticated:
             return False
@@ -968,6 +1020,9 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
         if prefetched is not None:
             return bool(prefetched)
         return ChannelSubscription.objects.filter(channel=obj.owner, subscriber=request.user).exists()
+
+    def get_viewer_is_subscribed(self, obj):
+        return self.get_viewer_is_following(obj)
 
 
 class VideoCommentSerializer(serializers.ModelSerializer):
