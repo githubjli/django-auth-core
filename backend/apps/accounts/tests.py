@@ -2878,6 +2878,7 @@ class BillingAPITestCase(APITestCase):
             billing_interval=BillingPlan.INTERVAL_MONTH,
             price_amount='9.99',
             price_currency='USD',
+            wallet_address='bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJaaa',
             is_active=True,
         )
         BillingPlan.objects.create(
@@ -2899,6 +2900,7 @@ class BillingAPITestCase(APITestCase):
         self.assertIn('code', plans_response.data[0])
         self.assertIn('name', plans_response.data[0])
         self.assertIn('description', plans_response.data[0])
+        self.assertEqual(plans_response.data[0]['wallet_address'], 'bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJaaa')
 
         user = self.create_user()
         self.client.force_authenticate(user=user)

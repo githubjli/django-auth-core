@@ -925,6 +925,7 @@ class BillingPlanSerializer(serializers.ModelSerializer):
             'code',
             'name',
             'description',
+            'wallet_address',
             'amount',
             'currency',
             'interval',

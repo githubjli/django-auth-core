@@ -571,6 +571,7 @@ class BillingPlan(models.Model):
     billing_interval = models.CharField(max_length=16, choices=INTERVAL_CHOICES, default=INTERVAL_MONTH)
     price_amount = models.DecimalField(max_digits=12, decimal_places=2)
     price_currency = models.CharField(max_length=10, default='USD')
+    wallet_address = models.TextField(blank=True, default='')
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)

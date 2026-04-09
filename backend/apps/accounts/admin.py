@@ -298,9 +298,9 @@ class PaymentOrderAdmin(admin.ModelAdmin):
 
 @admin.register(BillingPlan)
 class BillingPlanAdmin(admin.ModelAdmin):
-    list_display = ('id', 'code', 'name', 'billing_interval', 'price_amount', 'price_currency', 'is_active')
+    list_display = ('id', 'code', 'name', 'billing_interval', 'price_amount', 'price_currency', 'wallet_address', 'is_active')
     list_filter = ('billing_interval', 'price_currency', 'is_active')
-    search_fields = ('code', 'name', 'description')
+    search_fields = ('code', 'name', 'description', 'wallet_address')
     ordering = ('price_amount', 'id')
     readonly_fields = ('created_at', 'updated_at')
 

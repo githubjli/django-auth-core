@@ -375,7 +375,7 @@ Payment order object fields:
 - Auth: public
 - Response: non-paginated list of active plans
   - preferred frontend keys:
-    - `id`, `code`, `name`, `description`, `amount`, `currency`, `interval`
+    - `id`, `code`, `name`, `description`, `wallet_address`, `amount`, `currency`, `interval`
   - backward-compatible keys:
     - `billing_interval`, `price_amount`, `price_currency`, `is_active`
 
