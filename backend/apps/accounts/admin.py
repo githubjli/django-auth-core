@@ -2,6 +2,8 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from apps.accounts.models import (
+    BillingPlan,
+    BillingSubscription,
     Category,
     ChannelSubscription,
     CommentLike,
@@ -292,3 +294,22 @@ class PaymentOrderAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('user', 'stream', 'product', 'payment_method')
+
+
+@admin.register(BillingPlan)
+class BillingPlanAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'billing_interval', 'price_amount', 'price_currency', 'is_active')
+    list_filter = ('billing_interval', 'price_currency', 'is_active')
+    search_fields = ('code', 'name', 'description')
+    ordering = ('price_amount', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(BillingSubscription)
+class BillingSubscriptionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'plan', 'status', 'auto_renew', 'started_at', 'cancelled_at')
+    list_filter = ('status', 'auto_renew', 'created_at')
+    search_fields = ('user__email', 'plan__code', 'plan__name')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('started_at', 'created_at', 'updated_at')
+    autocomplete_fields = ('user', 'plan')
