@@ -15,6 +15,8 @@ from apps.accounts.content import (
     map_video_to_content,
 )
 from apps.accounts.models import (
+    BillingPlan,
+    BillingSubscription,
     Category,
     LiveChatMessage,
     LiveChatRoom,
@@ -517,6 +519,32 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertEqual(get_after_clear.status_code, status.HTTP_200_OK)
         self.assertIsNone(get_after_clear.data['avatar'])
         self.assertIsNone(get_after_clear.data['avatar_url'])
+
+    @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+    def test_profile_patch_display_name_only_keeps_existing_avatar_fields(self):
+        user = self.create_user('display-name-only@example.com', first_name='Old', last_name='Name')
+        self.client.force_authenticate(user=user)
+
+        upload_response = self.client.patch(
+            reverse('account-profile'),
+            {'avatar': SimpleUploadedFile('avatar.png', b'avatar-bytes', content_type='image/png')},
+            format='multipart',
+        )
+        self.assertEqual(upload_response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(upload_response.data['avatar'])
+        self.assertIsNotNone(upload_response.data['avatar_url'])
+
+        display_name_only_response = self.client.patch(
+            reverse('account-profile'),
+            {'display_name': 'Updated Display Name'},
+            format='json',
+        )
+        self.assertEqual(display_name_only_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(display_name_only_response.data['display_name'], 'Updated Display Name')
+        self.assertEqual(display_name_only_response.data['first_name'], 'Updated')
+        self.assertEqual(display_name_only_response.data['last_name'], 'Display Name')
+        self.assertEqual(display_name_only_response.data['avatar'], upload_response.data['avatar'])
+        self.assertEqual(display_name_only_response.data['avatar_url'], upload_response.data['avatar_url'])
 
     def test_profile_patch_keeps_email_read_only(self):
         user = self.create_user('email-readonly@example.com')
@@ -1213,6 +1241,8 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(summary_response.data['like_count'], 0)
         self.assertEqual(summary_response.data['comment_count'], 1)
         self.assertFalse(summary_response.data['viewer_has_liked'])
+        self.assertTrue(summary_response.data['viewer_is_following'])
+        self.assertEqual(summary_response.data['follower_count'], 1)
         self.assertTrue(summary_response.data['viewer_is_subscribed'])
         self.assertEqual(summary_response.data['channel_id'], channel_owner.id)
         self.assertEqual(summary_response.data['subscriber_count'], 1)
@@ -1244,8 +1274,35 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data.keys()),
-            {'video_id', 'like_count', 'comment_count', 'viewer_has_liked', 'viewer_is_subscribed', 'channel_id', 'subscriber_count'},
+            {
+                'video_id',
+                'like_count',
+                'comment_count',
+                'viewer_has_liked',
+                'viewer_is_following',
+                'follower_count',
+                'viewer_is_subscribed',
+                'channel_id',
+                'subscriber_count',
+            },
         )
+
+    def test_creator_follow_endpoints(self):
+        creator = self.authenticate(email='creator-follow@example.com')
+        follower = self.create_user(email='follower@example.com')
+        self.client.force_authenticate(user=follower)
+
+        follow_response = self.client.post(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(follow_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(follow_response.data['viewer_is_following'])
+        self.assertEqual(follow_response.data['follower_count'], 1)
+        self.assertEqual(follow_response.data['creator_id'], creator.id)
+
+        unfollow_response = self.client.delete(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(unfollow_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(unfollow_response.data['viewer_is_following'])
+        self.assertEqual(unfollow_response.data['follower_count'], 0)
+        self.assertEqual(unfollow_response.data['creator_id'], creator.id)
 
     def test_public_comments_contract_fields(self):
         self.authenticate()
@@ -2808,6 +2865,74 @@ class PaymentOrderAPITestCase(APITestCase):
                 payment_reference='tip-123',
             ).exists()
         )
+
+
+class BillingAPITestCase(APITestCase):
+    def create_user(self, email='billing@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Bill', last_name='User')
+
+    def test_billing_plan_list_and_subscription_lifecycle(self):
+        monthly = BillingPlan.objects.create(
+            code='creator-monthly',
+            name='Creator Monthly',
+            billing_interval=BillingPlan.INTERVAL_MONTH,
+            price_amount='9.99',
+            price_currency='USD',
+            wallet_address='bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJaaa',
+            is_active=True,
+        )
+        BillingPlan.objects.create(
+            code='creator-yearly',
+            name='Creator Yearly',
+            billing_interval=BillingPlan.INTERVAL_YEAR,
+            price_amount='99.99',
+            price_currency='USD',
+            is_active=False,
+        )
+
+        plans_response = self.client.get(reverse('billing-plan-list'))
+        self.assertEqual(plans_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(plans_response.data), 1)
+        self.assertEqual(plans_response.data[0]['id'], monthly.id)
+        self.assertEqual(plans_response.data[0]['amount'], '9.99')
+        self.assertEqual(plans_response.data[0]['currency'], 'USD')
+        self.assertEqual(plans_response.data[0]['interval'], BillingPlan.INTERVAL_MONTH)
+        self.assertIn('code', plans_response.data[0])
+        self.assertIn('name', plans_response.data[0])
+        self.assertIn('description', plans_response.data[0])
+        self.assertEqual(plans_response.data[0]['wallet_address'], 'bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJaaa')
+
+        user = self.create_user()
+        self.client.force_authenticate(user=user)
+
+        me_empty_response = self.client.get(reverse('billing-subscription-me'))
+        self.assertEqual(me_empty_response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(me_empty_response.data)
+
+        create_response = self.client.post(
+            reverse('billing-subscription-create'),
+            {'plan_id': monthly.id},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['status'], 'active')
+        self.assertEqual(create_response.data['raw_status'], BillingSubscription.STATUS_ACTIVE)
+        self.assertIn('current_period_start', create_response.data)
+        self.assertIn('current_period_end', create_response.data)
+        self.assertIn('cancel_at', create_response.data)
+        self.assertEqual(create_response.data['plan']['interval'], BillingPlan.INTERVAL_MONTH)
+        subscription_id = create_response.data['id']
+
+        me_response = self.client.get(reverse('billing-subscription-me'))
+        self.assertEqual(me_response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(me_response.data)
+        self.assertEqual(me_response.data['id'], subscription_id)
+
+        cancel_response = self.client.post(reverse('billing-subscription-cancel', args=[subscription_id]), format='json')
+        self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(cancel_response.data['status'], 'cancel_at_period_end')
+        self.assertEqual(cancel_response.data['raw_status'], BillingSubscription.STATUS_CANCELLED)
+        self.assertFalse(cancel_response.data['auto_renew'])
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

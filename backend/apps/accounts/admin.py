@@ -2,8 +2,11 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from apps.accounts.models import (
+    BillingPlan,
+    BillingSubscription,
     Category,
     ChannelSubscription,
+    CommentLike,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
@@ -16,6 +19,7 @@ from apps.accounts.models import (
     Video,
     VideoComment,
     VideoLike,
+    VideoView,
 )
 
 
@@ -132,6 +136,16 @@ class VideoLikeAdmin(admin.ModelAdmin):
     autocomplete_fields = ('video', 'user')
 
 
+@admin.register(VideoView)
+class VideoViewAdmin(admin.ModelAdmin):
+    list_display = ('id', 'video', 'viewer', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('video__title', 'viewer__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('video', 'viewer')
+
+
 @admin.register(ChannelSubscription)
 class ChannelSubscriptionAdmin(admin.ModelAdmin):
     list_display = ('id', 'channel', 'subscriber', 'created_at')
@@ -160,6 +174,16 @@ class VideoCommentAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('like_count', 'reply_count', 'created_at', 'updated_at')
     autocomplete_fields = ('video', 'user', 'parent')
+
+
+@admin.register(CommentLike)
+class CommentLikeAdmin(admin.ModelAdmin):
+    list_display = ('id', 'comment', 'user', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('comment__content', 'comment__video__title', 'user__email')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('comment', 'user')
 
 
 @admin.register(SellerStore)
@@ -270,3 +294,22 @@ class PaymentOrderAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('user', 'stream', 'product', 'payment_method')
+
+
+@admin.register(BillingPlan)
+class BillingPlanAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'billing_interval', 'price_amount', 'price_currency', 'wallet_address', 'is_active')
+    list_filter = ('billing_interval', 'price_currency', 'is_active')
+    search_fields = ('code', 'name', 'description', 'wallet_address')
+    ordering = ('price_amount', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(BillingSubscription)
+class BillingSubscriptionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'plan', 'status', 'auto_renew', 'started_at', 'cancelled_at')
+    list_filter = ('status', 'auto_renew', 'created_at')
+    search_fields = ('user__email', 'plan__code', 'plan__name')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('started_at', 'created_at', 'updated_at')
+    autocomplete_fields = ('user', 'plan')

@@ -12,6 +12,8 @@ The internal unified content mapping layer is not part of this public contract y
 - API admin routes: `/api/admin/`
 - API video routes: `/api/videos/`
 - API channel routes: `/api/channels/`
+- API creator follow routes: `/api/creators/`
+- API billing routes: `/api/billing/`
 - API live routes: `/api/live/`
 - API public category routes: `/api/public/categories/`
 - API public video routes: `/api/public/videos/`
@@ -197,6 +199,21 @@ The internal unified content mapping layer is not part of this public contract y
 
 ---
 
+## D2. Creator follow endpoint (`/api/creators`)
+
+### `POST /api/creators/{creatorId}/follow/`
+- Auth: required
+- Response:
+  - `creator_id`, `follower_count`, `viewer_is_following: true`
+- Error 400 when following self.
+
+### `DELETE /api/creators/{creatorId}/follow/`
+- Auth: required
+- Response:
+  - `creator_id`, `follower_count`, `viewer_is_following: false`
+
+---
+
 ## E. Live endpoints (`/api/live`)
 
 ### `GET /api/live/`
@@ -352,6 +369,43 @@ Payment order object fields:
 
 ---
 
+## F2. Billing subscription endpoints (`/api/billing`)
+
+### `GET /api/billing/plans/`
+- Auth: public
+- Response: non-paginated list of active plans
+  - preferred frontend keys:
+    - `id`, `code`, `name`, `description`, `wallet_address`, `amount`, `currency`, `interval`
+  - backward-compatible keys:
+    - `billing_interval`, `price_amount`, `price_currency`, `is_active`
+
+### `POST /api/billing/subscriptions/`
+- Auth: required
+- Body:
+  - required: `plan_id` (active plan)
+- Response (201): created subscription object
+
+### `GET /api/billing/subscriptions/me/`
+- Auth: required
+- Response:
+  - `null` when no active subscription
+  - otherwise latest active `subscription_object`
+
+### `POST /api/billing/subscriptions/{id}/cancel/`
+- Auth: required (owner-only subscription)
+- Behavior:
+  - active subscriptions transition to `cancelled`
+  - `auto_renew=false`, `cancelled_at=now`
+- Response: subscription object
+
+Subscription object fields:
+- preferred frontend keys:
+  - `id`, `status`, `auto_renew`, `current_period_start`, `current_period_end`, `cancel_at`, `plan`
+- additive compatibility keys:
+  - `raw_status`, `started_at`, `cancelled_at`, `created_at`, `updated_at`
+
+---
+
 ## G. Admin endpoints (`/api/admin`)
 
 Auth: staff/superuser required.
@@ -412,7 +466,12 @@ Admin video object fields:
 #### `GET /api/public/videos/{id}/interaction-summary/`
 - Auth: public/optional
 - Response: interaction summary object
-  - `video_id`, `like_count`, `comment_count`, `viewer_has_liked`, `viewer_is_subscribed`, `channel_id`, `subscriber_count`
+  - `video_id`, `like_count`, `comment_count`, `viewer_has_liked`
+  - follow naming:
+    - `viewer_is_following`, `follower_count`
+  - backward-compatible aliases:
+    - `viewer_is_subscribed`, `subscriber_count`
+  - `channel_id`
 
 #### `GET /api/public/videos/{id}/comments/?parent_id=...`
 - Auth: public/optional
