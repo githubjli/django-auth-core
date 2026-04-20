@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/channels/', include('apps.accounts.channel_urls')),
     path('api/creators/', include('apps.accounts.creators_urls')),
     path('api/billing/', include('apps.accounts.billing_urls')),
+    path('api/membership/', include('apps.accounts.membership_urls')),
     path('api/live/', include('apps.accounts.live_urls')),
     path('api/public/categories/', include('apps.accounts.public_category_urls')),
     path('api/public/videos/', include('apps.accounts.public_video_urls')),
