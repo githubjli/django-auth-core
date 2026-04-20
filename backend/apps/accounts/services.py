@@ -4,15 +4,19 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import secrets
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib import error, request as urllib_request
 from uuid import uuid4
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.files.base import ContentFile
+from django.db import transaction
+from django.utils import timezone
 
-from apps.accounts.models import LiveStream
+from apps.accounts.models import LiveStream, MembershipPlan, PaymentOrder, WalletAddress
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +248,133 @@ class AntMediaLiveAdapter:
         if not base_url or not app_name:
             return None
         return f'{base_url}/{app_name}/js/webrtc_adaptor.js'
+
+
+class LbryDaemonError(RuntimeError):
+    pass
+
+
+class LbryDaemonClient:
+    def __init__(self, *, url: str | None = None, timeout: int | None = None):
+        self.url = (url or settings.LBRY_DAEMON_URL or '').strip()
+        self.timeout = int(timeout if timeout is not None else settings.LBRY_DAEMON_TIMEOUT)
+        if not self.url:
+            raise LbryDaemonError('LBRY daemon URL is not configured.')
+
+    def wallet_list(self) -> list[dict]:
+        result = self._rpc_call('wallet_list')
+        if isinstance(result, list):
+            return result
+        raise LbryDaemonError('Unexpected wallet_list response from LBRY daemon.')
+
+    def address_unused(self, wallet_id: str | None = None, account_id: str | None = None) -> dict:
+        params: dict[str, str] = {}
+        if wallet_id:
+            params['wallet_id'] = wallet_id
+        if account_id:
+            params['account_id'] = account_id
+        result = self._rpc_call('address_unused', params)
+        if not isinstance(result, dict):
+            raise LbryDaemonError('Unexpected address_unused response from LBRY daemon.')
+        address = (result.get('address') or '').strip()
+        if not address:
+            raise LbryDaemonError('LBRY daemon did not return an unused address.')
+        return result
+
+    def _rpc_call(self, method: str, params: dict | None = None):
+        payload = {
+            'jsonrpc': '2.0',
+            'method': method,
+            'params': params or {},
+            'id': uuid4().hex,
+        }
+        body = json.dumps(payload).encode('utf-8')
+        request_obj = urllib_request.Request(
+            self.url,
+            data=body,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        try:
+            with urllib_request.urlopen(request_obj, timeout=self.timeout) as response:
+                response_body = response.read().decode('utf-8')
+        except (error.URLError, TimeoutError) as exc:
+            raise LbryDaemonError(f'Failed to reach LBRY daemon: {exc}') from exc
+        try:
+            parsed = json.loads(response_body)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise LbryDaemonError('Invalid JSON response from LBRY daemon.') from exc
+        if not isinstance(parsed, dict):
+            raise LbryDaemonError('Invalid RPC envelope from LBRY daemon.')
+        if parsed.get('error'):
+            error_payload = parsed.get('error')
+            if isinstance(error_payload, dict):
+                message = error_payload.get('message') or str(error_payload)
+            else:
+                message = str(error_payload)
+            raise LbryDaemonError(f'LBRY daemon RPC error: {message}')
+        return parsed.get('result')
+
+
+class MembershipOrderService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+
+    @transaction.atomic
+    def create_order(self, *, user, plan: MembershipPlan) -> PaymentOrder:
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            status=PaymentOrder.STATUS_PENDING,
+            order_no=self._generate_order_no(),
+            expires_at=timezone.now() + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES),
+            amount='0.00',
+            currency='LBC',
+        )
+
+        daemon_result = self.daemon_client.address_unused(
+            wallet_id=settings.LBRY_PLATFORM_WALLET_ID or None,
+            account_id=settings.LBRY_PLATFORM_ACCOUNT_ID or None,
+        )
+        address = (daemon_result.get('address') or '').strip()
+        wallet_id = (daemon_result.get('wallet_id') or settings.LBRY_PLATFORM_WALLET_ID or '').strip()
+        account_id = (daemon_result.get('account_id') or settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip()
+
+        existing_assigned = WalletAddress.objects.filter(address=address, assigned_order__isnull=False).first()
+        if existing_assigned is not None:
+            raise LbryDaemonError('Daemon returned an address already assigned to another order.')
+
+        wallet_address, _ = WalletAddress.objects.update_or_create(
+            address=address,
+            defaults={
+                'label': f'membership:{order.order_no}',
+                'usage_type': WalletAddress.USAGE_MEMBERSHIP,
+                'status': WalletAddress.STATUS_ASSIGNED,
+                'assigned_order': order,
+                'assigned_at': timezone.now(),
+                'wallet_id': wallet_id,
+                'account_id': account_id,
+            },
+        )
+
+        order.wallet_address = wallet_address
+        order.pay_to_address = address
+        order.save(update_fields=['wallet_address', 'pay_to_address', 'updated_at'])
+        return order
+
+    def _generate_order_no(self) -> str:
+        for _ in range(8):
+            candidate = f'MO{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not PaymentOrder.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise LbryDaemonError('Unable to generate unique membership order number.')
 
 
 def generate_video_thumbnail(video, time_offset: float = 1.0) -> bool:

@@ -6,6 +6,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
+    MembershipPlan,
     Category,
     ChannelSubscription,
     LiveChatMessage,
@@ -19,6 +20,7 @@ from apps.accounts.models import (
     Video,
     VideoComment,
     VideoLike,
+    UserMembership,
 )
 from apps.accounts.services import AntMediaLiveAdapter
 
@@ -981,6 +983,92 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
         if obj.status == BillingSubscription.STATUS_ACTIVE and not obj.auto_renew:
             return 'cancel_at_period_end'
         return 'active'
+
+
+class MembershipPlanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MembershipPlan
+        fields = (
+            'id',
+            'code',
+            'name',
+            'description',
+            'price_lbc',
+            'duration_days',
+            'is_active',
+            'sort_order',
+        )
+        read_only_fields = fields
+
+
+class MembershipOrderCreateSerializer(serializers.Serializer):
+    plan_code = serializers.ChoiceField(choices=MembershipPlan.CODE_CHOICES)
+
+    def validate(self, attrs):
+        plan = MembershipPlan.objects.filter(code=attrs['plan_code'], is_active=True).first()
+        if plan is None:
+            raise serializers.ValidationError({'plan_code': ['Active membership plan not found.']})
+        attrs['plan'] = plan
+        return attrs
+
+
+class MembershipOrderSerializer(serializers.ModelSerializer):
+    plan = serializers.SerializerMethodField()
+    qr_text = serializers.CharField(source='pay_to_address', read_only=True)
+
+    class Meta:
+        model = PaymentOrder
+        fields = (
+            'order_no',
+            'plan',
+            'expected_amount_lbc',
+            'pay_to_address',
+            'qr_text',
+            'status',
+            'expires_at',
+            'paid_at',
+            'confirmations',
+            'txid',
+        )
+        read_only_fields = fields
+
+    def get_plan(self, obj):
+        return {
+            'id': obj.target_id,
+            'code': obj.plan_code_snapshot,
+            'name': obj.plan_name_snapshot,
+        }
+
+
+class MyMembershipSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    starts_at = serializers.DateTimeField(allow_null=True)
+    ends_at = serializers.DateTimeField(allow_null=True)
+    plan = serializers.DictField(allow_null=True)
+
+    @classmethod
+    def from_membership(cls, membership: UserMembership | None):
+        if membership is None:
+            return cls(
+                {
+                    'status': 'none',
+                    'starts_at': None,
+                    'ends_at': None,
+                    'plan': None,
+                }
+            )
+        return cls(
+            {
+                'status': membership.status,
+                'starts_at': membership.starts_at,
+                'ends_at': membership.ends_at,
+                'plan': {
+                    'id': membership.plan_id,
+                    'code': membership.plan.code,
+                    'name': membership.plan.name,
+                },
+            }
+        )
 
 
 class AdminVideoSerializer(VideoSerializer):

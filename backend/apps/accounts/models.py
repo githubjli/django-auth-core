@@ -638,6 +638,8 @@ class WalletAddress(models.Model):
 
     address = models.CharField(max_length=128, unique=True)
     label = models.CharField(max_length=255, blank=True, default='')
+    wallet_id = models.CharField(max_length=128, blank=True, default='')
+    account_id = models.CharField(max_length=128, blank=True, default='')
     usage_type = models.CharField(max_length=24, choices=USAGE_TYPE_CHOICES, default=USAGE_GENERAL)
     status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_AVAILABLE)
     assigned_order = models.ForeignKey(

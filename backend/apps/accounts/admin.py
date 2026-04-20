@@ -326,9 +326,9 @@ class MembershipPlanAdmin(admin.ModelAdmin):
 
 @admin.register(WalletAddress)
 class WalletAddressAdmin(admin.ModelAdmin):
-    list_display = ('id', 'address', 'label', 'usage_type', 'status', 'assigned_order', 'assigned_at')
+    list_display = ('id', 'address', 'wallet_id', 'account_id', 'label', 'usage_type', 'status', 'assigned_order', 'assigned_at')
     list_filter = ('usage_type', 'status', 'created_at')
-    search_fields = ('address', 'label', 'assigned_order__order_no', 'assigned_order__external_reference')
+    search_fields = ('address', 'wallet_id', 'account_id', 'label', 'assigned_order__order_no', 'assigned_order__external_reference')
     ordering = ('-id',)
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('assigned_order',)

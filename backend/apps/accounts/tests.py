@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 from unittest.mock import Mock, patch
+from datetime import datetime, timezone
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -22,11 +23,14 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    MembershipPlan,
     PaymentOrder,
     Product,
     SellerStore,
     StreamPaymentMethod,
+    UserMembership,
     Video,
+    WalletAddress,
 )
 from apps.accounts.serializers import LiveStreamSerializer
 
@@ -2933,6 +2937,136 @@ class BillingAPITestCase(APITestCase):
         self.assertEqual(cancel_response.data['status'], 'cancel_at_period_end')
         self.assertEqual(cancel_response.data['raw_status'], BillingSubscription.STATUS_CANCELLED)
         self.assertFalse(cancel_response.data['auto_renew'])
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    MEMBERSHIP_ORDER_EXPIRE_MINUTES=45,
+)
+class MembershipAPITestCase(APITestCase):
+    def create_user(self, email='member@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Mem', last_name='Ber')
+
+    def setUp(self):
+        self.plan = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_MONTHLY,
+            name='Monthly',
+            description='Monthly plan',
+            price_lbc='12.50000000',
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def test_membership_plan_list(self):
+        response = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['code'], MembershipPlan.CODE_MONTHLY)
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_create_membership_order_assigns_wallet_address_and_snapshots(self, mock_address_unused):
+        mock_address_unused.return_value = {
+            'address': 'bTestLbcAddressForOrder1',
+            'wallet_id': 'wallet-main',
+            'account_id': 'account-main',
+        }
+        user = self.create_user()
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], PaymentOrder.STATUS_PENDING)
+        self.assertEqual(response.data['expected_amount_lbc'], '12.50000000')
+        self.assertEqual(response.data['pay_to_address'], 'bTestLbcAddressForOrder1')
+        self.assertEqual(response.data['qr_text'], 'bTestLbcAddressForOrder1')
+        self.assertTrue(response.data['order_no'])
+
+        order = PaymentOrder.objects.get(order_no=response.data['order_no'])
+        self.assertEqual(order.user_id, user.id)
+        self.assertEqual(order.order_type, PaymentOrder.TYPE_MEMBERSHIP)
+        self.assertEqual(order.target_type, 'membership_plan')
+        self.assertEqual(order.target_id, self.plan.id)
+        self.assertEqual(order.plan_code_snapshot, self.plan.code)
+        self.assertEqual(order.plan_name_snapshot, self.plan.name)
+        self.assertEqual(str(order.expected_amount_lbc), '12.50000000')
+        self.assertEqual(order.pay_to_address, 'bTestLbcAddressForOrder1')
+        self.assertIsNotNone(order.expires_at)
+        self.assertIsNotNone(order.wallet_address_id)
+        self.assertEqual(order.wallet_address.usage_type, WalletAddress.USAGE_MEMBERSHIP)
+        self.assertEqual(order.wallet_address.status, WalletAddress.STATUS_ASSIGNED)
+        self.assertEqual(order.wallet_address.wallet_id, 'wallet-main')
+        self.assertEqual(order.wallet_address.account_id, 'account-main')
+        self.assertEqual(order.wallet_address.assigned_order_id, order.id)
+        mock_address_unused.assert_called_once()
+
+        detail_response = self.client.get(reverse('membership-order-detail', args=[order.order_no]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['order_no'], order.order_no)
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_duplicate_assigned_address_fails_safely(self, mock_address_unused):
+        owner = self.create_user('existing-order-owner@example.com')
+        existing_order = PaymentOrder.objects.create(
+            user=owner,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOEXISTING001',
+        )
+        WalletAddress.objects.create(
+            address='bDuplicateAddress',
+            usage_type=WalletAddress.USAGE_MEMBERSHIP,
+            status=WalletAddress.STATUS_ASSIGNED,
+            assigned_order=existing_order,
+        )
+        mock_address_unused.return_value = {'address': 'bDuplicateAddress'}
+
+        buyer = self.create_user('member-buyer@example.com')
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('already assigned', response.data['detail'])
+
+    def test_membership_me_shape(self):
+        user = self.create_user('membership-me@example.com')
+        self.client.force_authenticate(user=user)
+
+        empty_response = self.client.get(reverse('membership-me'))
+        self.assertEqual(empty_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(empty_response.data['status'], 'none')
+        self.assertIsNone(empty_response.data['plan'])
+
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOME0001',
+        )
+        UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            ends_at=datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc),
+        )
+
+        active_response = self.client.get(reverse('membership-me'))
+        self.assertEqual(active_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(active_response.data['status'], UserMembership.STATUS_ACTIVE)
+        self.assertEqual(active_response.data['plan']['code'], self.plan.code)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
