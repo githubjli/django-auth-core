@@ -35,7 +35,12 @@ from apps.accounts.models import (
     WalletAddress,
 )
 from apps.accounts.serializers import LiveStreamSerializer
-from apps.accounts.services import MembershipActivationService, PaymentDetectionService
+from apps.accounts.services import (
+    LbryDaemonClient,
+    LbryDaemonError,
+    MembershipActivationService,
+    PaymentDetectionService,
+)
 
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -2940,6 +2945,25 @@ class BillingAPITestCase(APITestCase):
         self.assertEqual(cancel_response.data['status'], 'cancel_at_period_end')
         self.assertEqual(cancel_response.data['raw_status'], BillingSubscription.STATUS_CANCELLED)
         self.assertFalse(cancel_response.data['auto_renew'])
+
+
+@override_settings(LBRY_DAEMON_URL='http://127.0.0.1:5279')
+class LbryDaemonClientTestCase(APITestCase):
+    @patch.object(LbryDaemonClient, '_rpc_call')
+    def test_address_unused_accepts_plain_string_result(self, mock_rpc_call):
+        mock_rpc_call.return_value = 'bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJzdQ'
+        client = LbryDaemonClient()
+
+        result = client.address_unused(wallet_id='wallet-main')
+        self.assertEqual(result['address'], 'bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJzdQ')
+
+    @patch.object(LbryDaemonClient, '_rpc_call')
+    def test_address_unused_rejects_empty_string_result(self, mock_rpc_call):
+        mock_rpc_call.return_value = '   '
+        client = LbryDaemonClient()
+
+        with self.assertRaises(LbryDaemonError):
+            client.address_unused(wallet_id='wallet-main')
 
 
 @override_settings(

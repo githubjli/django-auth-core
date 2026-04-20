@@ -304,6 +304,11 @@ class LbryDaemonClient:
             params['account_id'] = str(account_id).strip()
         logger.debug('lbry_daemon address_unused params=%s', params)
         result = self._rpc_call('address_unused', params)
+        if isinstance(result, str):
+            address = result.strip()
+            if not address:
+                raise LbryDaemonError('LBRY daemon did not return an unused address.')
+            return {'address': address}
         if not isinstance(result, dict):
             raise LbryDaemonError('Unexpected address_unused response from LBRY daemon.')
         address = (result.get('address') or '').strip()
