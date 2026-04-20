@@ -5,21 +5,26 @@ from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
     Category,
+    ChainReceipt,
     ChannelSubscription,
     CommentLike,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
     LiveStreamProduct,
+    MembershipPlan,
+    OrderPayment,
     PaymentOrder,
     StreamPaymentMethod,
     Product,
     SellerStore,
     User,
+    UserMembership,
     Video,
     VideoComment,
     VideoLike,
     VideoView,
+    WalletAddress,
 )
 
 
@@ -280,20 +285,95 @@ class StreamPaymentMethodAdmin(admin.ModelAdmin):
 class PaymentOrderAdmin(admin.ModelAdmin):
     list_display = (
         'id',
+        'order_no',
         'order_type',
         'status',
         'amount',
         'currency',
+        'expected_amount_lbc',
+        'actual_amount_lbc',
+        'pay_to_address',
         'stream',
         'product',
         'user',
         'created_at',
     )
-    list_filter = ('order_type', 'status', 'currency', 'created_at')
-    search_fields = ('external_reference', 'user__email', 'stream__title', 'product__title')
+    list_filter = ('order_type', 'status', 'currency', 'target_type', 'created_at')
+    search_fields = (
+        'order_no',
+        'external_reference',
+        'pay_to_address',
+        'txid',
+        'user__email',
+        'stream__title',
+        'product__title',
+        'plan_code_snapshot',
+        'plan_name_snapshot',
+    )
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
-    autocomplete_fields = ('user', 'stream', 'product', 'payment_method')
+    autocomplete_fields = ('user', 'stream', 'product', 'payment_method', 'wallet_address')
+
+
+@admin.register(MembershipPlan)
+class MembershipPlanAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'price_lbc', 'duration_days', 'is_active', 'sort_order')
+    list_filter = ('is_active', 'code')
+    search_fields = ('code', 'name', 'description')
+    ordering = ('sort_order', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(WalletAddress)
+class WalletAddressAdmin(admin.ModelAdmin):
+    list_display = ('id', 'address', 'wallet_id', 'account_id', 'label', 'usage_type', 'status', 'assigned_order', 'assigned_at')
+    list_filter = ('usage_type', 'status', 'created_at')
+    search_fields = ('address', 'wallet_id', 'account_id', 'label', 'assigned_order__order_no', 'assigned_order__external_reference')
+    ordering = ('-id',)
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('assigned_order',)
+
+
+@admin.register(ChainReceipt)
+class ChainReceiptAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'currency',
+        'wallet_id',
+        'txid',
+        'vout',
+        'address',
+        'amount_lbc',
+        'confirmations',
+        'match_status',
+        'matched_order',
+        'seen_at',
+    )
+    list_filter = ('currency', 'match_status', 'confirmations', 'created_at')
+    search_fields = ('txid', 'wallet_id', 'address', 'matched_order__order_no', 'matched_order__pay_to_address')
+    ordering = ('-seen_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('matched_order',)
+
+
+@admin.register(OrderPayment)
+class OrderPaymentAdmin(admin.ModelAdmin):
+    list_display = ('id', 'order', 'receipt', 'txid', 'amount_lbc', 'confirmations', 'payment_status', 'matched_at')
+    list_filter = ('payment_status', 'created_at')
+    search_fields = ('txid', 'order__order_no', 'receipt__txid', 'order__external_reference')
+    ordering = ('-matched_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('order', 'receipt')
+
+
+@admin.register(UserMembership)
+class UserMembershipAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'plan', 'status', 'starts_at', 'ends_at', 'source_order')
+    list_filter = ('status', 'plan__code', 'created_at')
+    search_fields = ('user__email', 'plan__code', 'plan__name', 'source_order__order_no')
+    ordering = ('-ends_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('user', 'plan', 'source_order')
 
 
 @admin.register(BillingPlan)
