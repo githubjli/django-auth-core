@@ -10,13 +10,22 @@ from urllib.parse import urlparse
 from urllib import error, request as urllib_request
 from uuid import uuid4
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
-from apps.accounts.models import LiveStream, MembershipPlan, PaymentOrder, WalletAddress
+from apps.accounts.models import (
+    ChainReceipt,
+    LiveStream,
+    MembershipPlan,
+    OrderPayment,
+    PaymentOrder,
+    UserMembership,
+    WalletAddress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +290,34 @@ class LbryDaemonClient:
             raise LbryDaemonError('LBRY daemon did not return an unused address.')
         return result
 
+    def transaction_list(
+        self,
+        wallet_id: str | None = None,
+        page: int | None = None,
+        page_size: int | None = None,
+    ) -> list[dict]:
+        params: dict[str, int | str] = {}
+        if wallet_id:
+            params['wallet_id'] = wallet_id
+        if page is not None:
+            params['page'] = int(page)
+        if page_size is not None:
+            params['page_size'] = int(page_size)
+        result = self._rpc_call('transaction_list', params)
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            items = result.get('items')
+            if isinstance(items, list):
+                return items
+        raise LbryDaemonError('Unexpected transaction_list response from LBRY daemon.')
+
+    def transaction_show(self, txid: str) -> dict:
+        result = self._rpc_call('transaction_show', {'txid': txid})
+        if not isinstance(result, dict):
+            raise LbryDaemonError('Unexpected transaction_show response from LBRY daemon.')
+        return result
+
     def _rpc_call(self, method: str, params: dict | None = None):
         payload = {
             'jsonrpc': '2.0',
@@ -375,6 +412,264 @@ class MembershipOrderService:
             if not PaymentOrder.objects.filter(order_no=candidate).exists():
                 return candidate
         raise LbryDaemonError('Unable to generate unique membership order number.')
+
+
+class MembershipActivationService:
+    @transaction.atomic
+    def activate_for_order(self, *, order: PaymentOrder) -> UserMembership | None:
+        if order.order_type != PaymentOrder.TYPE_MEMBERSHIP:
+            return None
+        if order.status not in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+            return None
+
+        existing = UserMembership.objects.filter(source_order=order).select_related('plan').first()
+        if existing is not None:
+            return existing
+
+        plan = MembershipPlan.objects.filter(pk=order.target_id).first()
+        if plan is None:
+            raise LbryDaemonError('Membership plan missing for paid membership order.')
+
+        now = timezone.now()
+        active_membership = UserMembership.objects.filter(
+            user=order.user,
+            status=UserMembership.STATUS_ACTIVE,
+            ends_at__gt=now,
+        ).order_by('-ends_at', '-id').first()
+
+        starts_at = active_membership.ends_at if active_membership is not None else now
+        ends_at = starts_at + timedelta(days=plan.duration_days)
+
+        membership = UserMembership.objects.create(
+            user=order.user,
+            source_order=order,
+            plan=plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=starts_at,
+            ends_at=ends_at,
+        )
+        return membership
+
+
+class PaymentDetectionService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+        self.min_confirmations = int(settings.LBC_MIN_CONFIRMATIONS)
+        self.page_size = int(settings.LBC_TX_PAGE_SIZE)
+
+    @transaction.atomic
+    def sync_membership_orders(self) -> dict:
+        orders = list(
+            PaymentOrder.objects.select_related('wallet_address').filter(
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+                status__in=[
+                    PaymentOrder.STATUS_PENDING,
+                    PaymentOrder.STATUS_EXPIRED,
+                    PaymentOrder.STATUS_UNDERPAID,
+                ],
+            ).exclude(pay_to_address='')
+        )
+        if not orders:
+            return {'scanned_orders': 0, 'matched_receipts': 0, 'paid_orders': 0, 'activated_memberships': 0}
+
+        order_by_address = {order.pay_to_address: order for order in orders}
+        wallet_ids = {order.wallet_address.wallet_id for order in orders if order.wallet_address and order.wallet_address.wallet_id}
+        if not wallet_ids:
+            if settings.LBRY_PLATFORM_WALLET_ID:
+                wallet_ids = {settings.LBRY_PLATFORM_WALLET_ID}
+            else:
+                wallet_ids = {''}
+
+        txids: set[str] = set()
+        for wallet_id in wallet_ids:
+            tx_summaries = self.daemon_client.transaction_list(
+                wallet_id=wallet_id or None,
+                page=1,
+                page_size=self.page_size,
+            )
+            for tx in tx_summaries:
+                txid = (tx.get('txid') or tx.get('id') or '').strip()
+                if txid:
+                    txids.add(txid)
+
+        matched_receipts = 0
+        paid_orders: set[int] = set()
+        activation_service = MembershipActivationService()
+        activated = 0
+
+        for txid in txids:
+            tx_detail = self.daemon_client.transaction_show(txid)
+            outputs = self._extract_outputs(tx_detail)
+            confirmations = self._extract_confirmations(tx_detail)
+            block_height = tx_detail.get('height') or tx_detail.get('block_height')
+            wallet_id = (tx_detail.get('wallet_id') or '').strip()
+            for output in outputs:
+                address = (output.get('address') or '').strip()
+                order = order_by_address.get(address)
+                if order is None:
+                    continue
+                amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+                if amount is None:
+                    continue
+                vout = output.get('nout')
+                if vout is None:
+                    vout = output.get('vout')
+                receipt = self._upsert_receipt(
+                    txid=txid,
+                    vout=vout,
+                    address=address,
+                    amount=amount,
+                    confirmations=confirmations,
+                    block_height=block_height,
+                    raw_payload=tx_detail,
+                    matched_order=order,
+                    wallet_id=wallet_id or (order.wallet_address.wallet_id if order.wallet_address else ''),
+                )
+                self._upsert_order_payment(order=order, receipt=receipt, txid=txid, amount=amount, confirmations=confirmations)
+                matched_receipts += 1
+                if self._apply_payment_state(order=order, amount=amount, confirmations=confirmations, txid=txid):
+                    paid_orders.add(order.id)
+                    membership = activation_service.activate_for_order(order=order)
+                    if membership is not None:
+                        activated += 1
+
+        return {
+            'scanned_orders': len(orders),
+            'matched_receipts': matched_receipts,
+            'paid_orders': len(paid_orders),
+            'activated_memberships': activated,
+        }
+
+    def _extract_outputs(self, tx_detail: dict) -> list[dict]:
+        outputs = tx_detail.get('outputs')
+        if isinstance(outputs, list):
+            parsed_outputs = []
+            for index, output in enumerate(outputs):
+                if not isinstance(output, dict):
+                    continue
+                address = output.get('address')
+                if not address:
+                    addresses = output.get('addresses')
+                    if isinstance(addresses, list) and addresses:
+                        address = addresses[0]
+                parsed_outputs.append(
+                    {
+                        'address': address,
+                        'amount': output.get('amount'),
+                        'vout': output.get('vout'),
+                        'nout': output.get('nout', index),
+                    }
+                )
+            return parsed_outputs
+        return []
+
+    def _extract_confirmations(self, tx_detail: dict) -> int:
+        value = tx_detail.get('confirmations')
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _upsert_receipt(
+        self,
+        *,
+        txid: str,
+        vout,
+        address: str,
+        amount: Decimal,
+        confirmations: int,
+        block_height,
+        raw_payload: dict,
+        matched_order: PaymentOrder,
+        wallet_id: str,
+    ) -> ChainReceipt:
+        receipt, _ = ChainReceipt.objects.update_or_create(
+            currency=ChainReceipt.CURRENCY_LBC,
+            txid=txid,
+            vout=vout,
+            defaults={
+                'wallet_id': wallet_id,
+                'address': address,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'block_height': block_height,
+                'seen_at': timezone.now(),
+                'confirmed_at': timezone.now() if confirmations >= self.min_confirmations else None,
+                'raw_payload': raw_payload,
+                'matched_order': matched_order,
+                'match_status': ChainReceipt.MATCH_MATCHED,
+            },
+        )
+        return receipt
+
+    def _upsert_order_payment(
+        self,
+        *,
+        order: PaymentOrder,
+        receipt: ChainReceipt,
+        txid: str,
+        amount: Decimal,
+        confirmations: int,
+    ) -> OrderPayment:
+        is_confirmed = confirmations >= self.min_confirmations and amount >= (order.expected_amount_lbc or Decimal('0'))
+        payment_status = OrderPayment.PAYMENT_CONFIRMED if is_confirmed else OrderPayment.PAYMENT_PENDING
+        order_payment, _ = OrderPayment.objects.update_or_create(
+            order=order,
+            receipt=receipt,
+            defaults={
+                'txid': txid,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'payment_status': payment_status,
+                'matched_at': timezone.now(),
+            },
+        )
+        return order_payment
+
+    def _apply_payment_state(self, *, order: PaymentOrder, amount: Decimal, confirmations: int, txid: str) -> bool:
+        expected = order.expected_amount_lbc or Decimal('0')
+        if amount < expected:
+            if order.status != PaymentOrder.STATUS_UNDERPAID:
+                order.status = PaymentOrder.STATUS_UNDERPAID
+                order.actual_amount_lbc = amount
+                order.txid = txid
+                order.confirmations = confirmations
+                order.save(update_fields=['status', 'actual_amount_lbc', 'txid', 'confirmations', 'updated_at'])
+            return False
+        if confirmations < self.min_confirmations:
+            if order.actual_amount_lbc != amount or order.txid != txid or order.confirmations != confirmations:
+                order.actual_amount_lbc = amount
+                order.txid = txid
+                order.confirmations = confirmations
+                order.save(update_fields=['actual_amount_lbc', 'txid', 'confirmations', 'updated_at'])
+            return False
+
+        new_status = PaymentOrder.STATUS_PAID if amount == expected else PaymentOrder.STATUS_OVERPAID
+        update_fields = ['status', 'actual_amount_lbc', 'txid', 'confirmations', 'paid_at', 'updated_at']
+        if order.status == PaymentOrder.STATUS_EXPIRED:
+            note = (order.paid_note or '').strip()
+            note_suffix = 'paid_after_expiry'
+            if note_suffix not in note:
+                order.paid_note = f'{note};{note_suffix}'.strip(';')
+                update_fields.append('paid_note')
+        order.status = new_status
+        order.actual_amount_lbc = amount
+        order.txid = txid
+        order.confirmations = confirmations
+        if order.paid_at is None:
+            order.paid_at = timezone.now()
+        order.save(update_fields=update_fields)
+        return True
 
 
 def generate_video_thumbnail(video, time_offset: float = 1.0) -> bool:

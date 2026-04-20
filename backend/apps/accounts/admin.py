@@ -339,6 +339,7 @@ class ChainReceiptAdmin(admin.ModelAdmin):
     list_display = (
         'id',
         'currency',
+        'wallet_id',
         'txid',
         'vout',
         'address',
@@ -349,7 +350,7 @@ class ChainReceiptAdmin(admin.ModelAdmin):
         'seen_at',
     )
     list_filter = ('currency', 'match_status', 'confirmations', 'created_at')
-    search_fields = ('txid', 'address', 'matched_order__order_no', 'matched_order__pay_to_address')
+    search_fields = ('txid', 'wallet_id', 'address', 'matched_order__order_no', 'matched_order__pay_to_address')
     ordering = ('-seen_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('matched_order',)

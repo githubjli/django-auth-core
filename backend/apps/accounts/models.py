@@ -683,6 +683,7 @@ class ChainReceipt(models.Model):
     ]
 
     currency = models.CharField(max_length=10, choices=CURRENCY_CHOICES, default=CURRENCY_LBC)
+    wallet_id = models.CharField(max_length=128, blank=True, default='')
     address = models.CharField(max_length=128)
     txid = models.CharField(max_length=128)
     vout = models.PositiveIntegerField(null=True, blank=True)

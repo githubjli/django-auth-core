@@ -1,7 +1,7 @@
 import shutil
 import tempfile
 from unittest.mock import Mock, patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -19,11 +19,13 @@ from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
     Category,
+    ChainReceipt,
     LiveChatMessage,
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
     MembershipPlan,
+    OrderPayment,
     PaymentOrder,
     Product,
     SellerStore,
@@ -33,6 +35,7 @@ from apps.accounts.models import (
     WalletAddress,
 )
 from apps.accounts.serializers import LiveStreamSerializer
+from apps.accounts.services import MembershipActivationService, PaymentDetectionService
 
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -3067,6 +3070,230 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(active_response.status_code, status.HTTP_200_OK)
         self.assertEqual(active_response.data['status'], UserMembership.STATUS_ACTIVE)
         self.assertEqual(active_response.data['plan']['code'], self.plan.code)
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    LBC_MIN_CONFIRMATIONS=2,
+    LBC_TX_PAGE_SIZE=50,
+)
+class MembershipPaymentDetectionServiceTestCase(APITestCase):
+    class FakeDaemonClient:
+        def __init__(self, tx_list=None, tx_show_map=None):
+            self.tx_list = tx_list or []
+            self.tx_show_map = tx_show_map or {}
+
+        def transaction_list(self, wallet_id=None, page=None, page_size=None):
+            return self.tx_list
+
+        def transaction_show(self, txid):
+            return self.tx_show_map[txid]
+
+    def create_user(self, email='detect@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Detect', last_name='User')
+
+    def create_plan(self, code=None, duration_days=30, price='10.00000000'):
+        if code is None:
+            code = f'monthly-{MembershipPlan.objects.count() + 1}'
+        return MembershipPlan.objects.create(
+            code=code,
+            name=f'Plan {code}',
+            description='Plan',
+            price_lbc=price,
+            duration_days=duration_days,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def create_order(self, *, user, plan, address, status=PaymentOrder.STATUS_PENDING):
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=status,
+            order_no=f'MO-{address[-6:]}',
+            pay_to_address=address,
+        )
+        wallet = WalletAddress.objects.create(
+            address=address,
+            usage_type=WalletAddress.USAGE_MEMBERSHIP,
+            status=WalletAddress.STATUS_ASSIGNED,
+            assigned_order=order,
+            wallet_id='wallet-main',
+        )
+        order.wallet_address = wallet
+        order.save(update_fields=['wallet_address', 'updated_at'])
+        return order
+
+    def run_sync(self, txid, tx_payload):
+        daemon = self.FakeDaemonClient(
+            tx_list=[{'txid': txid}],
+            tx_show_map={txid: tx_payload},
+        )
+        service = PaymentDetectionService(daemon_client=daemon)
+        return service.sync_membership_orders()
+
+    def test_exact_payment_marks_order_paid(self):
+        user = self.create_user('exact@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bExactAddress001')
+
+        self.run_sync(
+            'tx-exact',
+            {
+                'txid': 'tx-exact',
+                'confirmations': 2,
+                'height': 321,
+                'outputs': [
+                    {'nout': 0, 'address': 'bExactAddress001', 'amount': '10.0'},
+                ],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_PAID)
+        self.assertEqual(order.txid, 'tx-exact')
+        self.assertEqual(str(order.actual_amount_lbc), '10.00000000')
+        self.assertEqual(order.confirmations, 2)
+        self.assertIsNotNone(order.paid_at)
+        self.assertTrue(UserMembership.objects.filter(source_order=order).exists())
+
+    def test_overpayment_marks_order_overpaid_and_activates(self):
+        user = self.create_user('overpay@example.com')
+        plan = self.create_plan(code=MembershipPlan.CODE_QUARTERLY, duration_days=90, price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bOverAddress001')
+
+        self.run_sync(
+            'tx-over',
+            {
+                'txid': 'tx-over',
+                'confirmations': 3,
+                'outputs': [{'nout': 1, 'address': 'bOverAddress001', 'amount': '12.5'}],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_OVERPAID)
+        self.assertTrue(UserMembership.objects.filter(source_order=order).exists())
+
+    def test_underpayment_does_not_mark_paid(self):
+        user = self.create_user('underpay@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bUnderAddress001')
+
+        self.run_sync(
+            'tx-under',
+            {
+                'txid': 'tx-under',
+                'confirmations': 5,
+                'outputs': [{'nout': 0, 'address': 'bUnderAddress001', 'amount': '9.0'}],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_UNDERPAID)
+        self.assertFalse(UserMembership.objects.filter(source_order=order).exists())
+
+    def test_duplicate_polling_is_idempotent(self):
+        user = self.create_user('dupe@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bDupeAddress001')
+        tx_payload = {
+            'txid': 'tx-dupe',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bDupeAddress001', 'amount': '10.0'}],
+        }
+
+        self.run_sync('tx-dupe', tx_payload)
+        self.run_sync('tx-dupe', tx_payload)
+        self.assertEqual(ChainReceipt.objects.filter(txid='tx-dupe', vout=0).count(), 1)
+        self.assertEqual(OrderPayment.objects.filter(order=order).count(), 1)
+        self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
+
+    def test_active_membership_extension_starts_from_current_end(self):
+        user = self.create_user('extend@example.com')
+        plan = self.create_plan(price='10.00000000', duration_days=30)
+        existing_order = self.create_order(user=user, plan=plan, address='bExisting0001')
+        existing_order.status = PaymentOrder.STATUS_PAID
+        existing_order.paid_at = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        existing_order.save(update_fields=['status', 'paid_at', 'updated_at'])
+        current_start = datetime.now(timezone.utc) - timedelta(days=1)
+        current_end = datetime.now(timezone.utc) + timedelta(days=15)
+        existing_membership = UserMembership.objects.create(
+            user=user,
+            source_order=existing_order,
+            plan=plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=current_start,
+            ends_at=current_end,
+        )
+        order = self.create_order(user=user, plan=plan, address='bExtendAddress001')
+
+        self.run_sync(
+            'tx-extend',
+            {
+                'txid': 'tx-extend',
+                'confirmations': 2,
+                'outputs': [{'nout': 0, 'address': 'bExtendAddress001', 'amount': '10.0'}],
+            },
+        )
+        new_membership = UserMembership.objects.get(source_order=order)
+        self.assertEqual(new_membership.starts_at, existing_membership.ends_at)
+
+    def test_expired_order_late_payment_is_marked_paid_with_note(self):
+        user = self.create_user('expired@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bExpiredAddress01', status=PaymentOrder.STATUS_EXPIRED)
+
+        self.run_sync(
+            'tx-expired',
+            {
+                'txid': 'tx-expired',
+                'confirmations': 2,
+                'outputs': [{'nout': 0, 'address': 'bExpiredAddress01', 'amount': '10.0'}],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_PAID)
+        self.assertIn('paid_after_expiry', order.paid_note)
+
+    def test_receipt_persistence_stores_output_details_and_raw_payload(self):
+        user = self.create_user('receipt@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bReceiptAddress01')
+        payload = {
+            'txid': 'tx-receipt',
+            'wallet_id': 'wallet-main',
+            'confirmations': 2,
+            'height': 777,
+            'outputs': [{'nout': 4, 'address': 'bReceiptAddress01', 'amount': '10.0'}],
+        }
+
+        self.run_sync('tx-receipt', payload)
+        receipt = ChainReceipt.objects.get(txid='tx-receipt', vout=4)
+        self.assertEqual(receipt.wallet_id, 'wallet-main')
+        self.assertEqual(receipt.address, 'bReceiptAddress01')
+        self.assertEqual(str(receipt.amount_lbc), '10.00000000')
+        self.assertEqual(receipt.block_height, 777)
+        self.assertEqual(receipt.matched_order_id, order.id)
+        self.assertEqual(receipt.raw_payload['txid'], 'tx-receipt')
+
+    def test_membership_activation_service_is_idempotent(self):
+        user = self.create_user('activation@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bActivateAddress')
+        order.status = PaymentOrder.STATUS_PAID
+        order.paid_at = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+        order.save(update_fields=['status', 'paid_at', 'updated_at'])
+
+        activation_service = MembershipActivationService()
+        first = activation_service.activate_for_order(order=order)
+        second = activation_service.activate_for_order(order=order)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
