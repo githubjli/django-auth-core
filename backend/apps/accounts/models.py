@@ -483,20 +483,28 @@ class PaymentOrder(models.Model):
     TYPE_TIP = 'tip'
     TYPE_PRODUCT = 'product'
     TYPE_PAID_PROGRAM = 'paid_program'
+    TYPE_MEMBERSHIP = 'membership'
     ORDER_TYPE_CHOICES = [
         (TYPE_TIP, 'Tip'),
         (TYPE_PRODUCT, 'Product'),
         (TYPE_PAID_PROGRAM, 'Paid Program'),
+        (TYPE_MEMBERSHIP, 'Membership'),
     ]
 
     STATUS_PENDING = 'pending'
     STATUS_PAID = 'paid'
+    STATUS_EXPIRED = 'expired'
     STATUS_FAILED = 'failed'
+    STATUS_UNDERPAID = 'underpaid'
+    STATUS_OVERPAID = 'overpaid'
     STATUS_CANCELLED = 'cancelled'
     STATUS_CHOICES = [
         (STATUS_PENDING, 'Pending'),
         (STATUS_PAID, 'Paid'),
+        (STATUS_EXPIRED, 'Expired'),
         (STATUS_FAILED, 'Failed'),
+        (STATUS_UNDERPAID, 'Underpaid'),
+        (STATUS_OVERPAID, 'Overpaid'),
         (STATUS_CANCELLED, 'Cancelled'),
     ]
 
@@ -543,6 +551,24 @@ class PaymentOrder(models.Model):
         related_name='payment_orders_marked_paid',
     )
     paid_note = models.TextField(blank=True, default='')
+    order_no = models.CharField(max_length=64, blank=True, default='')
+    target_type = models.CharField(max_length=64, blank=True, default='')
+    target_id = models.PositiveIntegerField(null=True, blank=True)
+    plan_code_snapshot = models.CharField(max_length=64, blank=True, default='')
+    plan_name_snapshot = models.CharField(max_length=255, blank=True, default='')
+    expected_amount_lbc = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
+    actual_amount_lbc = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
+    pay_to_address = models.CharField(max_length=128, blank=True, default='')
+    wallet_address = models.ForeignKey(
+        'WalletAddress',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_orders',
+    )
+    expires_at = models.DateTimeField(null=True, blank=True)
+    txid = models.CharField(max_length=128, blank=True, default='')
+    confirmations = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
@@ -554,6 +580,219 @@ class PaymentOrder(models.Model):
                 condition=~models.Q(client_request_id=''),
                 name='unique_payment_order_request_id_per_user_stream',
             ),
+            models.UniqueConstraint(
+                fields=['order_no'],
+                condition=~models.Q(order_no=''),
+                name='unique_payment_order_no_when_present',
+            ),
+        ]
+
+
+class MembershipPlan(models.Model):
+    CODE_MONTHLY = 'monthly'
+    CODE_QUARTERLY = 'quarterly'
+    CODE_YEARLY = 'yearly'
+    CODE_CHOICES = [
+        (CODE_MONTHLY, 'Monthly'),
+        (CODE_QUARTERLY, 'Quarterly'),
+        (CODE_YEARLY, 'Yearly'),
+    ]
+
+    code = models.CharField(max_length=32, choices=CODE_CHOICES, unique=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    price_lbc = models.DecimalField(max_digits=18, decimal_places=8)
+    duration_days = models.PositiveIntegerField()
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class WalletAddress(models.Model):
+    USAGE_MEMBERSHIP = 'membership'
+    USAGE_TIP = 'tip'
+    USAGE_DEPOSIT = 'deposit'
+    USAGE_GENERAL = 'general'
+    USAGE_TYPE_CHOICES = [
+        (USAGE_MEMBERSHIP, 'Membership'),
+        (USAGE_TIP, 'Tip'),
+        (USAGE_DEPOSIT, 'Deposit'),
+        (USAGE_GENERAL, 'General'),
+    ]
+
+    STATUS_AVAILABLE = 'available'
+    STATUS_ASSIGNED = 'assigned'
+    STATUS_RETIRED = 'retired'
+    STATUS_CHOICES = [
+        (STATUS_AVAILABLE, 'Available'),
+        (STATUS_ASSIGNED, 'Assigned'),
+        (STATUS_RETIRED, 'Retired'),
+    ]
+
+    address = models.CharField(max_length=128, unique=True)
+    label = models.CharField(max_length=255, blank=True, default='')
+    wallet_id = models.CharField(max_length=128, blank=True, default='')
+    account_id = models.CharField(max_length=128, blank=True, default='')
+    usage_type = models.CharField(max_length=24, choices=USAGE_TYPE_CHOICES, default=USAGE_GENERAL)
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_AVAILABLE)
+    assigned_order = models.ForeignKey(
+        'PaymentOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_wallet_addresses',
+    )
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['assigned_order'],
+                condition=models.Q(assigned_order__isnull=False),
+                name='unique_wallet_address_assigned_order',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.address
+
+
+class ChainReceipt(models.Model):
+    CURRENCY_LBC = 'LBC'
+    CURRENCY_CHOICES = [
+        (CURRENCY_LBC, 'LBC'),
+    ]
+
+    MATCH_UNMATCHED = 'unmatched'
+    MATCH_MATCHED = 'matched'
+    MATCH_IGNORED = 'ignored'
+    MATCH_STATUS_CHOICES = [
+        (MATCH_UNMATCHED, 'Unmatched'),
+        (MATCH_MATCHED, 'Matched'),
+        (MATCH_IGNORED, 'Ignored'),
+    ]
+
+    currency = models.CharField(max_length=10, choices=CURRENCY_CHOICES, default=CURRENCY_LBC)
+    wallet_id = models.CharField(max_length=128, blank=True, default='')
+    address = models.CharField(max_length=128)
+    txid = models.CharField(max_length=128)
+    vout = models.PositiveIntegerField(null=True, blank=True)
+    amount_lbc = models.DecimalField(max_digits=18, decimal_places=8)
+    block_height = models.PositiveBigIntegerField(null=True, blank=True)
+    confirmations = models.PositiveIntegerField(default=0)
+    seen_at = models.DateTimeField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    raw_payload = models.JSONField(null=True, blank=True)
+    matched_order = models.ForeignKey(
+        'PaymentOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='chain_receipts',
+    )
+    match_status = models.CharField(max_length=24, choices=MATCH_STATUS_CHOICES, default=MATCH_UNMATCHED)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-seen_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['currency', 'txid', 'vout'], name='unique_chain_receipt_output'),
+        ]
+        indexes = [
+            models.Index(fields=['address', 'seen_at'], name='chain_receipt_address_seen_idx'),
+            models.Index(fields=['match_status', 'seen_at'], name='chain_receipt_match_seen_idx'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.currency}:{self.txid}'
+
+
+class OrderPayment(models.Model):
+    PAYMENT_PENDING = 'pending'
+    PAYMENT_CONFIRMED = 'confirmed'
+    PAYMENT_FAILED = 'failed'
+    PAYMENT_STATUS_CHOICES = [
+        (PAYMENT_PENDING, 'Pending'),
+        (PAYMENT_CONFIRMED, 'Confirmed'),
+        (PAYMENT_FAILED, 'Failed'),
+    ]
+
+    order = models.ForeignKey(
+        PaymentOrder,
+        on_delete=models.CASCADE,
+        related_name='payments',
+    )
+    receipt = models.ForeignKey(
+        ChainReceipt,
+        on_delete=models.CASCADE,
+        related_name='order_payments',
+    )
+    txid = models.CharField(max_length=128)
+    amount_lbc = models.DecimalField(max_digits=18, decimal_places=8)
+    confirmations = models.PositiveIntegerField(default=0)
+    payment_status = models.CharField(max_length=24, choices=PAYMENT_STATUS_CHOICES, default=PAYMENT_PENDING)
+    matched_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-matched_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['order', 'receipt'], name='unique_order_receipt_payment'),
+        ]
+        indexes = [
+            models.Index(fields=['order', 'payment_status'], name='order_payment_order_status_idx'),
+            models.Index(fields=['txid'], name='order_payment_txid_idx'),
+        ]
+
+
+class UserMembership(models.Model):
+    STATUS_ACTIVE = 'active'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_EXPIRED, 'Expired'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='user_memberships',
+    )
+    source_order = models.ForeignKey(
+        PaymentOrder,
+        on_delete=models.PROTECT,
+        related_name='user_memberships',
+    )
+    plan = models.ForeignKey(
+        MembershipPlan,
+        on_delete=models.PROTECT,
+        related_name='memberships',
+    )
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-ends_at', '-id']
+        indexes = [
+            models.Index(fields=['user', 'status', 'ends_at'], name='membership_user_status_end_idx'),
+            models.Index(fields=['starts_at', 'ends_at'], name='membership_valid_window_idx'),
         ]
 
 
