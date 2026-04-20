@@ -15,6 +15,7 @@ This phase intentionally implements only:
 - `POST /api/membership/orders/` requires authenticated user access.
 - Order creation request payload uses `plan_code` (for example: `{ "plan_code": "monthly" }`).
 - `plan_id` compatibility is intentionally deferred and not part of the current contract.
+- Daemon request params include `wallet_id` when configured, and include `account_id` only when non-empty.
 
 ## Not included in this phase
 

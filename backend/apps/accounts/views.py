@@ -73,8 +73,13 @@ from apps.accounts.serializers import (
 )
 from apps.accounts.services import (
     AntMediaLiveAdapter,
+    LbryDaemonConnectionError,
     LbryDaemonError,
+    LbryDaemonInvalidParamsError,
+    LbryDaemonRpcError,
     MembershipOrderService,
+    MembershipOrderPersistenceError,
+    WalletAddressConflictError,
     generate_video_thumbnail,
 )
 
@@ -1364,8 +1369,24 @@ class MembershipOrderCreateAPIView(APIView):
         service = MembershipOrderService()
         try:
             order = service.create_order(user=request.user, plan=plan)
+        except LbryDaemonConnectionError as exc:
+            logger.exception('membership_order_create daemon_connection_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except LbryDaemonInvalidParamsError as exc:
+            logger.exception('membership_order_create daemon_invalid_params user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except LbryDaemonRpcError as exc:
+            logger.exception('membership_order_create daemon_rpc_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except WalletAddressConflictError as exc:
+            logger.exception('membership_order_create duplicate_wallet_address user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except MembershipOrderPersistenceError as exc:
+            logger.exception('membership_order_create persistence_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except LbryDaemonError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            logger.exception('membership_order_create daemon_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         response_serializer = MembershipOrderSerializer(order)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 

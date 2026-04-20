@@ -263,6 +263,26 @@ class LbryDaemonError(RuntimeError):
     pass
 
 
+class LbryDaemonConnectionError(LbryDaemonError):
+    pass
+
+
+class LbryDaemonRpcError(LbryDaemonError):
+    pass
+
+
+class LbryDaemonInvalidParamsError(LbryDaemonError):
+    pass
+
+
+class WalletAddressConflictError(LbryDaemonError):
+    pass
+
+
+class MembershipOrderPersistenceError(LbryDaemonError):
+    pass
+
+
 class LbryDaemonClient:
     def __init__(self, *, url: str | None = None, timeout: int | None = None):
         self.url = (url or settings.LBRY_DAEMON_URL or '').strip()
@@ -279,9 +299,10 @@ class LbryDaemonClient:
     def address_unused(self, wallet_id: str | None = None, account_id: str | None = None) -> dict:
         params: dict[str, str] = {}
         if wallet_id:
-            params['wallet_id'] = wallet_id
-        if account_id:
-            params['account_id'] = account_id
+            params['wallet_id'] = str(wallet_id).strip()
+        if account_id and str(account_id).strip():
+            params['account_id'] = str(account_id).strip()
+        logger.debug('lbry_daemon address_unused params=%s', params)
         result = self._rpc_call('address_unused', params)
         if not isinstance(result, dict):
             raise LbryDaemonError('Unexpected address_unused response from LBRY daemon.')
@@ -336,20 +357,23 @@ class LbryDaemonClient:
             with urllib_request.urlopen(request_obj, timeout=self.timeout) as response:
                 response_body = response.read().decode('utf-8')
         except (error.URLError, TimeoutError) as exc:
-            raise LbryDaemonError(f'Failed to reach LBRY daemon: {exc}') from exc
+            raise LbryDaemonConnectionError(f'Failed to reach LBRY daemon: {exc}') from exc
         try:
             parsed = json.loads(response_body)
         except (ValueError, json.JSONDecodeError) as exc:
-            raise LbryDaemonError('Invalid JSON response from LBRY daemon.') from exc
+            raise LbryDaemonRpcError('Invalid JSON response from LBRY daemon.') from exc
         if not isinstance(parsed, dict):
-            raise LbryDaemonError('Invalid RPC envelope from LBRY daemon.')
+            raise LbryDaemonRpcError('Invalid RPC envelope from LBRY daemon.')
         if parsed.get('error'):
             error_payload = parsed.get('error')
             if isinstance(error_payload, dict):
-                message = error_payload.get('message') or str(error_payload)
+                message = str(error_payload.get('message') or error_payload)
+                code = error_payload.get('code')
+                if code in {-32602, 'INVALID_PARAMS'}:
+                    raise LbryDaemonInvalidParamsError(f'LBRY daemon RPC invalid params: {message}')
             else:
                 message = str(error_payload)
-            raise LbryDaemonError(f'LBRY daemon RPC error: {message}')
+            raise LbryDaemonRpcError(f'LBRY daemon RPC error: {message}')
         return parsed.get('result')
 
 
@@ -361,50 +385,84 @@ class MembershipOrderService:
 
     @transaction.atomic
     def create_order(self, *, user, plan: MembershipPlan) -> PaymentOrder:
-        order = PaymentOrder.objects.create(
-            user=user,
-            order_type=PaymentOrder.TYPE_MEMBERSHIP,
-            target_type='membership_plan',
-            target_id=plan.id,
-            plan_code_snapshot=plan.code,
-            plan_name_snapshot=plan.name,
-            expected_amount_lbc=plan.price_lbc,
-            status=PaymentOrder.STATUS_PENDING,
-            order_no=self._generate_order_no(),
-            expires_at=timezone.now() + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES),
-            amount='0.00',
-            currency='LBC',
-        )
+        order = None
+        daemon_wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip() or None
+        daemon_account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
+        try:
+            order = PaymentOrder.objects.create(
+                user=user,
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+                target_type='membership_plan',
+                target_id=plan.id,
+                plan_code_snapshot=plan.code,
+                plan_name_snapshot=plan.name,
+                expected_amount_lbc=plan.price_lbc,
+                status=PaymentOrder.STATUS_PENDING,
+                order_no=self._generate_order_no(),
+                expires_at=timezone.now() + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES),
+                amount='0.00',
+                currency='LBC',
+            )
 
-        daemon_result = self.daemon_client.address_unused(
-            wallet_id=settings.LBRY_PLATFORM_WALLET_ID or None,
-            account_id=settings.LBRY_PLATFORM_ACCOUNT_ID or None,
-        )
-        address = (daemon_result.get('address') or '').strip()
-        wallet_id = (daemon_result.get('wallet_id') or settings.LBRY_PLATFORM_WALLET_ID or '').strip()
-        account_id = (daemon_result.get('account_id') or settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip()
+            logger.debug(
+                'membership_order_create order_no=%s daemon_url=%s wallet_id=%s account_id_included=%s',
+                order.order_no,
+                getattr(self.daemon_client, 'url', ''),
+                daemon_wallet_id,
+                bool(daemon_account_id),
+            )
+            request_params = {}
+            if daemon_wallet_id:
+                request_params['wallet_id'] = daemon_wallet_id
+            if daemon_account_id:
+                request_params['account_id'] = daemon_account_id
+            logger.debug('membership_order_create address_unused_params=%s', request_params)
 
-        existing_assigned = WalletAddress.objects.filter(address=address, assigned_order__isnull=False).first()
-        if existing_assigned is not None:
-            raise LbryDaemonError('Daemon returned an address already assigned to another order.')
+            daemon_result = self.daemon_client.address_unused(
+                wallet_id=daemon_wallet_id,
+                account_id=daemon_account_id,
+            )
+            address = (daemon_result.get('address') or '').strip()
+            logger.debug('membership_order_create order_no=%s returned_address=%s', order.order_no, address)
+            wallet_id = (daemon_result.get('wallet_id') or daemon_wallet_id or '').strip()
+            account_id = (daemon_result.get('account_id') or daemon_account_id or '').strip()
 
-        wallet_address, _ = WalletAddress.objects.update_or_create(
-            address=address,
-            defaults={
-                'label': f'membership:{order.order_no}',
-                'usage_type': WalletAddress.USAGE_MEMBERSHIP,
-                'status': WalletAddress.STATUS_ASSIGNED,
-                'assigned_order': order,
-                'assigned_at': timezone.now(),
-                'wallet_id': wallet_id,
-                'account_id': account_id,
-            },
-        )
+            existing_assigned = WalletAddress.objects.filter(address=address, assigned_order__isnull=False).first()
+            if existing_assigned is not None:
+                raise WalletAddressConflictError('Daemon returned an address already assigned to another order.')
 
-        order.wallet_address = wallet_address
-        order.pay_to_address = address
-        order.save(update_fields=['wallet_address', 'pay_to_address', 'updated_at'])
-        return order
+            wallet_address, _ = WalletAddress.objects.update_or_create(
+                address=address,
+                defaults={
+                    'label': f'membership:{order.order_no}',
+                    'usage_type': WalletAddress.USAGE_MEMBERSHIP,
+                    'status': WalletAddress.STATUS_ASSIGNED,
+                    'assigned_order': order,
+                    'assigned_at': timezone.now(),
+                    'wallet_id': wallet_id,
+                    'account_id': account_id,
+                },
+            )
+
+            order.wallet_address = wallet_address
+            order.pay_to_address = address
+            order.save(update_fields=['wallet_address', 'pay_to_address', 'updated_at'])
+            return order
+        except (LbryDaemonConnectionError, LbryDaemonRpcError, LbryDaemonInvalidParamsError, WalletAddressConflictError) as exc:
+            logger.exception(
+                'membership_order_create failed category=%s order_no=%s rollback_expected=%s',
+                exc.__class__.__name__,
+                getattr(order, 'order_no', None),
+                True,
+            )
+            raise
+        except Exception as exc:
+            logger.exception(
+                'membership_order_create failed category=MembershipOrderPersistenceError order_no=%s rollback_expected=%s',
+                getattr(order, 'order_no', None),
+                True,
+            )
+            raise MembershipOrderPersistenceError('Failed to persist membership order/address assignment.') from exc
 
     def _generate_order_no(self) -> str:
         for _ in range(8):

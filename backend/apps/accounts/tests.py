@@ -3030,6 +3030,27 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['order_no'], order.order_no)
 
+    @override_settings(
+        LBRY_PLATFORM_WALLET_ID='wallet-main',
+        LBRY_PLATFORM_ACCOUNT_ID='   ',
+    )
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_create_membership_order_does_not_send_blank_account_id(self, mock_address_unused):
+        mock_address_unused.return_value = {
+            'address': 'bNoBlankAccountAddress',
+            'wallet_id': 'wallet-main',
+        }
+        user = self.create_user('blank-account@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mock_address_unused.assert_called_once_with(wallet_id='wallet-main', account_id=None)
+
     @patch('apps.accounts.services.LbryDaemonClient.address_unused')
     def test_duplicate_assigned_address_fails_safely(self, mock_address_unused):
         owner = self.create_user('existing-order-owner@example.com')
@@ -3057,7 +3078,7 @@ class MembershipAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
-        self.assertIn('already assigned', response.data['detail'])
+        self.assertIn('temporarily unavailable', response.data['detail'])
 
     def test_membership_me_shape(self):
         user = self.create_user('membership-me@example.com')
