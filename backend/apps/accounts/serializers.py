@@ -1002,6 +1002,8 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
 
 
 class MembershipOrderCreateSerializer(serializers.Serializer):
+    # Phase 2A/2B contract intentionally uses plan_code (stable business key),
+    # not plan_id, to reduce client coupling to internal DB identifiers.
     plan_code = serializers.ChoiceField(choices=MembershipPlan.CODE_CHOICES)
 
     def validate(self, attrs):

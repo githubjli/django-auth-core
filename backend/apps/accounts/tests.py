@@ -2967,6 +2967,25 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]['code'], MembershipPlan.CODE_MONTHLY)
 
+    def test_membership_order_create_requires_authentication(self):
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_membership_order_create_rejects_plan_id_only_payload(self):
+        user = self.create_user('planid@example.com')
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_id': self.plan.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('plan_code', response.data)
+
     @patch('apps.accounts.services.LbryDaemonClient.address_unused')
     def test_create_membership_order_assigns_wallet_address_and_snapshots(self, mock_address_unused):
         mock_address_unused.return_value = {

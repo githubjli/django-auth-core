@@ -10,6 +10,12 @@ This phase intentionally implements only:
    - `GET /api/membership/orders/{order_no}/`
    - `GET /api/membership/me/`
 
+## Auth and request contract (current)
+
+- `POST /api/membership/orders/` requires authenticated user access.
+- Order creation request payload uses `plan_code` (for example: `{ "plan_code": "monthly" }`).
+- `plan_id` compatibility is intentionally deferred and not part of the current contract.
+
 ## Not included in this phase
 
 - Payment polling
