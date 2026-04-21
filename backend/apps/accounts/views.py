@@ -24,10 +24,12 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    MembershipPlan,
     PaymentOrder,
     Product,
     SellerStore,
     StreamPaymentMethod,
+    UserMembership,
     Video,
     VideoComment,
     VideoLike,
@@ -44,6 +46,11 @@ from apps.accounts.serializers import (
     BillingPlanSerializer,
     BillingSubscriptionCreateSerializer,
     BillingSubscriptionSerializer,
+    MembershipOrderCreateSerializer,
+    MembershipOrderTxHintSerializer,
+    MembershipOrderSerializer,
+    MembershipPlanSerializer,
+    MyMembershipSerializer,
     LiveStreamSerializer,
     LiveStreamProductListingSerializer,
     LiveStreamProductManageCreateSerializer,
@@ -65,7 +72,17 @@ from apps.accounts.serializers import (
     VideoMetadataSerializer,
     VideoSerializer,
 )
-from apps.accounts.services import AntMediaLiveAdapter, generate_video_thumbnail
+from apps.accounts.services import (
+    AntMediaLiveAdapter,
+    LbryDaemonConnectionError,
+    LbryDaemonError,
+    LbryDaemonInvalidParamsError,
+    LbryDaemonRpcError,
+    MembershipOrderService,
+    MembershipOrderPersistenceError,
+    WalletAddressConflictError,
+    generate_video_thumbnail,
+)
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -1330,6 +1347,101 @@ class BillingSubscriptionCancelAPIView(APIView):
             subscription.cancelled_at = timezone.now()
             subscription.save(update_fields=['status', 'auto_renew', 'cancelled_at', 'updated_at'])
         serializer = BillingSubscriptionSerializer(subscription)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MembershipPlanListAPIView(generics.ListAPIView):
+    serializer_class = MembershipPlanSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+
+    def get_queryset(self):
+        return MembershipPlan.objects.filter(is_active=True).order_by('sort_order', 'id')
+
+
+class MembershipOrderCreateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = MembershipOrderCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        plan = serializer.validated_data['plan']
+        service = MembershipOrderService()
+        try:
+            order = service.create_order(user=request.user, plan=plan)
+        except LbryDaemonConnectionError as exc:
+            logger.exception('membership_order_create daemon_connection_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except LbryDaemonInvalidParamsError as exc:
+            logger.exception('membership_order_create daemon_invalid_params user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except LbryDaemonRpcError as exc:
+            logger.exception('membership_order_create daemon_rpc_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except WalletAddressConflictError as exc:
+            logger.exception('membership_order_create duplicate_wallet_address user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except MembershipOrderPersistenceError as exc:
+            logger.exception('membership_order_create persistence_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except LbryDaemonError as exc:
+            logger.exception('membership_order_create daemon_error user_id=%s', request.user.id)
+            return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        response_serializer = MembershipOrderSerializer(order)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class MembershipOrderDetailAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, order_no):
+        order = generics.get_object_or_404(
+            PaymentOrder.objects.filter(
+                user=request.user,
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            ),
+            order_no=order_no,
+        )
+        serializer = MembershipOrderSerializer(order)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MembershipOrderTxHintAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(
+            PaymentOrder.objects.filter(
+                user=request.user,
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            ),
+            order_no=order_no,
+        )
+        serializer = MembershipOrderTxHintSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        hint_txid = serializer.validated_data['txid']
+        if order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
+            order.txid = hint_txid
+            order.save(update_fields=['txid', 'updated_at'])
+        return Response(
+            {
+                'order_no': order.order_no,
+                'txid_hint': hint_txid,
+                'status': order.status,
+                'detail': 'txid hint recorded; on-chain verification is still required.',
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MembershipMeAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        membership = UserMembership.objects.filter(user=request.user).select_related('plan').order_by('-ends_at', '-id').first()
+        serializer = MyMembershipSerializer.from_membership(membership)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
