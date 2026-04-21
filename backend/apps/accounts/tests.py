@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 from unittest.mock import Mock, patch
+from datetime import datetime, timedelta, timezone
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -18,17 +19,28 @@ from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
     Category,
+    ChainReceipt,
     LiveChatMessage,
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    MembershipPlan,
+    OrderPayment,
     PaymentOrder,
     Product,
     SellerStore,
     StreamPaymentMethod,
+    UserMembership,
     Video,
+    WalletAddress,
 )
 from apps.accounts.serializers import LiveStreamSerializer
+from apps.accounts.services import (
+    LbryDaemonClient,
+    LbryDaemonError,
+    MembershipActivationService,
+    PaymentDetectionService,
+)
 
 User = get_user_model()
 TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -2933,6 +2945,668 @@ class BillingAPITestCase(APITestCase):
         self.assertEqual(cancel_response.data['status'], 'cancel_at_period_end')
         self.assertEqual(cancel_response.data['raw_status'], BillingSubscription.STATUS_CANCELLED)
         self.assertFalse(cancel_response.data['auto_renew'])
+
+
+@override_settings(LBRY_DAEMON_URL='http://127.0.0.1:5279')
+class LbryDaemonClientTestCase(APITestCase):
+    @patch.object(LbryDaemonClient, '_rpc_call')
+    def test_address_unused_accepts_plain_string_result(self, mock_rpc_call):
+        mock_rpc_call.return_value = 'bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJzdQ'
+        client = LbryDaemonClient()
+
+        result = client.address_unused(wallet_id='wallet-main')
+        self.assertEqual(result['address'], 'bPrWVMvpgqjeViHJPKUQcKCRWRK4sLJzdQ')
+
+    @patch.object(LbryDaemonClient, '_rpc_call')
+    def test_address_unused_rejects_empty_string_result(self, mock_rpc_call):
+        mock_rpc_call.return_value = '   '
+        client = LbryDaemonClient()
+
+        with self.assertRaises(LbryDaemonError):
+            client.address_unused(wallet_id='wallet-main')
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    MEMBERSHIP_ORDER_EXPIRE_MINUTES=45,
+)
+class MembershipAPITestCase(APITestCase):
+    def create_user(self, email='member@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Mem', last_name='Ber')
+
+    def setUp(self):
+        self.plan = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_MONTHLY,
+            name='Monthly',
+            description='Monthly plan',
+            price_lbc='12.50000000',
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def test_membership_plan_list(self):
+        response = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['code'], MembershipPlan.CODE_MONTHLY)
+
+    def test_membership_order_create_requires_authentication(self):
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_membership_order_create_rejects_plan_id_only_payload(self):
+        user = self.create_user('planid@example.com')
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_id': self.plan.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('plan_code', response.data)
+
+    @override_settings(
+        LBRY_PLATFORM_RECEIVE_ADDRESS='bStablePlatformAddress001',
+        LBRY_PLATFORM_WALLET_ID='wallet-main',
+    )
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_membership_order_create_can_use_stable_platform_receive_address(self, mock_address_unused):
+        user = self.create_user('stable-address@example.com')
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['pay_to_address'], 'bStablePlatformAddress001')
+        mock_address_unused.assert_not_called()
+
+    def test_membership_order_txid_hint_does_not_mark_paid(self):
+        user = self.create_user('txhint@example.com')
+        self.client.force_authenticate(user=user)
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOTXHINT001',
+            pay_to_address='bHintAddress001',
+            expected_amount_lbc='1.00000000',
+        )
+        response = self.client.post(
+            reverse('membership-order-tx-hint', args=[order.order_no]),
+            {'txid': 'hinted-tx-123'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.txid, 'hinted-tx-123')
+        self.assertEqual(order.status, PaymentOrder.STATUS_PENDING)
+        self.assertIn('verification', response.data['detail'])
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_create_membership_order_assigns_wallet_address_and_snapshots(self, mock_address_unused):
+        mock_address_unused.return_value = {
+            'address': 'bTestLbcAddressForOrder1',
+            'wallet_id': 'wallet-main',
+            'account_id': 'account-main',
+        }
+        user = self.create_user()
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], PaymentOrder.STATUS_PENDING)
+        self.assertEqual(response.data['expected_amount_lbc'], '12.50000000')
+        self.assertEqual(response.data['pay_to_address'], 'bTestLbcAddressForOrder1')
+        self.assertEqual(response.data['qr_text'], 'bTestLbcAddressForOrder1')
+        self.assertTrue(response.data['order_no'])
+
+        order = PaymentOrder.objects.get(order_no=response.data['order_no'])
+        self.assertEqual(order.user_id, user.id)
+        self.assertEqual(order.order_type, PaymentOrder.TYPE_MEMBERSHIP)
+        self.assertEqual(order.target_type, 'membership_plan')
+        self.assertEqual(order.target_id, self.plan.id)
+        self.assertEqual(order.plan_code_snapshot, self.plan.code)
+        self.assertEqual(order.plan_name_snapshot, self.plan.name)
+        self.assertEqual(str(order.expected_amount_lbc), '12.50000000')
+        self.assertEqual(order.pay_to_address, 'bTestLbcAddressForOrder1')
+        self.assertIsNotNone(order.expires_at)
+        self.assertIsNotNone(order.wallet_address_id)
+        self.assertEqual(order.wallet_address.usage_type, WalletAddress.USAGE_MEMBERSHIP)
+        self.assertEqual(order.wallet_address.status, WalletAddress.STATUS_ASSIGNED)
+        self.assertEqual(order.wallet_address.wallet_id, 'wallet-main')
+        self.assertEqual(order.wallet_address.account_id, 'account-main')
+        self.assertEqual(order.wallet_address.assigned_order_id, order.id)
+        mock_address_unused.assert_called_once()
+
+        detail_response = self.client.get(reverse('membership-order-detail', args=[order.order_no]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['order_no'], order.order_no)
+
+    @override_settings(
+        LBRY_PLATFORM_WALLET_ID='wallet-main',
+        LBRY_PLATFORM_ACCOUNT_ID='   ',
+    )
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_create_membership_order_does_not_send_blank_account_id(self, mock_address_unused):
+        mock_address_unused.return_value = {
+            'address': 'bNoBlankAccountAddress',
+            'wallet_id': 'wallet-main',
+        }
+        user = self.create_user('blank-account@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mock_address_unused.assert_called_once_with(wallet_id='wallet-main', account_id=None)
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_duplicate_assigned_address_fails_safely(self, mock_address_unused):
+        owner = self.create_user('existing-order-owner@example.com')
+        existing_order = PaymentOrder.objects.create(
+            user=owner,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOEXISTING001',
+        )
+        WalletAddress.objects.create(
+            address='bDuplicateAddress',
+            usage_type=WalletAddress.USAGE_MEMBERSHIP,
+            status=WalletAddress.STATUS_ASSIGNED,
+            assigned_order=existing_order,
+        )
+        mock_address_unused.return_value = {'address': 'bDuplicateAddress'}
+
+        buyer = self.create_user('member-buyer@example.com')
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('temporarily unavailable', response.data['detail'])
+
+    def test_membership_me_shape(self):
+        user = self.create_user('membership-me@example.com')
+        self.client.force_authenticate(user=user)
+
+        empty_response = self.client.get(reverse('membership-me'))
+        self.assertEqual(empty_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(empty_response.data['status'], 'none')
+        self.assertIsNone(empty_response.data['plan'])
+
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOME0001',
+        )
+        UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            ends_at=datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc),
+        )
+
+        active_response = self.client.get(reverse('membership-me'))
+        self.assertEqual(active_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(active_response.data['status'], UserMembership.STATUS_ACTIVE)
+        self.assertEqual(active_response.data['plan']['code'], self.plan.code)
+
+
+@override_settings(LBRY_DAEMON_URL='http://127.0.0.1:5279')
+class WalletPrototypeAPITestCase(APITestCase):
+    def create_user(self, email='walletproto@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Wallet', last_name='Proto')
+
+    def create_plan(self):
+        return MembershipPlan.objects.create(
+            code='walletproto-monthly',
+            name='WalletProto Monthly',
+            price_lbc='30.00000000',
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def create_order(self, *, user, plan, status=PaymentOrder.STATUS_PENDING):
+        return PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=status,
+            order_no=f'MOWALLET{PaymentOrder.objects.count()+1:03d}',
+            pay_to_address='bPlatformReceiveAddress001',
+        )
+
+    def test_unauthenticated_access_blocked(self):
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': 'MO1', 'wallet_id': 'wallet-main', 'password': 'secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_pay_order_uses_backend_order_amount_and_address(self, mock_unlock, mock_send, mock_lock):
+        user = self.create_user('payorder@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        mock_send.return_value = {'txid': 'tx-wallet-001'}
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {
+                'order_no': order.order_no,
+                'wallet_id': 'wallet-main',
+                'password': 'temporary-secret',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        kwargs = mock_send.call_args.kwargs
+        self.assertEqual(str(kwargs['amount']), str(order.expected_amount_lbc))
+        self.assertEqual(kwargs['addresses'], [order.pay_to_address])
+        self.assertEqual(response.data['txid'], 'tx-wallet-001')
+        order.refresh_from_db()
+        self.assertEqual(order.txid, 'tx-wallet-001')
+        self.assertEqual(order.status, PaymentOrder.STATUS_PENDING)
+        self.assertFalse(hasattr(order, 'password'))
+        mock_unlock.assert_called_once()
+        mock_send.assert_called_once()
+        mock_lock.assert_called_once()
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_wallet_lock_attempted_even_when_send_fails(self, mock_unlock, mock_send, mock_lock):
+        user = self.create_user('sendfail@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        mock_send.side_effect = LbryDaemonError('send failed')
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        mock_unlock.assert_called_once()
+        mock_send.assert_called_once()
+        mock_lock.assert_called_once()
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_send_success_lock_fail_returns_success_with_warning(self, mock_unlock, mock_send, mock_lock):
+        user = self.create_user('lockfail@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        mock_send.return_value = {'txid': 'tx-wallet-002'}
+        mock_lock.side_effect = LbryDaemonError('lock failed')
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['txid'], 'tx-wallet-002')
+        self.assertEqual(response.data['warning'], 'wallet_lock_failed')
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_user_cannot_pay_another_users_order(self, mock_unlock, mock_send, mock_lock):
+        owner = self.create_user('owner@example.com')
+        owner.linked_wallet_id = 'wallet-main'
+        owner.save(update_fields=['linked_wallet_id'])
+        other = self.create_user('other@example.com')
+        other.linked_wallet_id = 'wallet-main'
+        other.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=owner, plan=plan)
+
+        self.client.force_authenticate(user=other)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        mock_unlock.assert_not_called()
+        mock_send.assert_not_called()
+        mock_lock.assert_not_called()
+
+    def test_expired_order_rejected(self):
+        user = self.create_user('expired-proto@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan, status=PaymentOrder.STATUS_PENDING)
+        order.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        order.save(update_fields=['expires_at', 'updated_at'])
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('expired', response.data['detail'])
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    LBC_MIN_CONFIRMATIONS=2,
+    LBC_TX_PAGE_SIZE=50,
+)
+class MembershipPaymentDetectionServiceTestCase(APITestCase):
+    class FakeDaemonClient:
+        def __init__(self, tx_list=None, tx_show_map=None):
+            self.tx_list = tx_list or []
+            self.tx_show_map = tx_show_map or {}
+
+        def transaction_list(self, wallet_id=None, page=None, page_size=None):
+            return self.tx_list
+
+        def transaction_show(self, txid):
+            return self.tx_show_map[txid]
+
+    def create_user(self, email='detect@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Detect', last_name='User')
+
+    def create_plan(self, code=None, duration_days=30, price='10.00000000'):
+        if code is None:
+            code = f'monthly-{MembershipPlan.objects.count() + 1}'
+        return MembershipPlan.objects.create(
+            code=code,
+            name=f'Plan {code}',
+            description='Plan',
+            price_lbc=price,
+            duration_days=duration_days,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def create_order(self, *, user, plan, address, status=PaymentOrder.STATUS_PENDING):
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=status,
+            order_no=f'MO-{address[-6:]}',
+            pay_to_address=address,
+        )
+        wallet = WalletAddress.objects.create(
+            address=address,
+            usage_type=WalletAddress.USAGE_MEMBERSHIP,
+            status=WalletAddress.STATUS_ASSIGNED,
+            assigned_order=order,
+            wallet_id='wallet-main',
+        )
+        order.wallet_address = wallet
+        order.save(update_fields=['wallet_address', 'updated_at'])
+        return order
+
+    def run_sync(self, txid, tx_payload):
+        daemon = self.FakeDaemonClient(
+            tx_list=[{'txid': txid}],
+            tx_show_map={txid: tx_payload},
+        )
+        service = PaymentDetectionService(daemon_client=daemon)
+        return service.sync_membership_orders()
+
+    def test_exact_payment_marks_order_paid(self):
+        user = self.create_user('exact@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bExactAddress001')
+
+        self.run_sync(
+            'tx-exact',
+            {
+                'txid': 'tx-exact',
+                'confirmations': 2,
+                'height': 321,
+                'outputs': [
+                    {'nout': 0, 'address': 'bExactAddress001', 'amount': '10.0'},
+                ],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_PAID)
+        self.assertEqual(order.txid, 'tx-exact')
+        self.assertEqual(str(order.actual_amount_lbc), '10.00000000')
+        self.assertEqual(order.confirmations, 2)
+        self.assertIsNotNone(order.paid_at)
+        self.assertTrue(UserMembership.objects.filter(source_order=order).exists())
+
+    def test_overpayment_marks_order_overpaid_and_activates(self):
+        user = self.create_user('overpay@example.com')
+        plan = self.create_plan(code=MembershipPlan.CODE_QUARTERLY, duration_days=90, price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bOverAddress001')
+
+        self.run_sync(
+            'tx-over',
+            {
+                'txid': 'tx-over',
+                'confirmations': 3,
+                'outputs': [{'nout': 1, 'address': 'bOverAddress001', 'amount': '12.5'}],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_OVERPAID)
+        self.assertTrue(UserMembership.objects.filter(source_order=order).exists())
+
+    def test_underpayment_does_not_mark_paid(self):
+        user = self.create_user('underpay@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bUnderAddress001')
+
+        self.run_sync(
+            'tx-under',
+            {
+                'txid': 'tx-under',
+                'confirmations': 5,
+                'outputs': [{'nout': 0, 'address': 'bUnderAddress001', 'amount': '9.0'}],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_UNDERPAID)
+        self.assertFalse(UserMembership.objects.filter(source_order=order).exists())
+
+    def test_duplicate_polling_is_idempotent(self):
+        user = self.create_user('dupe@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bDupeAddress001')
+        tx_payload = {
+            'txid': 'tx-dupe',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bDupeAddress001', 'amount': '10.0'}],
+        }
+
+        self.run_sync('tx-dupe', tx_payload)
+        self.run_sync('tx-dupe', tx_payload)
+        self.assertEqual(ChainReceipt.objects.filter(txid='tx-dupe', vout=0).count(), 1)
+        self.assertEqual(OrderPayment.objects.filter(order=order).count(), 1)
+        self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
+
+    def test_active_membership_extension_starts_from_current_end(self):
+        user = self.create_user('extend@example.com')
+        plan = self.create_plan(price='10.00000000', duration_days=30)
+        existing_order = self.create_order(user=user, plan=plan, address='bExisting0001')
+        existing_order.status = PaymentOrder.STATUS_PAID
+        existing_order.paid_at = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        existing_order.save(update_fields=['status', 'paid_at', 'updated_at'])
+        current_start = datetime.now(timezone.utc) - timedelta(days=1)
+        current_end = datetime.now(timezone.utc) + timedelta(days=15)
+        existing_membership = UserMembership.objects.create(
+            user=user,
+            source_order=existing_order,
+            plan=plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=current_start,
+            ends_at=current_end,
+        )
+        order = self.create_order(user=user, plan=plan, address='bExtendAddress001')
+
+        self.run_sync(
+            'tx-extend',
+            {
+                'txid': 'tx-extend',
+                'confirmations': 2,
+                'outputs': [{'nout': 0, 'address': 'bExtendAddress001', 'amount': '10.0'}],
+            },
+        )
+        new_membership = UserMembership.objects.get(source_order=order)
+        self.assertEqual(new_membership.starts_at, existing_membership.ends_at)
+
+    def test_expired_order_late_payment_is_marked_paid_with_note(self):
+        user = self.create_user('expired@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bExpiredAddress01', status=PaymentOrder.STATUS_EXPIRED)
+
+        self.run_sync(
+            'tx-expired',
+            {
+                'txid': 'tx-expired',
+                'confirmations': 2,
+                'outputs': [{'nout': 0, 'address': 'bExpiredAddress01', 'amount': '10.0'}],
+            },
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_PAID)
+        self.assertIn('paid_after_expiry', order.paid_note)
+
+    def test_receipt_persistence_stores_output_details_and_raw_payload(self):
+        user = self.create_user('receipt@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bReceiptAddress01')
+        payload = {
+            'txid': 'tx-receipt',
+            'wallet_id': 'wallet-main',
+            'confirmations': 2,
+            'height': 777,
+            'outputs': [{'nout': 4, 'address': 'bReceiptAddress01', 'amount': '10.0'}],
+        }
+
+        self.run_sync('tx-receipt', payload)
+        receipt = ChainReceipt.objects.get(txid='tx-receipt', vout=4)
+        self.assertEqual(receipt.wallet_id, 'wallet-main')
+        self.assertEqual(receipt.address, 'bReceiptAddress01')
+        self.assertEqual(str(receipt.amount_lbc), '10.00000000')
+        self.assertEqual(receipt.block_height, 777)
+        self.assertEqual(receipt.matched_order_id, order.id)
+        self.assertEqual(receipt.raw_payload['txid'], 'tx-receipt')
+
+    def test_membership_activation_service_is_idempotent(self):
+        user = self.create_user('activation@example.com')
+        plan = self.create_plan(price='10.00000000')
+        order = self.create_order(user=user, plan=plan, address='bActivateAddress')
+        order.status = PaymentOrder.STATUS_PAID
+        order.paid_at = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+        order.save(update_fields=['status', 'paid_at', 'updated_at'])
+
+        activation_service = MembershipActivationService()
+        first = activation_service.activate_for_order(order=order)
+        second = activation_service.activate_for_order(order=order)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
+
+    def test_detection_uses_txid_hint_when_platform_address_is_shared(self):
+        user = self.create_user('shared-hint@example.com')
+        plan = self.create_plan(price='10.00000000')
+        shared_address = 'bSharedPlatformAddress'
+        order_1 = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOSHARED001',
+            pay_to_address=shared_address,
+        )
+        order_2 = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOSHARED002',
+            pay_to_address=shared_address,
+        )
+        order_2.txid = 'tx-shared-target'
+        order_2.save(update_fields=['txid', 'updated_at'])
+
+        self.run_sync(
+            'tx-shared-target',
+            {
+                'txid': 'tx-shared-target',
+                'confirmations': 3,
+                'outputs': [{'nout': 0, 'address': shared_address, 'amount': '10.0'}],
+            },
+        )
+        order_1.refresh_from_db()
+        order_2.refresh_from_db()
+        self.assertEqual(order_1.status, PaymentOrder.STATUS_PENDING)
+        self.assertEqual(order_2.status, PaymentOrder.STATUS_PAID)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

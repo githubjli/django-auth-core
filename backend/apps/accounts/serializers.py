@@ -1,11 +1,13 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
+    MembershipPlan,
     Category,
     ChannelSubscription,
     LiveChatMessage,
@@ -19,6 +21,7 @@ from apps.accounts.models import (
     Video,
     VideoComment,
     VideoLike,
+    UserMembership,
 )
 from apps.accounts.services import AntMediaLiveAdapter
 
@@ -80,6 +83,9 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     can_create_live = serializers.SerializerMethodField()
     can_manage_store = serializers.SerializerMethodField()
     can_accept_payments = serializers.SerializerMethodField()
+    linked_wallet_id = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    primary_user_address = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    wallet_link_status = serializers.ChoiceField(required=False, allow_blank=True, choices=User.WALLET_LINK_STATUS_CHOICES)
     seller_store = serializers.SerializerMethodField()
     counts = serializers.SerializerMethodField()
 
@@ -101,6 +107,10 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'can_create_live',
             'can_manage_store',
             'can_accept_payments',
+            'linked_wallet_id',
+            'primary_user_address',
+            'wallet_link_status',
+            'linked_at',
             'seller_store',
             'counts',
         )
@@ -113,6 +123,7 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'can_create_live',
             'can_manage_store',
             'can_accept_payments',
+            'linked_at',
             'seller_store',
             'counts',
         )
@@ -194,9 +205,22 @@ class AccountProfileSerializer(serializers.ModelSerializer):
                 instance.first_name = parts[0]
                 instance.last_name = parts[1] if len(parts) > 1 else ''
 
-        for field in ('first_name', 'last_name', 'bio'):
+        for field in (
+            'first_name',
+            'last_name',
+            'bio',
+            'linked_wallet_id',
+            'primary_user_address',
+            'wallet_link_status',
+        ):
             if field in validated_data:
                 setattr(instance, field, validated_data[field])
+
+        if {'linked_wallet_id', 'primary_user_address', 'wallet_link_status'} & set(validated_data.keys()):
+            if instance.linked_wallet_id or instance.primary_user_address or instance.wallet_link_status:
+                instance.linked_at = instance.linked_at or timezone.now()
+            else:
+                instance.linked_at = None
 
         if 'avatar' in validated_data:
             instance.avatar = validated_data['avatar']
@@ -981,6 +1005,110 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
         if obj.status == BillingSubscription.STATUS_ACTIVE and not obj.auto_renew:
             return 'cancel_at_period_end'
         return 'active'
+
+
+class MembershipPlanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MembershipPlan
+        fields = (
+            'id',
+            'code',
+            'name',
+            'description',
+            'price_lbc',
+            'duration_days',
+            'is_active',
+            'sort_order',
+        )
+        read_only_fields = fields
+
+
+class MembershipOrderCreateSerializer(serializers.Serializer):
+    # Phase 2A/2B contract intentionally uses plan_code (stable business key),
+    # not plan_id, to reduce client coupling to internal DB identifiers.
+    plan_code = serializers.ChoiceField(choices=MembershipPlan.CODE_CHOICES)
+
+    def validate(self, attrs):
+        plan = MembershipPlan.objects.filter(code=attrs['plan_code'], is_active=True).first()
+        if plan is None:
+            raise serializers.ValidationError({'plan_code': ['Active membership plan not found.']})
+        attrs['plan'] = plan
+        return attrs
+
+
+class MembershipOrderSerializer(serializers.ModelSerializer):
+    plan = serializers.SerializerMethodField()
+    qr_text = serializers.CharField(source='pay_to_address', read_only=True)
+
+    class Meta:
+        model = PaymentOrder
+        fields = (
+            'order_no',
+            'plan',
+            'expected_amount_lbc',
+            'pay_to_address',
+            'qr_text',
+            'status',
+            'expires_at',
+            'paid_at',
+            'confirmations',
+            'txid',
+        )
+        read_only_fields = fields
+
+    def get_plan(self, obj):
+        return {
+            'id': obj.target_id,
+            'code': obj.plan_code_snapshot,
+            'name': obj.plan_name_snapshot,
+        }
+
+
+class MembershipOrderTxHintSerializer(serializers.Serializer):
+    txid = serializers.CharField(max_length=128)
+
+    def validate_txid(self, value):
+        txid = value.strip()
+        if not txid:
+            raise serializers.ValidationError('txid is required.')
+        return txid
+
+
+class WalletPrototypePayOrderSerializer(serializers.Serializer):
+    order_no = serializers.CharField(max_length=64)
+    wallet_id = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    password = serializers.CharField(write_only=True, max_length=256)
+
+
+class MyMembershipSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    starts_at = serializers.DateTimeField(allow_null=True)
+    ends_at = serializers.DateTimeField(allow_null=True)
+    plan = serializers.DictField(allow_null=True)
+
+    @classmethod
+    def from_membership(cls, membership: UserMembership | None):
+        if membership is None:
+            return cls(
+                {
+                    'status': 'none',
+                    'starts_at': None,
+                    'ends_at': None,
+                    'plan': None,
+                }
+            )
+        return cls(
+            {
+                'status': membership.status,
+                'starts_at': membership.starts_at,
+                'ends_at': membership.ends_at,
+                'plan': {
+                    'id': membership.plan_id,
+                    'code': membership.plan.code,
+                    'name': membership.plan.name,
+                },
+            }
+        )
 
 
 class AdminVideoSerializer(VideoSerializer):
