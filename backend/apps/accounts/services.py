@@ -409,6 +409,7 @@ class MembershipOrderService:
                 currency='LBC',
             )
 
+            platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
             logger.debug(
                 'membership_order_create order_no=%s daemon_url=%s wallet_id=%s account_id_included=%s',
                 order.order_no,
@@ -416,25 +417,31 @@ class MembershipOrderService:
                 daemon_wallet_id,
                 bool(daemon_account_id),
             )
-            request_params = {}
-            if daemon_wallet_id:
-                request_params['wallet_id'] = daemon_wallet_id
-            if daemon_account_id:
-                request_params['account_id'] = daemon_account_id
-            logger.debug('membership_order_create address_unused_params=%s', request_params)
+            if platform_receive_address:
+                address = platform_receive_address
+                wallet_id = daemon_wallet_id or ''
+                account_id = daemon_account_id or ''
+                logger.debug('membership_order_create using_platform_receive_address=%s', address)
+            else:
+                request_params = {}
+                if daemon_wallet_id:
+                    request_params['wallet_id'] = daemon_wallet_id
+                if daemon_account_id:
+                    request_params['account_id'] = daemon_account_id
+                logger.debug('membership_order_create address_unused_params=%s', request_params)
 
-            daemon_result = self.daemon_client.address_unused(
-                wallet_id=daemon_wallet_id,
-                account_id=daemon_account_id,
-            )
-            address = (daemon_result.get('address') or '').strip()
-            logger.debug('membership_order_create order_no=%s returned_address=%s', order.order_no, address)
-            wallet_id = (daemon_result.get('wallet_id') or daemon_wallet_id or '').strip()
-            account_id = (daemon_result.get('account_id') or daemon_account_id or '').strip()
+                daemon_result = self.daemon_client.address_unused(
+                    wallet_id=daemon_wallet_id,
+                    account_id=daemon_account_id,
+                )
+                address = (daemon_result.get('address') or '').strip()
+                logger.debug('membership_order_create order_no=%s returned_address=%s', order.order_no, address)
+                wallet_id = (daemon_result.get('wallet_id') or daemon_wallet_id or '').strip()
+                account_id = (daemon_result.get('account_id') or daemon_account_id or '').strip()
 
-            existing_assigned = WalletAddress.objects.filter(address=address, assigned_order__isnull=False).first()
-            if existing_assigned is not None:
-                raise WalletAddressConflictError('Daemon returned an address already assigned to another order.')
+                existing_assigned = WalletAddress.objects.filter(address=address, assigned_order__isnull=False).first()
+                if existing_assigned is not None:
+                    raise WalletAddressConflictError('Daemon returned an address already assigned to another order.')
 
             wallet_address, _ = WalletAddress.objects.update_or_create(
                 address=address,
@@ -442,8 +449,8 @@ class MembershipOrderService:
                     'label': f'membership:{order.order_no}',
                     'usage_type': WalletAddress.USAGE_MEMBERSHIP,
                     'status': WalletAddress.STATUS_ASSIGNED,
-                    'assigned_order': order,
-                    'assigned_at': timezone.now(),
+                    'assigned_order': order if not platform_receive_address else None,
+                    'assigned_at': timezone.now() if not platform_receive_address else None,
                     'wallet_id': wallet_id,
                     'account_id': account_id,
                 },
@@ -537,7 +544,11 @@ class PaymentDetectionService:
         if not orders:
             return {'scanned_orders': 0, 'matched_receipts': 0, 'paid_orders': 0, 'activated_memberships': 0}
 
-        order_by_address = {order.pay_to_address: order for order in orders}
+        orders_by_address: dict[str, list[PaymentOrder]] = {}
+        for order in orders:
+            orders_by_address.setdefault(order.pay_to_address, []).append(order)
+        for key in orders_by_address:
+            orders_by_address[key] = sorted(orders_by_address[key], key=lambda item: (item.created_at, item.id))
         wallet_ids = {order.wallet_address.wallet_id for order in orders if order.wallet_address and order.wallet_address.wallet_id}
         if not wallet_ids:
             if settings.LBRY_PLATFORM_WALLET_ID:
@@ -570,11 +581,14 @@ class PaymentDetectionService:
             wallet_id = (tx_detail.get('wallet_id') or '').strip()
             for output in outputs:
                 address = (output.get('address') or '').strip()
-                order = order_by_address.get(address)
-                if order is None:
+                candidate_orders = orders_by_address.get(address, [])
+                if not candidate_orders:
                     continue
                 amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
                 if amount is None:
+                    continue
+                order = self._select_candidate_order(candidate_orders=candidate_orders, txid=txid, amount=amount)
+                if order is None:
                     continue
                 vout = output.get('nout')
                 if vout is None:
@@ -604,6 +618,31 @@ class PaymentDetectionService:
             'paid_orders': len(paid_orders),
             'activated_memberships': activated,
         }
+
+    def _select_candidate_order(
+        self,
+        *,
+        candidate_orders: list[PaymentOrder],
+        txid: str,
+        amount: Decimal,
+    ) -> PaymentOrder | None:
+        hinted = next(
+            (
+                item for item in candidate_orders
+                if item.txid == txid and item.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}
+            ),
+            None,
+        )
+        if hinted is not None:
+            return hinted
+
+        for item in candidate_orders:
+            if item.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID} and amount >= (item.expected_amount_lbc or Decimal('0')):
+                return item
+        for item in candidate_orders:
+            if item.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
+                return item
+        return None
 
     def _extract_outputs(self, tx_detail: dict) -> list[dict]:
         outputs = tx_detail.get('outputs')

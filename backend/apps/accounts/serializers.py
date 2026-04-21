@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -82,6 +83,9 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     can_create_live = serializers.SerializerMethodField()
     can_manage_store = serializers.SerializerMethodField()
     can_accept_payments = serializers.SerializerMethodField()
+    linked_wallet_id = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    primary_user_address = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    wallet_link_status = serializers.ChoiceField(required=False, allow_blank=True, choices=User.WALLET_LINK_STATUS_CHOICES)
     seller_store = serializers.SerializerMethodField()
     counts = serializers.SerializerMethodField()
 
@@ -103,6 +107,10 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'can_create_live',
             'can_manage_store',
             'can_accept_payments',
+            'linked_wallet_id',
+            'primary_user_address',
+            'wallet_link_status',
+            'linked_at',
             'seller_store',
             'counts',
         )
@@ -115,6 +123,7 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'can_create_live',
             'can_manage_store',
             'can_accept_payments',
+            'linked_at',
             'seller_store',
             'counts',
         )
@@ -196,9 +205,22 @@ class AccountProfileSerializer(serializers.ModelSerializer):
                 instance.first_name = parts[0]
                 instance.last_name = parts[1] if len(parts) > 1 else ''
 
-        for field in ('first_name', 'last_name', 'bio'):
+        for field in (
+            'first_name',
+            'last_name',
+            'bio',
+            'linked_wallet_id',
+            'primary_user_address',
+            'wallet_link_status',
+        ):
             if field in validated_data:
                 setattr(instance, field, validated_data[field])
+
+        if {'linked_wallet_id', 'primary_user_address', 'wallet_link_status'} & set(validated_data.keys()):
+            if instance.linked_wallet_id or instance.primary_user_address or instance.wallet_link_status:
+                instance.linked_at = instance.linked_at or timezone.now()
+            else:
+                instance.linked_at = None
 
         if 'avatar' in validated_data:
             instance.avatar = validated_data['avatar']
@@ -1040,6 +1062,16 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
             'code': obj.plan_code_snapshot,
             'name': obj.plan_name_snapshot,
         }
+
+
+class MembershipOrderTxHintSerializer(serializers.Serializer):
+    txid = serializers.CharField(max_length=128)
+
+    def validate_txid(self, value):
+        txid = value.strip()
+        if not txid:
+            raise serializers.ValidationError('txid is required.')
+        return txid
 
 
 class MyMembershipSerializer(serializers.Serializer):

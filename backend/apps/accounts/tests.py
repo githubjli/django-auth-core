@@ -3010,6 +3010,47 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('plan_code', response.data)
 
+    @override_settings(
+        LBRY_PLATFORM_RECEIVE_ADDRESS='bStablePlatformAddress001',
+        LBRY_PLATFORM_WALLET_ID='wallet-main',
+    )
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_membership_order_create_can_use_stable_platform_receive_address(self, mock_address_unused):
+        user = self.create_user('stable-address@example.com')
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['pay_to_address'], 'bStablePlatformAddress001')
+        mock_address_unused.assert_not_called()
+
+    def test_membership_order_txid_hint_does_not_mark_paid(self):
+        user = self.create_user('txhint@example.com')
+        self.client.force_authenticate(user=user)
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOTXHINT001',
+            pay_to_address='bHintAddress001',
+            expected_amount_lbc='1.00000000',
+        )
+        response = self.client.post(
+            reverse('membership-order-tx-hint', args=[order.order_no]),
+            {'txid': 'hinted-tx-123'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.txid, 'hinted-tx-123')
+        self.assertEqual(order.status, PaymentOrder.STATUS_PENDING)
+        self.assertIn('verification', response.data['detail'])
+
     @patch('apps.accounts.services.LbryDaemonClient.address_unused')
     def test_create_membership_order_assigns_wallet_address_and_snapshots(self, mock_address_unused):
         mock_address_unused.return_value = {
@@ -3358,6 +3399,54 @@ class MembershipPaymentDetectionServiceTestCase(APITestCase):
         second = activation_service.activate_for_order(order=order)
         self.assertEqual(first.id, second.id)
         self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
+
+    def test_detection_uses_txid_hint_when_platform_address_is_shared(self):
+        user = self.create_user('shared-hint@example.com')
+        plan = self.create_plan(price='10.00000000')
+        shared_address = 'bSharedPlatformAddress'
+        order_1 = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOSHARED001',
+            pay_to_address=shared_address,
+        )
+        order_2 = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOSHARED002',
+            pay_to_address=shared_address,
+        )
+        order_2.txid = 'tx-shared-target'
+        order_2.save(update_fields=['txid', 'updated_at'])
+
+        self.run_sync(
+            'tx-shared-target',
+            {
+                'txid': 'tx-shared-target',
+                'confirmations': 3,
+                'outputs': [{'nout': 0, 'address': shared_address, 'amount': '10.0'}],
+            },
+        )
+        order_1.refresh_from_db()
+        order_2.refresh_from_db()
+        self.assertEqual(order_1.status, PaymentOrder.STATUS_PENDING)
+        self.assertEqual(order_2.status, PaymentOrder.STATUS_PAID)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

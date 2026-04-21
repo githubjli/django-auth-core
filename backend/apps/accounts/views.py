@@ -47,6 +47,7 @@ from apps.accounts.serializers import (
     BillingSubscriptionCreateSerializer,
     BillingSubscriptionSerializer,
     MembershipOrderCreateSerializer,
+    MembershipOrderTxHintSerializer,
     MembershipOrderSerializer,
     MembershipPlanSerializer,
     MyMembershipSerializer,
@@ -1404,6 +1405,35 @@ class MembershipOrderDetailAPIView(APIView):
         )
         serializer = MembershipOrderSerializer(order)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MembershipOrderTxHintAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(
+            PaymentOrder.objects.filter(
+                user=request.user,
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            ),
+            order_no=order_no,
+        )
+        serializer = MembershipOrderTxHintSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        hint_txid = serializer.validated_data['txid']
+        if order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
+            order.txid = hint_txid
+            order.save(update_fields=['txid', 'updated_at'])
+        return Response(
+            {
+                'order_no': order.order_no,
+                'txid_hint': hint_txid,
+                'status': order.status,
+                'detail': 'txid hint recorded; on-chain verification is still required.',
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class MembershipMeAPIView(APIView):

@@ -40,6 +40,15 @@ class UserManager(BaseUserManager):
 
 
 class User(AbstractUser):
+    WALLET_LINKED = 'linked'
+    WALLET_UNLINKED = 'unlinked'
+    WALLET_PENDING = 'pending'
+    WALLET_LINK_STATUS_CHOICES = [
+        (WALLET_LINKED, 'Linked'),
+        (WALLET_UNLINKED, 'Unlinked'),
+        (WALLET_PENDING, 'Pending'),
+    ]
+
     username = None
     email = models.EmailField(unique=True)
     subscriber_count = models.PositiveIntegerField(default=0)
@@ -49,6 +58,10 @@ class User(AbstractUser):
     theme = models.CharField(max_length=10, default='system')
     timezone = models.CharField(max_length=64, blank=True)
     is_creator = models.BooleanField(default=False)
+    linked_wallet_id = models.CharField(max_length=128, blank=True, default='')
+    primary_user_address = models.CharField(max_length=128, blank=True, default='')
+    wallet_link_status = models.CharField(max_length=24, choices=WALLET_LINK_STATUS_CHOICES, blank=True, default='')
+    linked_at = models.DateTimeField(null=True, blank=True)
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS: list[str] = []
