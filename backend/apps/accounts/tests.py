@@ -2852,6 +2852,39 @@ class PaymentOrderAPITestCase(APITestCase):
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['id'], paid_order.id)
 
+    def test_account_payment_orders_include_membership_fields(self):
+        user = self.create_user('membership-list@example.com')
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MO-LIST-001',
+            target_type='membership_plan',
+            target_id=99,
+            expected_amount_lbc='30.00000000',
+            actual_amount_lbc='0.00000000',
+            pay_to_address='bPlatformAddressList001',
+            txid='',
+            confirmations=0,
+        )
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('account-payment-orders'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item = response.data['results'][0]
+        self.assertEqual(item['id'], order.id)
+        self.assertEqual(item['order_no'], 'MO-LIST-001')
+        self.assertEqual(item['order_type'], PaymentOrder.TYPE_MEMBERSHIP)
+        self.assertEqual(item['status'], PaymentOrder.STATUS_PENDING)
+        self.assertEqual(item['expected_amount_lbc'], '30.00000000')
+        self.assertEqual(item['actual_amount_lbc'], '0.00000000')
+        self.assertEqual(item['pay_to_address'], 'bPlatformAddressList001')
+        self.assertIn('txid', item)
+        self.assertIn('confirmations', item)
+        self.assertIn('paid_at', item)
+        self.assertIn('expires_at', item)
+
     def test_mark_paid_creates_payment_chat_message_when_room_exists(self):
         owner = self.create_user('chat-hook-owner@example.com')
         buyer = self.create_user('chat-hook-buyer@example.com')

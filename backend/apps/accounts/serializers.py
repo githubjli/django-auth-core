@@ -912,20 +912,31 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
     stream_id = serializers.IntegerField(source='stream.id', read_only=True, allow_null=True)
     product_id = serializers.IntegerField(source='product.id', read_only=True, allow_null=True)
     payment_method_id = serializers.IntegerField(source='payment_method.id', read_only=True, allow_null=True)
+    wallet_address_id = serializers.IntegerField(source='wallet_address.id', read_only=True, allow_null=True)
     paid_by_id = serializers.IntegerField(source='paid_by.id', read_only=True, allow_null=True)
 
     class Meta:
         model = PaymentOrder
         fields = (
             'id',
+            'order_no',
             'user_id',
             'stream_id',
             'product_id',
             'payment_method_id',
+            'wallet_address_id',
             'order_type',
+            'target_type',
+            'target_id',
             'amount',
             'currency',
             'status',
+            'expected_amount_lbc',
+            'actual_amount_lbc',
+            'pay_to_address',
+            'txid',
+            'confirmations',
+            'expires_at',
             'client_request_id',
             'external_reference',
             'paid_at',
