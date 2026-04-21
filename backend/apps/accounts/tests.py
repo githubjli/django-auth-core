@@ -3177,6 +3177,166 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(active_response.data['plan']['code'], self.plan.code)
 
 
+@override_settings(LBRY_DAEMON_URL='http://127.0.0.1:5279')
+class WalletPrototypeAPITestCase(APITestCase):
+    def create_user(self, email='walletproto@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Wallet', last_name='Proto')
+
+    def create_plan(self):
+        return MembershipPlan.objects.create(
+            code='walletproto-monthly',
+            name='WalletProto Monthly',
+            price_lbc='30.00000000',
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def create_order(self, *, user, plan, status=PaymentOrder.STATUS_PENDING):
+        return PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=status,
+            order_no=f'MOWALLET{PaymentOrder.objects.count()+1:03d}',
+            pay_to_address='bPlatformReceiveAddress001',
+        )
+
+    def test_unauthenticated_access_blocked(self):
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': 'MO1', 'wallet_id': 'wallet-main', 'password': 'secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_pay_order_uses_backend_order_amount_and_address(self, mock_unlock, mock_send, mock_lock):
+        user = self.create_user('payorder@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        mock_send.return_value = {'txid': 'tx-wallet-001'}
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {
+                'order_no': order.order_no,
+                'wallet_id': 'wallet-main',
+                'password': 'temporary-secret',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        kwargs = mock_send.call_args.kwargs
+        self.assertEqual(str(kwargs['amount']), str(order.expected_amount_lbc))
+        self.assertEqual(kwargs['addresses'], [order.pay_to_address])
+        self.assertEqual(response.data['txid'], 'tx-wallet-001')
+        order.refresh_from_db()
+        self.assertEqual(order.txid, 'tx-wallet-001')
+        self.assertEqual(order.status, PaymentOrder.STATUS_PENDING)
+        self.assertFalse(hasattr(order, 'password'))
+        mock_unlock.assert_called_once()
+        mock_send.assert_called_once()
+        mock_lock.assert_called_once()
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_wallet_lock_attempted_even_when_send_fails(self, mock_unlock, mock_send, mock_lock):
+        user = self.create_user('sendfail@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        mock_send.side_effect = LbryDaemonError('send failed')
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        mock_unlock.assert_called_once()
+        mock_send.assert_called_once()
+        mock_lock.assert_called_once()
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_send_success_lock_fail_returns_success_with_warning(self, mock_unlock, mock_send, mock_lock):
+        user = self.create_user('lockfail@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        mock_send.return_value = {'txid': 'tx-wallet-002'}
+        mock_lock.side_effect = LbryDaemonError('lock failed')
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['txid'], 'tx-wallet-002')
+        self.assertEqual(response.data['warning'], 'wallet_lock_failed')
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_user_cannot_pay_another_users_order(self, mock_unlock, mock_send, mock_lock):
+        owner = self.create_user('owner@example.com')
+        owner.linked_wallet_id = 'wallet-main'
+        owner.save(update_fields=['linked_wallet_id'])
+        other = self.create_user('other@example.com')
+        other.linked_wallet_id = 'wallet-main'
+        other.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=owner, plan=plan)
+
+        self.client.force_authenticate(user=other)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        mock_unlock.assert_not_called()
+        mock_send.assert_not_called()
+        mock_lock.assert_not_called()
+
+    def test_expired_order_rejected(self):
+        user = self.create_user('expired-proto@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.save(update_fields=['linked_wallet_id'])
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan, status=PaymentOrder.STATUS_PENDING)
+        order.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        order.save(update_fields=['expires_at', 'updated_at'])
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('expired', response.data['detail'])
+
+
 @override_settings(
     LBRY_DAEMON_URL='http://127.0.0.1:5279',
     LBC_MIN_CONFIRMATIONS=2,

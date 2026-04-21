@@ -51,6 +51,7 @@ from apps.accounts.serializers import (
     MembershipOrderSerializer,
     MembershipPlanSerializer,
     MyMembershipSerializer,
+    WalletPrototypePayOrderSerializer,
     LiveStreamSerializer,
     LiveStreamProductListingSerializer,
     LiveStreamProductManageCreateSerializer,
@@ -80,6 +81,8 @@ from apps.accounts.services import (
     LbryDaemonRpcError,
     MembershipOrderService,
     MembershipOrderPersistenceError,
+    WalletPrototypeError,
+    WalletPrototypePayOrderService,
     WalletAddressConflictError,
     generate_video_thumbnail,
 )
@@ -1434,6 +1437,43 @@ class MembershipOrderTxHintAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class WalletPrototypePayOrderAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = WalletPrototypePayOrderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        order = generics.get_object_or_404(
+            PaymentOrder.objects.filter(order_type=PaymentOrder.TYPE_MEMBERSHIP),
+            order_no=serializer.validated_data['order_no'],
+            user=request.user,
+        )
+        if order.status not in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
+            return Response({'detail': 'Order is not payable.'}, status=status.HTTP_400_BAD_REQUEST)
+        if order.expires_at and order.expires_at < timezone.now() and order.status == PaymentOrder.STATUS_PENDING:
+            return Response({'detail': 'Order has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        wallet_id = (serializer.validated_data.get('wallet_id') or request.user.linked_wallet_id or '').strip()
+        if not wallet_id:
+            return Response({'detail': 'Missing linked wallet.'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.linked_wallet_id and wallet_id != request.user.linked_wallet_id:
+            return Response({'detail': 'Wallet mismatch for user.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        service = WalletPrototypePayOrderService()
+        try:
+            result = service.pay_order(
+                user=request.user,
+                order=order,
+                wallet_id=wallet_id,
+                password=serializer.validated_data['password'],
+            )
+        except WalletPrototypeError:
+            return Response({'detail': 'Wallet prototype payment failed.'}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class MembershipMeAPIView(APIView):

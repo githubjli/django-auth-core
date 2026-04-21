@@ -283,6 +283,10 @@ class MembershipOrderPersistenceError(LbryDaemonError):
     pass
 
 
+class WalletPrototypeError(LbryDaemonError):
+    pass
+
+
 class LbryDaemonClient:
     def __init__(self, *, url: str | None = None, timeout: int | None = None):
         self.url = (url or settings.LBRY_DAEMON_URL or '').strip()
@@ -343,6 +347,35 @@ class LbryDaemonClient:
         if not isinstance(result, dict):
             raise LbryDaemonError('Unexpected transaction_show response from LBRY daemon.')
         return result
+
+    def wallet_unlock(self, wallet_id: str, password: str):
+        params = {'wallet_id': wallet_id, 'password': password}
+        return self._rpc_call('wallet_unlock', params)
+
+    def wallet_lock(self, wallet_id: str):
+        return self._rpc_call('wallet_lock', {'wallet_id': wallet_id})
+
+    def wallet_send(
+        self,
+        *,
+        wallet_id: str,
+        amount: str | Decimal,
+        addresses: list[str],
+        change_account_id: str | None = None,
+        funding_account_ids: list[str] | None = None,
+        blocking: bool = True,
+    ):
+        params: dict[str, object] = {
+            'wallet_id': wallet_id,
+            'amount': str(amount),
+            'addresses': addresses,
+            'blocking': bool(blocking),
+        }
+        if change_account_id:
+            params['change_account_id'] = change_account_id
+        if funding_account_ids:
+            params['funding_account_ids'] = funding_account_ids
+        return self._rpc_call('wallet_send', params)
 
     def _rpc_call(self, method: str, params: dict | None = None):
         payload = {
@@ -772,6 +805,109 @@ class PaymentDetectionService:
             order.paid_at = timezone.now()
         order.save(update_fields=update_fields)
         return True
+
+
+class WalletPrototypePayOrderService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+
+    def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str) -> dict:
+        amount = order.expected_amount_lbc or Decimal('0')
+        pay_to_address = (order.pay_to_address or '').strip()
+        if amount <= 0 or not pay_to_address:
+            raise WalletPrototypeError('Order is missing payment amount/address.')
+
+        change_account_id = (user.primary_user_address or '').strip() or None
+        funding_account_ids = [change_account_id] if change_account_id else None
+        unlock_ok = False
+        send_ok = False
+        lock_attempted = False
+        lock_ok = False
+        txid = ''
+        send_result = None
+        response_payload = None
+        logger.info(
+            'wallet_prototype_pay_order start order_no=%s user_id=%s wallet_id=%s pay_to_address=%s amount=%s',
+            order.order_no,
+            user.id,
+            wallet_id,
+            pay_to_address,
+            amount,
+        )
+        try:
+            self.daemon_client.wallet_unlock(wallet_id=wallet_id, password=password)
+            unlock_ok = True
+            send_result = self.daemon_client.wallet_send(
+                wallet_id=wallet_id,
+                amount=amount,
+                addresses=[pay_to_address],
+                change_account_id=change_account_id,
+                funding_account_ids=funding_account_ids,
+                blocking=True,
+            )
+            send_ok = True
+            txid = self._extract_txid(send_result)
+            if txid:
+                order.txid = txid
+                order.save(update_fields=['txid', 'updated_at'])
+            response_payload = {
+                'order_no': order.order_no,
+                'txid': txid,
+                'pay_to_address': pay_to_address,
+                'expected_amount_lbc': str(amount),
+                'status': order.status,
+                'send_result': send_result if isinstance(send_result, dict) else {'raw': send_result},
+                'warning': None,
+            }
+        except LbryDaemonError as exc:
+            logger.exception(
+                'wallet_prototype_pay_order daemon_error order_no=%s user_id=%s wallet_id=%s unlock_ok=%s send_ok=%s',
+                order.order_no,
+                user.id,
+                wallet_id,
+                unlock_ok,
+                send_ok,
+            )
+            raise WalletPrototypeError('Wallet prototype payment failed.') from exc
+        finally:
+            if unlock_ok:
+                lock_attempted = True
+                try:
+                    self.daemon_client.wallet_lock(wallet_id=wallet_id)
+                    lock_ok = True
+                except LbryDaemonError:
+                    logger.exception(
+                        'wallet_prototype_pay_order lock_failed order_no=%s user_id=%s wallet_id=%s txid=%s',
+                        order.order_no,
+                        user.id,
+                        wallet_id,
+                        txid,
+                    )
+                    if send_ok and response_payload is not None:
+                        response_payload['warning'] = 'wallet_lock_failed'
+            logger.info(
+                'wallet_prototype_pay_order complete order_no=%s user_id=%s wallet_id=%s unlock_ok=%s send_ok=%s lock_attempted=%s lock_ok=%s txid=%s',
+                order.order_no,
+                user.id,
+                wallet_id,
+                unlock_ok,
+                send_ok,
+                lock_attempted,
+                lock_ok,
+                txid,
+            )
+        if send_ok and response_payload is not None:
+            return response_payload
+        raise WalletPrototypeError('Wallet prototype payment failed.')
+
+    def _extract_txid(self, payload) -> str:
+        if isinstance(payload, str):
+            return payload.strip()
+        if isinstance(payload, dict):
+            return str(payload.get('txid') or payload.get('id') or '').strip()
+        return ''
 
 
 def generate_video_thumbnail(video, time_offset: float = 1.0) -> bool:

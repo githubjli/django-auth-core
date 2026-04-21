@@ -75,3 +75,17 @@ Wallet linkage:
 - Backend never stores user unlock password.
 - txid from frontend is only a hint; backend chain verification is authoritative.
 - Payment validity requires backend verification that tx outputs include platform receive address, amount is sufficient, and confirmations meet threshold.
+
+## Frontend prototype change
+
+Frontend should stop calling remote wallet RPC directly from browser.
+
+Use backend bridge endpoint instead:
+
+- `POST /api/wallet-prototype/pay-order/`
+
+Payload:
+
+`{ "order_no": "...", "wallet_id": "...", "password": "..." }`
+
+Backend performs unlock -> send -> lock server-side, returns txid hint, and frontend continues polling order status.
