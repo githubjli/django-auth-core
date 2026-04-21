@@ -652,6 +652,83 @@ class PaymentDetectionService:
             'activated_memberships': activated,
         }
 
+    @transaction.atomic
+    def verify_order_once(self, *, order: PaymentOrder, txid_hint: str | None = None) -> dict:
+        if order.order_type != PaymentOrder.TYPE_MEMBERSHIP:
+            return {'verified': False, 'message': 'unsupported_order_type'}
+
+        txids: list[str] = []
+        hinted = (txid_hint or '').strip()
+        if hinted:
+            txids.append(hinted)
+        elif order.txid:
+            txids.append(order.txid.strip())
+        else:
+            wallet_id = (
+                (order.wallet_address.wallet_id if order.wallet_address else '')
+                or settings.LBRY_PLATFORM_WALLET_ID
+                or ''
+            ).strip()
+            tx_summaries = self.daemon_client.transaction_list(
+                wallet_id=wallet_id or None,
+                page=1,
+                page_size=self.page_size,
+            )
+            txids.extend([(item.get('txid') or item.get('id') or '').strip() for item in tx_summaries if isinstance(item, dict)])
+
+        activation_service = MembershipActivationService()
+        matched = False
+        for txid in [item for item in txids if item]:
+            tx_detail = self.daemon_client.transaction_show(txid)
+            outputs = self._extract_outputs(tx_detail)
+            confirmations = self._extract_confirmations(tx_detail)
+            block_height = tx_detail.get('height') or tx_detail.get('block_height')
+            wallet_id = (tx_detail.get('wallet_id') or '').strip()
+            for output in outputs:
+                address = (output.get('address') or '').strip()
+                if address != order.pay_to_address:
+                    continue
+                amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+                if amount is None:
+                    continue
+                vout = output.get('nout')
+                if vout is None:
+                    vout = output.get('vout')
+                receipt = self._upsert_receipt(
+                    txid=txid,
+                    vout=vout,
+                    address=address,
+                    amount=amount,
+                    confirmations=confirmations,
+                    block_height=block_height,
+                    raw_payload=tx_detail,
+                    matched_order=order,
+                    wallet_id=wallet_id or (order.wallet_address.wallet_id if order.wallet_address else ''),
+                )
+                self._upsert_order_payment(order=order, receipt=receipt, txid=txid, amount=amount, confirmations=confirmations)
+                matched = True
+                paid = self._apply_payment_state(order=order, amount=amount, confirmations=confirmations, txid=txid)
+                if paid:
+                    activation_service.activate_for_order(order=order)
+                order.refresh_from_db()
+                return {
+                    'verified': True,
+                    'matched': True,
+                    'paid': paid,
+                    'status': order.status,
+                    'confirmations': order.confirmations,
+                    'txid': order.txid,
+                }
+        order.refresh_from_db()
+        return {
+            'verified': True,
+            'matched': matched,
+            'paid': order.status in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID},
+            'status': order.status,
+            'confirmations': order.confirmations,
+            'txid': order.txid,
+        }
+
     def _select_candidate_order(
         self,
         *,

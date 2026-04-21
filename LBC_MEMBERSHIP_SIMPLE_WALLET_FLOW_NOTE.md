@@ -89,3 +89,12 @@ Payload:
 `{ "order_no": "...", "wallet_id": "...", "password": "..." }`
 
 Backend performs unlock -> send -> lock server-side, returns txid hint, and frontend continues polling order status.
+
+## Lightweight verification automation
+
+- After `/api/wallet-prototype/pay-order/` returns a txid, backend immediately attempts one verification for that order/txid.
+- New manual endpoint: `POST /api/membership/orders/{order_no}/verify-now/`.
+- Verification remains authoritative only when chain checks pass:
+  1. output includes `order.pay_to_address`
+  2. output amount satisfies expected amount
+  3. confirmations meet `LBC_MIN_CONFIRMATIONS`

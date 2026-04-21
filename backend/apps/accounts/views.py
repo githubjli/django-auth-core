@@ -81,6 +81,7 @@ from apps.accounts.services import (
     LbryDaemonRpcError,
     MembershipOrderService,
     MembershipOrderPersistenceError,
+    PaymentDetectionService,
     WalletPrototypeError,
     WalletPrototypePayOrderService,
     WalletAddressConflictError,
@@ -1439,6 +1440,33 @@ class MembershipOrderTxHintAPIView(APIView):
         )
 
 
+class MembershipOrderVerifyNowAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(
+            PaymentOrder.objects.filter(
+                user=request.user,
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            ),
+            order_no=order_no,
+        )
+        try:
+            verification = PaymentDetectionService().verify_order_once(order=order, txid_hint=order.txid)
+        except LbryDaemonError:
+            return Response({'detail': 'Verification attempt failed.'}, status=status.HTTP_502_BAD_GATEWAY)
+        order.refresh_from_db()
+        order_payload = MembershipOrderSerializer(order).data
+        return Response(
+            {
+                'order': order_payload,
+                'verification': verification,
+                'detail': 'Verification attempted. Paid status depends on chain confirmations and output matching.',
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class WalletPrototypePayOrderAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser, FormParser]
@@ -1473,6 +1501,15 @@ class WalletPrototypePayOrderAPIView(APIView):
             )
         except WalletPrototypeError:
             return Response({'detail': 'Wallet prototype payment failed.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        verification = None
+        txid_hint = (result.get('txid') or '').strip()
+        if txid_hint:
+            try:
+                verification = PaymentDetectionService().verify_order_once(order=order, txid_hint=txid_hint)
+            except LbryDaemonError:
+                verification = {'verified': False, 'message': 'verification_attempt_failed'}
+        result['verification'] = verification
         return Response(result, status=status.HTTP_200_OK)
 
 

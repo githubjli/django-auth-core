@@ -3219,13 +3219,19 @@ class WalletPrototypeAPITestCase(APITestCase):
     @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
     @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
     @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
-    def test_pay_order_uses_backend_order_amount_and_address(self, mock_unlock, mock_send, mock_lock):
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    def test_pay_order_uses_backend_order_amount_and_address(self, mock_tx_show, mock_unlock, mock_send, mock_lock):
         user = self.create_user('payorder@example.com')
         user.linked_wallet_id = 'wallet-main'
         user.save(update_fields=['linked_wallet_id'])
         plan = self.create_plan()
         order = self.create_order(user=user, plan=plan)
         mock_send.return_value = {'txid': 'tx-wallet-001'}
+        mock_tx_show.return_value = {
+            'txid': 'tx-wallet-001',
+            'confirmations': 2,
+            'outputs': [{'nout': 0, 'address': order.pay_to_address, 'amount': '30.0'}],
+        }
 
         self.client.force_authenticate(user=user)
         response = self.client.post(
@@ -3244,8 +3250,9 @@ class WalletPrototypeAPITestCase(APITestCase):
         self.assertEqual(response.data['txid'], 'tx-wallet-001')
         order.refresh_from_db()
         self.assertEqual(order.txid, 'tx-wallet-001')
-        self.assertEqual(order.status, PaymentOrder.STATUS_PENDING)
+        self.assertEqual(order.status, PaymentOrder.STATUS_PAID)
         self.assertFalse(hasattr(order, 'password'))
+        self.assertTrue(response.data['verification']['verified'])
         mock_unlock.assert_called_once()
         mock_send.assert_called_once()
         mock_lock.assert_called_once()
@@ -3335,6 +3342,46 @@ class WalletPrototypeAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('expired', response.data['detail'])
+
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    def test_verify_now_endpoint_updates_order_when_confirmed(self, mock_tx_show):
+        user = self.create_user('verify-now@example.com')
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        order.txid = 'tx-verify-now'
+        order.save(update_fields=['txid', 'updated_at'])
+        mock_tx_show.return_value = {
+            'txid': 'tx-verify-now',
+            'confirmations': 2,
+            'outputs': [{'nout': 0, 'address': order.pay_to_address, 'amount': '30.0'}],
+        }
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(reverse('membership-order-verify-now', args=[order.order_no]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_PAID)
+        self.assertTrue(response.data['verification']['paid'])
+
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    def test_verify_now_keeps_pending_when_confirmations_low(self, mock_tx_show):
+        user = self.create_user('verify-pending@example.com')
+        plan = self.create_plan()
+        order = self.create_order(user=user, plan=plan)
+        order.txid = 'tx-verify-pending'
+        order.save(update_fields=['txid', 'updated_at'])
+        mock_tx_show.return_value = {
+            'txid': 'tx-verify-pending',
+            'confirmations': 0,
+            'outputs': [{'nout': 0, 'address': order.pay_to_address, 'amount': '30.0'}],
+        }
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(reverse('membership-order-verify-now', args=[order.order_no]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, PaymentOrder.STATUS_PENDING)
+        self.assertFalse(response.data['verification']['paid'])
 
 
 @override_settings(
