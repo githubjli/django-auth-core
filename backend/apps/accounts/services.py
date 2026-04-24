@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import shutil
@@ -17,13 +19,19 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
+from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKEN_SYMBOL
 from apps.accounts.models import (
     ChainReceipt,
     LiveStream,
     MembershipPlan,
     OrderPayment,
     PaymentOrder,
+    Product,
+    ProductOrder,
+    ProductShipment,
+    SellerPayout,
     UserMembership,
+    UserShippingAddress,
     WalletAddress,
 )
 
@@ -882,6 +890,246 @@ class PaymentDetectionService:
             order.paid_at = timezone.now()
         order.save(update_fields=update_fields)
         return True
+
+
+def build_product_qr_signature_payload(
+    *,
+    version: int,
+    payload_type: str,
+    blockchain: str,
+    token_symbol: str,
+    order_no: str,
+    pay_to_address: str,
+    expected_amount: str,
+    currency: str,
+    expires_at: str,
+) -> str:
+    payload = {
+        'version': version,
+        'type': payload_type,
+        'blockchain': blockchain,
+        'token_symbol': token_symbol,
+        'order_no': order_no,
+        'pay_to_address': pay_to_address,
+        'expected_amount': expected_amount,
+        'currency': currency,
+        'expires_at': expires_at,
+    }
+    return json.dumps(payload, separators=(',', ':'), sort_keys=True)
+
+
+def sign_product_qr_payload(
+    *,
+    version: int,
+    payload_type: str,
+    order_no: str,
+    pay_to_address: str,
+    expected_amount: str,
+    currency: str,
+    expires_at: str,
+) -> str:
+    message = build_product_qr_signature_payload(
+        version=version,
+        payload_type=payload_type,
+        blockchain=BLOCKCHAIN_NAME,
+        token_symbol=TOKEN_SYMBOL,
+        order_no=order_no,
+        pay_to_address=pay_to_address,
+        expected_amount=expected_amount,
+        currency=currency,
+        expires_at=expires_at,
+    )
+    secret = (settings.PAYMENT_QR_SIGNING_SECRET or settings.SECRET_KEY).encode('utf-8')
+    return hmac.new(secret, message.encode('utf-8'), hashlib.sha256).hexdigest()
+
+
+def verify_product_qr_signature(payload: dict) -> bool:
+    expected_sig = sign_product_qr_payload(
+        version=int(payload.get('version') or 0),
+        payload_type=str(payload.get('type') or ''),
+        order_no=str(payload.get('order_no') or ''),
+        pay_to_address=str(payload.get('pay_to_address') or ''),
+        expected_amount=str(payload.get('expected_amount') or ''),
+        currency=str(payload.get('currency') or ''),
+        expires_at=str(payload.get('expires_at') or ''),
+    )
+    provided_sig = str(payload.get('sig') or '')
+    return bool(provided_sig) and hmac.compare_digest(provided_sig, expected_sig)
+
+
+class ProductOrderService:
+    def _resolve_receive_address(self) -> str:
+        return (settings.PRODUCT_PLATFORM_RECEIVE_ADDRESS or settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+
+    def create_order(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress) -> ProductOrder:
+        if quantity <= 0:
+            raise ValueError('Quantity must be greater than zero.')
+        if product.status != Product.STATUS_ACTIVE:
+            raise ValueError('Product is not active.')
+        if not product.store.is_active:
+            raise ValueError('Seller store is not active.')
+        if product.stock_quantity < quantity:
+            raise ValueError('Insufficient product stock.')
+        if shipping_address.user_id != buyer.id:
+            raise ValueError('Shipping address does not belong to buyer.')
+        receive_address = self._resolve_receive_address()
+        if not receive_address:
+            raise RuntimeError('No platform receive address configured for product payments.')
+
+        with transaction.atomic():
+            order_no = self._generate_order_no()
+            total_amount = (product.price_amount or Decimal('0')) * Decimal(quantity)
+            expires_at = timezone.now() + timedelta(minutes=int(settings.PRODUCT_ORDER_EXPIRE_MINUTES))
+            payment_order = PaymentOrder.objects.create(
+                user=buyer,
+                product=product,
+                order_type=PaymentOrder.TYPE_PRODUCT,
+                target_type='product_order',
+                amount=total_amount,
+                currency=TOKEN_SYMBOL,
+                status=PaymentOrder.STATUS_PENDING,
+                order_no=order_no,
+                pay_to_address=receive_address,
+                expires_at=expires_at,
+            )
+            product_order = ProductOrder.objects.create(
+                order_no=order_no,
+                buyer=buyer,
+                seller_store=product.store,
+                product=product,
+                product_title_snapshot=product.title,
+                product_price_snapshot=product.price_amount,
+                quantity=quantity,
+                total_amount=total_amount,
+                currency=TOKEN_SYMBOL,
+                status=ProductOrder.STATUS_PENDING_PAYMENT,
+                shipping_address_snapshot=self._shipping_snapshot(shipping_address),
+                payment_order=payment_order,
+            )
+            payment_order.target_id = product_order.id
+            payment_order.save(update_fields=['target_id', 'updated_at'])
+            return product_order
+
+    def build_qr_payload(self, order: ProductOrder) -> dict:
+        payment_order = order.payment_order
+        expires_at_iso = payment_order.expires_at.isoformat() if payment_order and payment_order.expires_at else ''
+        expected_amount = str(order.total_amount)
+        payload = {
+            'version': 1,
+            'type': 'product_payment',
+            'blockchain': BLOCKCHAIN_NAME,
+            'token_name': TOKEN_NAME,
+            'token_symbol': TOKEN_SYMBOL,
+            'peg': TOKEN_PEG,
+            'pay_to_address': (payment_order.pay_to_address if payment_order else ''),
+            'expected_amount': expected_amount,
+            'currency': order.currency,
+            'order_no': order.order_no,
+            'expires_at': expires_at_iso,
+        }
+        payload['sig'] = sign_product_qr_payload(
+            version=payload['version'],
+            payload_type=payload['type'],
+            order_no=payload['order_no'],
+            pay_to_address=payload['pay_to_address'],
+            expected_amount=payload['expected_amount'],
+            currency=payload['currency'],
+            expires_at=payload['expires_at'],
+        )
+        return payload
+
+    def mark_paid(self, *, order: ProductOrder):
+        now = timezone.now()
+        with transaction.atomic():
+            if order.status != ProductOrder.STATUS_PENDING_PAYMENT:
+                raise ValueError('Only pending payment orders can be marked paid.')
+            order.status = ProductOrder.STATUS_PAID
+            order.paid_at = now
+            order.save(update_fields=['status', 'paid_at', 'updated_at'])
+            if order.payment_order:
+                order.payment_order.status = PaymentOrder.STATUS_PAID
+                if order.payment_order.paid_at is None:
+                    order.payment_order.paid_at = now
+                order.payment_order.save(update_fields=['status', 'paid_at', 'updated_at'])
+
+    def ship_order(self, *, order: ProductOrder, created_by, carrier: str, tracking_number: str, tracking_url: str = '', shipped_note: str = ''):
+        if order.status != ProductOrder.STATUS_PAID:
+            raise ValueError('Only paid orders can be shipped.')
+        now = timezone.now()
+        ProductShipment.objects.update_or_create(
+            product_order=order,
+            defaults={
+                'carrier': carrier,
+                'tracking_number': tracking_number,
+                'tracking_url': tracking_url,
+                'shipped_note': shipped_note,
+                'created_by': created_by,
+            },
+        )
+        order.status = ProductOrder.STATUS_SHIPPING
+        order.shipped_at = now
+        order.save(update_fields=['status', 'shipped_at', 'updated_at'])
+
+    def confirm_received(self, *, order: ProductOrder):
+        if order.status != ProductOrder.STATUS_SHIPPING:
+            raise ValueError('Only shipping orders can be confirmed as received.')
+        now = timezone.now()
+        with transaction.atomic():
+            order.status = ProductOrder.STATUS_COMPLETED
+            order.completed_at = now
+            order.save(update_fields=['status', 'completed_at', 'updated_at'])
+            SellerPayout.objects.get_or_create(
+                product_order=order,
+                defaults={
+                    'seller_store': order.seller_store,
+                    'amount': order.total_amount,
+                    'currency': order.currency,
+                    'status': SellerPayout.STATUS_PENDING,
+                },
+            )
+
+    def mark_settled(self, *, order: ProductOrder, txid: str, payout_address: str = '', note: str = ''):
+        if order.status != ProductOrder.STATUS_COMPLETED:
+            raise ValueError('Only completed orders can be settled.')
+        now = timezone.now()
+        with transaction.atomic():
+            payout, _ = SellerPayout.objects.get_or_create(
+                product_order=order,
+                defaults={
+                    'seller_store': order.seller_store,
+                    'amount': order.total_amount,
+                    'currency': order.currency,
+                    'status': SellerPayout.STATUS_PENDING,
+                },
+            )
+            payout.status = SellerPayout.STATUS_PAID
+            payout.txid = txid
+            payout.payout_address = payout_address
+            payout.note = note
+            payout.paid_at = now
+            payout.save(update_fields=['status', 'txid', 'payout_address', 'note', 'paid_at', 'updated_at'])
+            order.status = ProductOrder.STATUS_SETTLED
+            order.settled_at = now
+            order.save(update_fields=['status', 'settled_at', 'updated_at'])
+
+    def _shipping_snapshot(self, shipping_address: UserShippingAddress) -> dict:
+        return {
+            'receiver_name': shipping_address.receiver_name,
+            'phone': shipping_address.phone,
+            'country': shipping_address.country,
+            'province': shipping_address.province,
+            'city': shipping_address.city,
+            'district': shipping_address.district,
+            'street_address': shipping_address.street_address,
+            'postal_code': shipping_address.postal_code,
+        }
+
+    def _generate_order_no(self) -> str:
+        for _ in range(16):
+            candidate = f'PO{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not ProductOrder.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise RuntimeError('Unable to generate unique product order number.')
 
 
 class WalletPrototypePayOrderService:
