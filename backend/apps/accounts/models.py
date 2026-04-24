@@ -3,6 +3,7 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 
+from apps.accounts.constants import TOKEN_SYMBOL
 
 
 
@@ -683,7 +684,7 @@ class WalletAddress(models.Model):
 class ChainReceipt(models.Model):
     CURRENCY_LBC = 'LBC'
     CURRENCY_CHOICES = [
-        (CURRENCY_LBC, 'LBC'),
+        (CURRENCY_LBC, TOKEN_SYMBOL),
     ]
 
     MATCH_UNMATCHED = 'unmatched'

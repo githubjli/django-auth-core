@@ -4,6 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from apps.accounts.constants import BLOCKCHAIN_NAME, LEGACY_CHAIN_CURRENCY_CODE, TOKEN_NAME, TOKEN_PEG, TOKEN_SYMBOL
 from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
@@ -914,6 +915,7 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
     payment_method_id = serializers.IntegerField(source='payment_method.id', read_only=True, allow_null=True)
     wallet_address_id = serializers.IntegerField(source='wallet_address.id', read_only=True, allow_null=True)
     paid_by_id = serializers.IntegerField(source='paid_by.id', read_only=True, allow_null=True)
+    currency_display = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentOrder
@@ -930,6 +932,7 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
             'target_id',
             'amount',
             'currency',
+            'currency_display',
             'status',
             'expected_amount_lbc',
             'actual_amount_lbc',
@@ -946,6 +949,11 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
             'updated_at',
         )
         read_only_fields = fields
+
+    def get_currency_display(self, obj):
+        if obj.currency == LEGACY_CHAIN_CURRENCY_CODE:
+            return TOKEN_SYMBOL
+        return obj.currency
 
 
 class BillingPlanSerializer(serializers.ModelSerializer):
@@ -1019,6 +1027,8 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
 
 
 class MembershipPlanSerializer(serializers.ModelSerializer):
+    settlement = serializers.SerializerMethodField()
+
     class Meta:
         model = MembershipPlan
         fields = (
@@ -1027,11 +1037,20 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'name',
             'description',
             'price_lbc',
+            'settlement',
             'duration_days',
             'is_active',
             'sort_order',
         )
         read_only_fields = fields
+
+    def get_settlement(self, obj):
+        return {
+            'blockchain': BLOCKCHAIN_NAME,
+            'token_name': TOKEN_NAME,
+            'token_symbol': TOKEN_SYMBOL,
+            'token_peg': TOKEN_PEG,
+        }
 
 
 class MembershipOrderCreateSerializer(serializers.Serializer):
@@ -1050,6 +1069,7 @@ class MembershipOrderCreateSerializer(serializers.Serializer):
 class MembershipOrderSerializer(serializers.ModelSerializer):
     plan = serializers.SerializerMethodField()
     qr_text = serializers.CharField(source='pay_to_address', read_only=True)
+    settlement = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentOrder
@@ -1057,6 +1077,7 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
             'order_no',
             'plan',
             'expected_amount_lbc',
+            'settlement',
             'pay_to_address',
             'qr_text',
             'status',
@@ -1072,6 +1093,14 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
             'id': obj.target_id,
             'code': obj.plan_code_snapshot,
             'name': obj.plan_name_snapshot,
+        }
+
+    def get_settlement(self, obj):
+        return {
+            'blockchain': BLOCKCHAIN_NAME,
+            'token_name': TOKEN_NAME,
+            'token_symbol': TOKEN_SYMBOL,
+            'token_peg': TOKEN_PEG,
         }
 
 
