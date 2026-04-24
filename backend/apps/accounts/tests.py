@@ -10,6 +10,7 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKEN_SYMBOL
 from apps.accounts.content import (
     UnifiedContentSerializer,
     map_live_to_content,
@@ -2876,6 +2877,8 @@ class PaymentOrderAPITestCase(APITestCase):
         self.assertEqual(item['id'], order.id)
         self.assertEqual(item['order_no'], 'MO-LIST-001')
         self.assertEqual(item['order_type'], PaymentOrder.TYPE_MEMBERSHIP)
+        self.assertEqual(item['currency'], 'LBC')
+        self.assertEqual(item['currency_display'], TOKEN_SYMBOL)
         self.assertEqual(item['status'], PaymentOrder.STATUS_PENDING)
         self.assertEqual(item['expected_amount_lbc'], '30.00000000')
         self.assertEqual(item['actual_amount_lbc'], '0.00000000')
@@ -3023,6 +3026,10 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]['code'], MembershipPlan.CODE_MONTHLY)
+        self.assertEqual(response.data[0]['settlement']['blockchain'], BLOCKCHAIN_NAME)
+        self.assertEqual(response.data[0]['settlement']['token_name'], TOKEN_NAME)
+        self.assertEqual(response.data[0]['settlement']['token_symbol'], TOKEN_SYMBOL)
+        self.assertEqual(response.data[0]['settlement']['token_peg'], TOKEN_PEG)
 
     def test_membership_order_create_requires_authentication(self):
         response = self.client.post(
@@ -3102,6 +3109,10 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['status'], PaymentOrder.STATUS_PENDING)
         self.assertEqual(response.data['expected_amount_lbc'], '12.50000000')
+        self.assertEqual(response.data['settlement']['blockchain'], BLOCKCHAIN_NAME)
+        self.assertEqual(response.data['settlement']['token_name'], TOKEN_NAME)
+        self.assertEqual(response.data['settlement']['token_symbol'], TOKEN_SYMBOL)
+        self.assertEqual(response.data['settlement']['token_peg'], TOKEN_PEG)
         self.assertEqual(response.data['pay_to_address'], 'bTestLbcAddressForOrder1')
         self.assertEqual(response.data['qr_text'], 'bTestLbcAddressForOrder1')
         self.assertTrue(response.data['order_no'])
@@ -3127,6 +3138,7 @@ class MembershipAPITestCase(APITestCase):
         detail_response = self.client.get(reverse('membership-order-detail', args=[order.order_no]))
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['order_no'], order.order_no)
+        self.assertEqual(detail_response.data['settlement']['token_symbol'], TOKEN_SYMBOL)
 
     @override_settings(
         LBRY_PLATFORM_WALLET_ID='wallet-main',
