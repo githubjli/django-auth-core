@@ -3,6 +3,7 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 
+from apps.accounts.constants import TOKEN_SYMBOL
 
 
 
@@ -319,6 +320,143 @@ class Product(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+
+class UserShippingAddress(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='shipping_addresses',
+    )
+    receiver_name = models.CharField(max_length=255)
+    phone = models.CharField(max_length=64, blank=True, default='')
+    country = models.CharField(max_length=120)
+    province = models.CharField(max_length=120, blank=True, default='')
+    city = models.CharField(max_length=120, blank=True, default='')
+    district = models.CharField(max_length=120, blank=True, default='')
+    street_address = models.TextField()
+    postal_code = models.CharField(max_length=24, blank=True, default='')
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-is_default', '-updated_at', '-id']
+
+
+class ProductOrder(models.Model):
+    STATUS_PENDING_PAYMENT = 'pending_payment'
+    STATUS_PAID = 'paid'
+    STATUS_SHIPPING = 'shipping'
+    STATUS_COMPLETED = 'completed'
+    STATUS_SETTLED = 'settled'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_PENDING_PAYMENT, 'Pending Payment'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_SHIPPING, 'Shipping'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_SETTLED, 'Settled'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    order_no = models.CharField(max_length=64, unique=True)
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='product_orders',
+    )
+    seller_store = models.ForeignKey(
+        SellerStore,
+        on_delete=models.CASCADE,
+        related_name='product_orders',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='product_orders',
+    )
+    product_title_snapshot = models.CharField(max_length=255)
+    product_price_snapshot = models.DecimalField(max_digits=12, decimal_places=2)
+    quantity = models.PositiveIntegerField(default=1)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default=TOKEN_SYMBOL)
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING_PAYMENT)
+    shipping_address_snapshot = models.JSONField(default=dict)
+    payment_order = models.OneToOneField(
+        'PaymentOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='linked_product_order',
+    )
+    paid_at = models.DateTimeField(null=True, blank=True)
+    shipped_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    settled_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class ProductShipment(models.Model):
+    product_order = models.OneToOneField(
+        ProductOrder,
+        on_delete=models.CASCADE,
+        related_name='shipment',
+    )
+    carrier = models.CharField(max_length=255)
+    tracking_number = models.CharField(max_length=255)
+    tracking_url = models.URLField(blank=True, default='')
+    shipped_note = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_product_shipments',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class SellerPayout(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    product_order = models.OneToOneField(
+        ProductOrder,
+        on_delete=models.CASCADE,
+        related_name='seller_payout',
+    )
+    seller_store = models.ForeignKey(
+        SellerStore,
+        on_delete=models.CASCADE,
+        related_name='seller_payouts',
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default=TOKEN_SYMBOL)
+    payout_address = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    txid = models.CharField(max_length=255, blank=True, default='')
+    note = models.TextField(blank=True, default='')
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
 
 
 class LiveStream(models.Model):
@@ -683,7 +821,7 @@ class WalletAddress(models.Model):
 class ChainReceipt(models.Model):
     CURRENCY_LBC = 'LBC'
     CURRENCY_CHOICES = [
-        (CURRENCY_LBC, 'LBC'),
+        (CURRENCY_LBC, TOKEN_SYMBOL),
     ]
 
     MATCH_UNMATCHED = 'unmatched'
