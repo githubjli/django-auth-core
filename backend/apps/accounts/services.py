@@ -959,6 +959,11 @@ def verify_product_qr_signature(payload: dict) -> bool:
 
 
 class ProductOrderService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+
     def _resolve_receive_address(self) -> str:
         return (settings.PRODUCT_PLATFORM_RECEIVE_ADDRESS or settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
 
@@ -973,9 +978,31 @@ class ProductOrderService:
             raise ValueError('Insufficient product stock.')
         if shipping_address.user_id != buyer.id:
             raise ValueError('Shipping address does not belong to buyer.')
-        receive_address = self._resolve_receive_address()
+        receive_address = ''
+        wallet_id = ''
+        account_id = ''
+        is_dynamic_address = False
+        configured_receive_address = self._resolve_receive_address()
+        if configured_receive_address:
+            receive_address = configured_receive_address
+            wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip()
+            account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip()
+        else:
+            daemon_wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip() or None
+            daemon_account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
+            try:
+                daemon_result = self.daemon_client.address_unused(
+                    wallet_id=daemon_wallet_id,
+                    account_id=daemon_account_id,
+                )
+            except LbryDaemonError as exc:
+                raise RuntimeError('Unable to allocate product payment address from platform wallet.') from exc
+            receive_address = (daemon_result.get('address') or '').strip()
+            wallet_id = (daemon_result.get('wallet_id') or daemon_wallet_id or '').strip()
+            account_id = (daemon_result.get('account_id') or daemon_account_id or '').strip()
+            is_dynamic_address = True
         if not receive_address:
-            raise RuntimeError('No platform receive address configured for product payments.')
+            raise RuntimeError('Unable to allocate product payment address from platform wallet.')
 
         with transaction.atomic():
             updated = Product.objects.filter(id=product.id, stock_quantity__gte=quantity).update(stock_quantity=F('stock_quantity') - quantity)
@@ -998,6 +1025,40 @@ class ProductOrderService:
                 pay_to_address=receive_address,
                 expires_at=expires_at,
             )
+            if is_dynamic_address:
+                existing_assigned = WalletAddress.objects.filter(
+                    address=receive_address,
+                    assigned_order__isnull=False,
+                ).exclude(assigned_order=payment_order).first()
+                if existing_assigned is not None:
+                    raise RuntimeError('Unable to allocate product payment address from platform wallet.')
+                wallet_address, _ = WalletAddress.objects.update_or_create(
+                    address=receive_address,
+                    defaults={
+                        'label': f'product:{order_no}',
+                        'usage_type': WalletAddress.USAGE_PRODUCT,
+                        'status': WalletAddress.STATUS_ASSIGNED,
+                        'assigned_order': payment_order,
+                        'assigned_at': now,
+                        'wallet_id': wallet_id,
+                        'account_id': account_id,
+                    },
+                )
+            else:
+                wallet_address, _ = WalletAddress.objects.update_or_create(
+                    address=receive_address,
+                    defaults={
+                        'label': f'product:{order_no}',
+                        'usage_type': WalletAddress.USAGE_PRODUCT,
+                        'status': WalletAddress.STATUS_AVAILABLE,
+                        'assigned_order': None,
+                        'assigned_at': None,
+                        'wallet_id': wallet_id,
+                        'account_id': account_id,
+                    },
+                )
+            payment_order.wallet_address = wallet_address
+            payment_order.save(update_fields=['wallet_address', 'updated_at'])
             product_order = ProductOrder.objects.create(
                 order_no=order_no,
                 buyer=buyer,

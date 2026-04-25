@@ -3824,6 +3824,56 @@ class ProductOrderFlowAPITestCase(APITestCase):
         self.assertTrue(response.data['qr_text'])
         self.assertTrue(response.data['payment_uri'])
 
+    def test_product_order_creation_uses_configured_product_receive_address(self):
+        buyer = self.create_user('configured-address-buyer@example.com')
+        _, _, product = self.create_store_product(slug='store-configured-address')
+        address = self.create_shipping_address(buyer)
+        _, response = self.create_product_order(buyer, product, address)
+        self.assertEqual(response.data['pay_to_address'], 'bProductPlatformAddress001')
+        self.assertEqual(response.data['qr_payload']['pay_to_address'], 'bProductPlatformAddress001')
+
+    @override_settings(
+        PRODUCT_PLATFORM_RECEIVE_ADDRESS='',
+        LBRY_PLATFORM_RECEIVE_ADDRESS='',
+        LBRY_PLATFORM_WALLET_ID='ltt-admin-stream',
+    )
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_product_order_creation_without_fixed_address_calls_daemon(self, mock_address_unused):
+        mock_address_unused.return_value = {
+            'address': 'bDynamicProductAddress001',
+            'wallet_id': 'ltt-admin-stream',
+            'account_id': 'account-main',
+        }
+        buyer = self.create_user('dynamic-address-buyer@example.com')
+        _, _, product = self.create_store_product(slug='store-dynamic-address')
+        address = self.create_shipping_address(buyer)
+        order, response = self.create_product_order(buyer, product, address)
+        mock_address_unused.assert_called_once_with(wallet_id='ltt-admin-stream', account_id=None)
+        self.assertEqual(order.payment_order.pay_to_address, 'bDynamicProductAddress001')
+        self.assertEqual(response.data['pay_to_address'], 'bDynamicProductAddress001')
+        self.assertEqual(response.data['qr_payload']['pay_to_address'], 'bDynamicProductAddress001')
+        self.assertIn('bDynamicProductAddress001', response.data['payment_uri'])
+
+    @override_settings(
+        PRODUCT_PLATFORM_RECEIVE_ADDRESS='',
+        LBRY_PLATFORM_RECEIVE_ADDRESS='',
+        LBRY_PLATFORM_WALLET_ID='ltt-admin-stream',
+    )
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_product_order_creation_daemon_failure_returns_503(self, mock_address_unused):
+        mock_address_unused.side_effect = LbryDaemonError('daemon unavailable')
+        buyer = self.create_user('dynamic-address-fail@example.com')
+        _, _, product = self.create_store_product(slug='store-dynamic-fail')
+        address = self.create_shipping_address(buyer)
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('product-order-list-create'),
+            {'product_id': product.id, 'quantity': 1, 'shipping_address_id': address.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Unable to allocate product payment address from platform wallet.')
+
     def test_qr_payload_token_standard_and_signature(self):
         buyer = self.create_user('qr-standard@example.com')
         _, _, product = self.create_store_product(slug='store-qr-standard')

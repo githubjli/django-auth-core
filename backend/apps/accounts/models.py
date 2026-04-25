@@ -773,11 +773,13 @@ class MembershipPlan(models.Model):
 
 class WalletAddress(models.Model):
     USAGE_MEMBERSHIP = 'membership'
+    USAGE_PRODUCT = 'product'
     USAGE_TIP = 'tip'
     USAGE_DEPOSIT = 'deposit'
     USAGE_GENERAL = 'general'
     USAGE_TYPE_CHOICES = [
         (USAGE_MEMBERSHIP, 'Membership'),
+        (USAGE_PRODUCT, 'Product'),
         (USAGE_TIP, 'Tip'),
         (USAGE_DEPOSIT, 'Deposit'),
         (USAGE_GENERAL, 'General'),
