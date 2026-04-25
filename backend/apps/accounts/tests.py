@@ -145,12 +145,46 @@ class AuthAPITestCase(APITestCase):
         self.assertEqual(me_response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(me_response.data.keys()),
-            {'id', 'email', 'display_name', 'first_name', 'last_name', 'avatar', 'avatar_url', 'is_creator', 'is_admin'},
+            {
+                'id',
+                'email',
+                'display_name',
+                'first_name',
+                'last_name',
+                'avatar',
+                'avatar_url',
+                'is_creator',
+                'is_admin',
+                'linked_wallet_id',
+                'primary_user_address',
+                'wallet_link_status',
+                'linked_at',
+            },
         )
+        self.assertEqual(me_response.data['linked_wallet_id'], '')
+        self.assertEqual(me_response.data['primary_user_address'], '')
+        self.assertEqual(me_response.data['wallet_link_status'], '')
+        self.assertIsNone(me_response.data['linked_at'])
 
     def test_me_requires_authentication(self):
         response = self.client.get(reverse('auth-me'))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_me_includes_wallet_metadata_from_user(self):
+        user = self.create_user('me-wallet-meta@example.com')
+        user.linked_wallet_id = 'wallet-main'
+        user.primary_user_address = 'bUserAddress001'
+        user.wallet_link_status = User.WALLET_LINKED
+        user.linked_at = datetime(2026, 1, 15, 12, 30, tzinfo=timezone.utc)
+        user.save(update_fields=['linked_wallet_id', 'primary_user_address', 'wallet_link_status', 'linked_at'])
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get(reverse('auth-me'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['linked_wallet_id'], 'wallet-main')
+        self.assertEqual(response.data['primary_user_address'], 'bUserAddress001')
+        self.assertEqual(response.data['wallet_link_status'], User.WALLET_LINKED)
+        self.assertEqual(response.data['linked_at'], '2026-01-15T12:30:00Z')
 
     @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
     def test_me_reflects_latest_avatar_after_profile_update(self):

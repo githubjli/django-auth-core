@@ -52,6 +52,10 @@ class UserSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(read_only=True)
     avatar_url = serializers.SerializerMethodField()
     is_admin = serializers.SerializerMethodField()
+    linked_wallet_id = serializers.CharField(read_only=True, allow_blank=True)
+    primary_user_address = serializers.CharField(read_only=True, allow_blank=True)
+    wallet_link_status = serializers.CharField(read_only=True, allow_blank=True)
+    linked_at = serializers.DateTimeField(read_only=True, allow_null=True)
 
     class Meta:
         model = User
@@ -65,6 +69,10 @@ class UserSerializer(serializers.ModelSerializer):
             'avatar_url',
             'is_creator',
             'is_admin',
+            'linked_wallet_id',
+            'primary_user_address',
+            'wallet_link_status',
+            'linked_at',
         )
         read_only_fields = ('id',)
 
