@@ -30,7 +30,9 @@ from apps.accounts.models import (
     Product,
     ProductOrder,
     ProductShipment,
+    ProductRefundRequest,
     SellerPayout,
+    SellerPayoutAddress,
     UserMembership,
     UserShippingAddress,
     WalletAddress,
@@ -1466,6 +1468,103 @@ class ProductPaymentDetectionService:
             return Decimal(str(value))
         except (InvalidOperation, ValueError):
             return None
+
+
+class ProductPayoutService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client
+
+    @transaction.atomic
+    def settle_pending_payouts(self) -> dict:
+        stats = {
+            'scanned_payouts': 0,
+            'eligible_payouts': 0,
+            'settled_payouts': 0,
+            'skipped_payouts': 0,
+            'failed_payouts': 0,
+        }
+        if not settings.PRODUCT_AUTO_PAYOUT_ENABLED:
+            return stats
+        if self.daemon_client is None:
+            self.daemon_client = self.daemon_client_class()
+        threshold = timezone.now() - timedelta(hours=int(settings.PRODUCT_PAYOUT_MIN_DELAY_HOURS))
+        payouts = list(
+            SellerPayout.objects.select_related('product_order', 'seller_store').filter(
+                status=SellerPayout.STATUS_PENDING,
+                product_order__status=ProductOrder.STATUS_COMPLETED,
+                product_order__completed_at__isnull=False,
+                product_order__completed_at__lte=threshold,
+            )
+        )
+        stats['scanned_payouts'] = len(payouts)
+        for payout in payouts:
+            order = payout.product_order
+            has_active_refund = ProductRefundRequest.objects.filter(
+                product_order=order,
+                status__in=[ProductRefundRequest.STATUS_REQUESTED, ProductRefundRequest.STATUS_APPROVED],
+            ).exists()
+            if has_active_refund:
+                stats['skipped_payouts'] += 1
+                continue
+            payout_address = self._resolve_payout_address(payout)
+            if not payout_address:
+                payout.failure_note = 'missing_default_payout_address'
+                payout.save(update_fields=['failure_note', 'updated_at'])
+                stats['skipped_payouts'] += 1
+                continue
+            wallet_id = (settings.PRODUCT_PAYOUT_WALLET_ID or settings.LBRY_PLATFORM_WALLET_ID or '').strip()
+            if not wallet_id:
+                payout.failure_note = 'missing_payout_wallet_id'
+                payout.save(update_fields=['failure_note', 'updated_at'])
+                stats['skipped_payouts'] += 1
+                continue
+            change_account_id = (settings.PRODUCT_PAYOUT_ACCOUNT_ID or settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
+            stats['eligible_payouts'] += 1
+            try:
+                result = self.daemon_client.wallet_send(
+                    wallet_id=wallet_id,
+                    amount=payout.amount,
+                    addresses=[payout_address.address],
+                    change_account_id=change_account_id,
+                    funding_account_ids=[change_account_id] if change_account_id else None,
+                    blocking=True,
+                )
+                txid = self._extract_txid(result)
+            except LbryDaemonError:
+                payout.status = SellerPayout.STATUS_FAILED
+                payout.failure_note = 'wallet_send_failed'
+                payout.save(update_fields=['status', 'failure_note', 'updated_at'])
+                stats['failed_payouts'] += 1
+                continue
+            now = timezone.now()
+            payout.status = SellerPayout.STATUS_PAID
+            payout.txid = txid
+            payout.payout_address = payout_address.address
+            payout.paid_at = now
+            payout.failure_note = ''
+            payout.save(update_fields=['status', 'txid', 'payout_address', 'paid_at', 'failure_note', 'updated_at'])
+            order.status = ProductOrder.STATUS_SETTLED
+            order.settled_at = now
+            order.save(update_fields=['status', 'settled_at', 'updated_at'])
+            stats['settled_payouts'] += 1
+        return stats
+
+    def _resolve_payout_address(self, payout: SellerPayout) -> SellerPayoutAddress | None:
+        address = SellerPayoutAddress.objects.filter(
+            seller_store=payout.seller_store,
+            is_active=True,
+            is_default=True,
+        ).order_by('-updated_at', '-id').first()
+        return address
+
+    def _extract_txid(self, payload) -> str:
+        if isinstance(payload, str):
+            return payload.strip()
+        if isinstance(payload, dict):
+            return str(payload.get('txid') or payload.get('id') or '').strip()
+        return ''
 
 
 class WalletPrototypePayOrderService:
