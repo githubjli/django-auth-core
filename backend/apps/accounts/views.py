@@ -57,6 +57,7 @@ from apps.accounts.serializers import (
     MembershipPlanSerializer,
     MyMembershipSerializer,
     WalletPrototypePayOrderSerializer,
+    WalletPrototypePayProductOrderSerializer,
     LiveStreamSerializer,
     LiveStreamProductListingSerializer,
     LiveStreamProductManageCreateSerializer,
@@ -1903,17 +1904,6 @@ class WalletPrototypePayOrderAPIView(APIView):
         except WalletPrototypeError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
-        if order.order_type == PaymentOrder.TYPE_PRODUCT:
-            return Response(
-                {
-                    'order_no': order.order_no,
-                    'txid': result.get('txid', ''),
-                    'message': 'Payment submitted. Waiting for blockchain confirmation.',
-                    'wallet_relocked': bool(result.get('wallet_relocked')),
-                },
-                status=status.HTTP_200_OK,
-            )
-
         verification = None
         txid_hint = (result.get('txid') or '').strip()
         if txid_hint:
@@ -1923,6 +1913,53 @@ class WalletPrototypePayOrderAPIView(APIView):
                 verification = {'verified': False, 'message': 'verification_attempt_failed'}
         result['verification'] = verification
         return Response(result, status=status.HTTP_200_OK)
+
+
+class WalletPrototypePayProductOrderAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = WalletPrototypePayProductOrderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('payment_order'),
+            order_no=serializer.validated_data['order_no'],
+            buyer=request.user,
+        )
+        if order.status != ProductOrder.STATUS_PENDING_PAYMENT:
+            return Response({'detail': 'Product order is not pending payment.'}, status=status.HTTP_409_CONFLICT)
+        payment_order = order.payment_order
+        if payment_order is None or payment_order.order_type != PaymentOrder.TYPE_PRODUCT:
+            return Response({'detail': 'Invalid product payment order linkage.'}, status=status.HTTP_400_BAD_REQUEST)
+        wallet_id = (serializer.validated_data.get('wallet_id') or request.user.linked_wallet_id or '').strip()
+        if not wallet_id:
+            return Response({'detail': 'Missing linked wallet.'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.linked_wallet_id and wallet_id != request.user.linked_wallet_id:
+            return Response({'detail': 'Wallet mismatch for user.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        service = WalletPrototypePayOrderService()
+        try:
+            result = service.pay_order(
+                user=request.user,
+                order=payment_order,
+                wallet_id=wallet_id,
+                password=serializer.validated_data['password'],
+            )
+        except WalletPrototypeValidationError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except WalletPrototypeError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response(
+            {
+                'order_no': order.order_no,
+                'txid': result.get('txid', ''),
+                'message': 'Payment submitted. Waiting for blockchain confirmation.',
+                'wallet_relocked': bool(result.get('wallet_relocked')),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class MembershipMeAPIView(APIView):

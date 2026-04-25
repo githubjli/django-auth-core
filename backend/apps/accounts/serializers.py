@@ -1458,6 +1458,12 @@ class WalletPrototypePayOrderSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, max_length=256)
 
 
+class WalletPrototypePayProductOrderSerializer(serializers.Serializer):
+    order_no = serializers.CharField(max_length=64)
+    wallet_id = serializers.CharField(required=False, allow_blank=True, max_length=128)
+    password = serializers.CharField(write_only=True, max_length=256)
+
+
 class MyMembershipSerializer(serializers.Serializer):
     status = serializers.CharField()
     starts_at = serializers.DateTimeField(allow_null=True)
