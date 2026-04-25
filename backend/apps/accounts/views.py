@@ -104,6 +104,7 @@ from apps.accounts.services import (
     WalletPrototypeError,
     WalletPrototypeValidationError,
     WalletPrototypePayOrderService,
+    get_product_wallet_send_amount,
     WalletAddressConflictError,
     generate_video_thumbnail,
 )
@@ -1940,11 +1941,13 @@ class WalletPrototypePayProductOrderAPIView(APIView):
 
         service = WalletPrototypePayOrderService()
         try:
+            send_amount = get_product_wallet_send_amount(payment_order=payment_order, product_order=order)
             result = service.pay_order(
                 user=request.user,
                 order=payment_order,
                 wallet_id=wallet_id,
                 password=serializer.validated_data['password'],
+                amount_override=send_amount,
             )
         except WalletPrototypeValidationError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

@@ -302,6 +302,32 @@ class WalletPrototypeValidationError(WalletPrototypeError):
     pass
 
 
+def get_product_wallet_send_amount(payment_order: PaymentOrder, product_order: ProductOrder) -> Decimal:
+    """
+    Resolve the native-chain amount to send for product wallet prototype payments.
+
+    Priority:
+      1) payment_order.expected_amount_lbc (explicit settlement amount)
+      2) payment_order.amount only when PRODUCT_WALLET_PAYMENT_TREAT_THB_LTT_AS_NATIVE=True (dev/test fallback)
+    """
+    treat_thb_ltt_as_native = bool(getattr(settings, 'PRODUCT_WALLET_PAYMENT_TREAT_THB_LTT_AS_NATIVE', False))
+    product_currency = (product_order.currency or '').strip()
+
+    if product_currency == TOKEN_SYMBOL and not treat_thb_ltt_as_native:
+        raise WalletPrototypeValidationError(
+            'Product wallet payment requires THB-LTT token transfer support; native wallet_send cannot send THB-LTT.'
+        )
+
+    expected_amount = payment_order.expected_amount_lbc
+    if expected_amount is not None and expected_amount > 0:
+        return expected_amount
+
+    if treat_thb_ltt_as_native and payment_order.amount and payment_order.amount > 0:
+        return payment_order.amount
+
+    raise WalletPrototypeValidationError('Product payment order is missing settlement amount.')
+
+
 class LbryDaemonClient:
     def __init__(self, *, url: str | None = None, timeout: int | None = None):
         self.url = (url or settings.LBRY_DAEMON_URL or '').strip()
@@ -1025,6 +1051,7 @@ class ProductOrderService:
                 order_type=PaymentOrder.TYPE_PRODUCT,
                 target_type='product_order',
                 amount=total_amount,
+                expected_amount_lbc=total_amount,
                 currency=TOKEN_SYMBOL,
                 status=PaymentOrder.STATUS_PENDING,
                 order_no=order_no,
@@ -1577,14 +1604,20 @@ class WalletPrototypePayOrderService:
     def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
         self.daemon_client = daemon_client or self.daemon_client_class()
 
-    def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str) -> dict:
-        amount = order.expected_amount_lbc or order.amount or Decimal('0')
+    def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str, amount_override: Decimal | None = None) -> dict:
+        amount = amount_override if amount_override is not None else (order.expected_amount_lbc or order.amount or Decimal('0'))
         pay_to_address = (order.pay_to_address or '').strip()
         if amount <= 0 or not pay_to_address:
             raise WalletPrototypeValidationError('Order is missing payment amount/address.')
 
         change_account_id = (user.primary_user_address or '').strip() or None
         funding_account_ids = [change_account_id] if change_account_id else None
+        product_order = None
+        if order.order_type == PaymentOrder.TYPE_PRODUCT:
+            try:
+                product_order = order.linked_product_order
+            except ProductOrder.DoesNotExist:
+                product_order = None
         unlock_ok = False
         send_ok = False
         lock_attempted = False
@@ -1603,6 +1636,23 @@ class WalletPrototypePayOrderService:
         try:
             self.daemon_client.wallet_unlock(wallet_id=wallet_id, password=password)
             unlock_ok = True
+            logger.info(
+                'wallet_prototype_pay_order wallet_send_params order_no=%s order_type=%s wallet_id=%s pay_to_address=%s daemon_amount=%s '
+                'business_currency=%s expected_amount_lbc=%s product_total_amount=%s payment_order_amount=%s payment_order_currency=%s '
+                'funding_account_ids=%s change_account_id=%s',
+                order.order_no,
+                order.order_type,
+                wallet_id,
+                pay_to_address,
+                amount,
+                product_order.currency if product_order else order.currency,
+                order.expected_amount_lbc,
+                product_order.total_amount if product_order else None,
+                order.amount,
+                order.currency,
+                funding_account_ids,
+                change_account_id,
+            )
             send_result = self.daemon_client.wallet_send(
                 wallet_id=wallet_id,
                 amount=amount,
