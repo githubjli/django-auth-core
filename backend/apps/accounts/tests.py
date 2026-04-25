@@ -3235,7 +3235,10 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(active_response.data['plan']['code'], self.plan.code)
 
 
-@override_settings(LBRY_DAEMON_URL='http://127.0.0.1:5279')
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    PRODUCT_PLATFORM_RECEIVE_ADDRESS='bProductPlatformAddress001',
+)
 class WalletPrototypeAPITestCase(APITestCase):
     def create_user(self, email='walletproto@example.com'):
         return User.objects.create_user(email=email, password='strong-pass-123', first_name='Wallet', last_name='Proto')
@@ -3265,6 +3268,45 @@ class WalletPrototypeAPITestCase(APITestCase):
             order_no=f'MOWALLET{PaymentOrder.objects.count()+1:03d}',
             pay_to_address='bPlatformReceiveAddress001',
         )
+
+    def create_store_product(self, owner_email='wallet-seller@example.com', slug='wallet-seller-store'):
+        seller = self.create_user(owner_email)
+        store = SellerStore.objects.create(owner=seller, name='Wallet Seller Store', slug=slug, is_active=True)
+        product = Product.objects.create(
+            store=store,
+            title='Wallet Product',
+            slug=f'wallet-product-{store.id}',
+            price_amount='9.50',
+            price_currency='USD',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        return seller, store, product
+
+    def create_shipping_address(self, buyer):
+        return UserShippingAddress.objects.create(
+            user=buyer,
+            receiver_name='Buyer Receiver',
+            phone='0800000000',
+            country='Thailand',
+            province='Bangkok',
+            city='Bangkok',
+            district='Pathum Wan',
+            street_address='123 Main',
+            postal_code='10330',
+            is_default=True,
+        )
+
+    def create_product_order(self, buyer, product, shipping_address):
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('product-order-list-create'),
+            {'product_id': product.id, 'quantity': 1, 'shipping_address_id': shipping_address.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        order = ProductOrder.objects.get(order_no=response.data['order_no'])
+        return order, order.payment_order
 
     def test_unauthenticated_access_blocked(self):
         response = self.client.post(
@@ -3400,6 +3442,102 @@ class WalletPrototypeAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('expired', response.data['detail'])
+
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_buyer_can_submit_product_order_wallet_payment_without_marking_paid(
+        self,
+        mock_unlock,
+        mock_send,
+        mock_lock,
+        mock_tx_show,
+    ):
+        buyer = self.create_user('wallet-product-buyer@example.com')
+        buyer.linked_wallet_id = 'wallet-main'
+        buyer.save(update_fields=['linked_wallet_id'])
+        _, _, product = self.create_store_product(slug='wallet-product-store-1')
+        shipping = self.create_shipping_address(buyer)
+        product_order, payment_order = self.create_product_order(buyer, product, shipping)
+        payment_order.expected_amount_lbc = None
+        payment_order.amount = product_order.total_amount
+        payment_order.save(update_fields=['expected_amount_lbc', 'amount', 'updated_at'])
+        mock_send.return_value = {'txid': 'tx-product-wallet-001'}
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': product_order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['order_no'], product_order.order_no)
+        self.assertEqual(response.data['txid'], 'tx-product-wallet-001')
+        self.assertEqual(response.data['message'], 'Payment submitted. Waiting for blockchain confirmation.')
+        self.assertTrue(response.data['wallet_relocked'])
+        kwargs = mock_send.call_args.kwargs
+        self.assertEqual(kwargs['addresses'], [payment_order.pay_to_address])
+        self.assertEqual(str(kwargs['amount']), str(product_order.total_amount))
+        payment_order.refresh_from_db()
+        product_order.refresh_from_db()
+        self.assertEqual(payment_order.txid, 'tx-product-wallet-001')
+        self.assertEqual(payment_order.status, PaymentOrder.STATUS_PENDING)
+        self.assertEqual(product_order.status, ProductOrder.STATUS_PENDING_PAYMENT)
+        mock_unlock.assert_called_once()
+        mock_send.assert_called_once()
+        mock_lock.assert_called_once()
+        mock_tx_show.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_non_buyer_cannot_pay_another_users_product_order(self, mock_unlock, mock_send, mock_lock):
+        owner = self.create_user('wallet-product-owner@example.com')
+        owner.linked_wallet_id = 'wallet-main'
+        owner.save(update_fields=['linked_wallet_id'])
+        attacker = self.create_user('wallet-product-attacker@example.com')
+        attacker.linked_wallet_id = 'wallet-main'
+        attacker.save(update_fields=['linked_wallet_id'])
+        _, _, product = self.create_store_product(slug='wallet-product-store-2')
+        shipping = self.create_shipping_address(owner)
+        product_order, _ = self.create_product_order(owner, product, shipping)
+
+        self.client.force_authenticate(user=attacker)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': product_order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        mock_unlock.assert_not_called()
+        mock_send.assert_not_called()
+        mock_lock.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_lock')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_unlock')
+    def test_product_wallet_payment_missing_pay_to_address_returns_validation_error(self, mock_unlock, mock_send, mock_lock):
+        buyer = self.create_user('wallet-product-noaddr@example.com')
+        buyer.linked_wallet_id = 'wallet-main'
+        buyer.save(update_fields=['linked_wallet_id'])
+        _, _, product = self.create_store_product(slug='wallet-product-store-3')
+        shipping = self.create_shipping_address(buyer)
+        product_order, payment_order = self.create_product_order(buyer, product, shipping)
+        payment_order.pay_to_address = ''
+        payment_order.save(update_fields=['pay_to_address', 'updated_at'])
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('wallet-prototype-pay-order'),
+            {'order_no': product_order.order_no, 'wallet_id': 'wallet-main', 'password': 'temporary-secret'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('missing payment amount/address', response.data['detail'])
+        mock_unlock.assert_not_called()
+        mock_send.assert_not_called()
+        mock_lock.assert_not_called()
 
     @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
     def test_verify_now_endpoint_updates_order_when_confirmed(self, mock_tx_show):

@@ -298,6 +298,10 @@ class WalletPrototypeError(LbryDaemonError):
     pass
 
 
+class WalletPrototypeValidationError(WalletPrototypeError):
+    pass
+
+
 class LbryDaemonClient:
     def __init__(self, *, url: str | None = None, timeout: int | None = None):
         self.url = (url or settings.LBRY_DAEMON_URL or '').strip()
@@ -1574,10 +1578,10 @@ class WalletPrototypePayOrderService:
         self.daemon_client = daemon_client or self.daemon_client_class()
 
     def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str) -> dict:
-        amount = order.expected_amount_lbc or Decimal('0')
+        amount = order.expected_amount_lbc or order.amount or Decimal('0')
         pay_to_address = (order.pay_to_address or '').strip()
         if amount <= 0 or not pay_to_address:
-            raise WalletPrototypeError('Order is missing payment amount/address.')
+            raise WalletPrototypeValidationError('Order is missing payment amount/address.')
 
         change_account_id = (user.primary_user_address or '').strip() or None
         funding_account_ids = [change_account_id] if change_account_id else None
@@ -1659,6 +1663,7 @@ class WalletPrototypePayOrderService:
                 txid,
             )
         if send_ok and response_payload is not None:
+            response_payload['wallet_relocked'] = lock_ok
             return response_payload
         raise WalletPrototypeError('Wallet prototype payment failed.')
 

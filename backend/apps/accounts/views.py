@@ -101,6 +101,7 @@ from apps.accounts.services import (
     MembershipOrderPersistenceError,
     PaymentDetectionService,
     WalletPrototypeError,
+    WalletPrototypeValidationError,
     WalletPrototypePayOrderService,
     WalletAddressConflictError,
     generate_video_thumbnail,
@@ -1865,14 +1866,23 @@ class WalletPrototypePayOrderAPIView(APIView):
         serializer.is_valid(raise_exception=True)
 
         order = generics.get_object_or_404(
-            PaymentOrder.objects.filter(order_type=PaymentOrder.TYPE_MEMBERSHIP),
+            PaymentOrder.objects.filter(order_type__in=[PaymentOrder.TYPE_MEMBERSHIP, PaymentOrder.TYPE_PRODUCT]),
             order_no=serializer.validated_data['order_no'],
             user=request.user,
         )
-        if order.status not in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
-            return Response({'detail': 'Order is not payable.'}, status=status.HTTP_400_BAD_REQUEST)
-        if order.expires_at and order.expires_at < timezone.now() and order.status == PaymentOrder.STATUS_PENDING:
-            return Response({'detail': 'Order has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+        if order.order_type == PaymentOrder.TYPE_MEMBERSHIP:
+            if order.status not in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
+                return Response({'detail': 'Order is not payable.'}, status=status.HTTP_400_BAD_REQUEST)
+            if order.expires_at and order.expires_at < timezone.now() and order.status == PaymentOrder.STATUS_PENDING:
+                return Response({'detail': 'Order has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif order.order_type == PaymentOrder.TYPE_PRODUCT:
+            product_order = ProductOrder.objects.filter(payment_order=order, buyer=request.user).first()
+            if not product_order:
+                return Response({'detail': 'Order is not payable.'}, status=status.HTTP_400_BAD_REQUEST)
+            if product_order.status != ProductOrder.STATUS_PENDING_PAYMENT:
+                return Response({'detail': 'Order is not payable.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            return Response({'detail': 'Unsupported order type.'}, status=status.HTTP_400_BAD_REQUEST)
 
         wallet_id = (serializer.validated_data.get('wallet_id') or request.user.linked_wallet_id or '').strip()
         if not wallet_id:
@@ -1888,8 +1898,21 @@ class WalletPrototypePayOrderAPIView(APIView):
                 wallet_id=wallet_id,
                 password=serializer.validated_data['password'],
             )
-        except WalletPrototypeError:
-            return Response({'detail': 'Wallet prototype payment failed.'}, status=status.HTTP_502_BAD_GATEWAY)
+        except WalletPrototypeValidationError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except WalletPrototypeError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        if order.order_type == PaymentOrder.TYPE_PRODUCT:
+            return Response(
+                {
+                    'order_no': order.order_no,
+                    'txid': result.get('txid', ''),
+                    'message': 'Payment submitted. Waiting for blockchain confirmation.',
+                    'wallet_relocked': bool(result.get('wallet_relocked')),
+                },
+                status=status.HTTP_200_OK,
+            )
 
         verification = None
         txid_hint = (result.get('txid') or '').strip()
