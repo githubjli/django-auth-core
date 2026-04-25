@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from django.test import override_settings
+from django.utils import timezone as django_timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -29,9 +30,11 @@ from apps.accounts.models import (
     OrderPayment,
     PaymentOrder,
     ProductOrder,
+    ProductRefundRequest,
     ProductShipment,
     Product,
     SellerPayout,
+    SellerPayoutAddress,
     SellerStore,
     StreamPaymentMethod,
     UserMembership,
@@ -45,6 +48,9 @@ from apps.accounts.services import (
     LbryDaemonError,
     MembershipActivationService,
     PaymentDetectionService,
+    ProductOrderService,
+    ProductPaymentDetectionService,
+    ProductPayoutSettlementService,
     verify_product_qr_signature,
 )
 
@@ -3709,6 +3715,7 @@ class MembershipPaymentDetectionServiceTestCase(APITestCase):
 @override_settings(
     PRODUCT_ORDER_EXPIRE_MINUTES=30,
     PRODUCT_PLATFORM_RECEIVE_ADDRESS='bProductPlatformAddress001',
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
 )
 class ProductOrderFlowAPITestCase(APITestCase):
     def create_user(self, email='buyer@example.com', **extra):
@@ -3951,6 +3958,214 @@ class ProductOrderFlowAPITestCase(APITestCase):
         self.assertEqual(order.status, ProductOrder.STATUS_SETTLED)
         self.assertEqual(payout.status, SellerPayout.STATUS_PAID)
         self.assertEqual(payout.txid, 'settle-tx-1')
+
+    def test_seller_order_list_and_detail_permissions(self):
+        buyer = self.create_user('seller-list-buyer@example.com')
+        seller, _, product = self.create_store_product('seller-list-owner@example.com', slug='store-seller-list')
+        other_seller, _, _ = self.create_store_product('seller-list-other@example.com', slug='store-seller-list-other')
+        address = self.create_shipping_address(buyer)
+        order, _ = self.create_product_order(buyer, product, address)
+
+        self.client.force_authenticate(user=seller)
+        list_response = self.client.get(reverse('seller-product-order-list'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data[0]['order_no'], order.order_no)
+        detail_response = self.client.get(reverse('seller-product-order-detail', args=[order.order_no]))
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['order_no'], order.order_no)
+
+        self.client.force_authenticate(user=other_seller)
+        forbidden = self.client.get(reverse('seller-product-order-detail', args=[order.order_no]))
+        self.assertEqual(forbidden.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    def test_product_txid_hint_verifies_without_membership_activation(self, mock_show):
+        buyer = self.create_user('txhint-product-buyer@example.com')
+        _, _, product = self.create_store_product('txhint-product-seller@example.com', slug='store-txhint-product')
+        address = self.create_shipping_address(buyer)
+        order, _ = self.create_product_order(buyer, product, address)
+        mock_show.return_value = {
+            'txid': 'tx-product-hint',
+            'confirmations': 2,
+            'outputs': [{'nout': 0, 'address': order.payment_order.pay_to_address, 'amount': str(order.total_amount)}],
+        }
+        with patch.object(MembershipActivationService, 'activate_for_order') as mock_activation:
+            self.client.force_authenticate(user=buyer)
+            response = self.client.post(
+                reverse('product-order-tx-hint', args=[order.order_no]),
+                {'txid': 'tx-product-hint'},
+                format='json',
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertTrue(response.data['verified'])
+            mock_activation.assert_not_called()
+
+    @override_settings(LBC_MIN_CONFIRMATIONS=2, LBC_TX_PAGE_SIZE=50)
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_list')
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    def test_product_payment_sync_paid_underpaid_overpaid(self, mock_show, mock_list):
+        buyer = self.create_user('sync-buyer@example.com')
+        _, _, product = self.create_store_product('sync-seller@example.com', slug='store-sync')
+        address = self.create_shipping_address(buyer)
+        paid_order, _ = self.create_product_order(buyer, product, address)
+        under_order, _ = self.create_product_order(buyer, product, address)
+        over_order, _ = self.create_product_order(buyer, product, address)
+        paid_order.payment_order.pay_to_address = 'bPaidAddressSync'
+        paid_order.payment_order.save(update_fields=['pay_to_address', 'updated_at'])
+        under_order.payment_order.pay_to_address = 'bUnderAddressSync'
+        under_order.payment_order.save(update_fields=['pay_to_address', 'updated_at'])
+        over_order.payment_order.pay_to_address = 'bOverAddressSync'
+        over_order.payment_order.save(update_fields=['pay_to_address', 'updated_at'])
+
+        mock_list.return_value = [{'txid': 'tx-paid'}, {'txid': 'tx-under'}, {'txid': 'tx-over'}]
+        show_map = {
+            'tx-paid': {'txid': 'tx-paid', 'confirmations': 3, 'outputs': [{'nout': 0, 'address': 'bPaidAddressSync', 'amount': str(paid_order.total_amount)}]},
+            'tx-under': {'txid': 'tx-under', 'confirmations': 3, 'outputs': [{'nout': 0, 'address': 'bUnderAddressSync', 'amount': '1.00'}]},
+            'tx-over': {'txid': 'tx-over', 'confirmations': 3, 'outputs': [{'nout': 0, 'address': 'bOverAddressSync', 'amount': str(over_order.total_amount + 1)}]},
+        }
+        mock_show.side_effect = lambda txid: show_map[txid]
+
+        result = ProductPaymentDetectionService().sync_product_orders()
+        paid_order.refresh_from_db()
+        under_order.refresh_from_db()
+        over_order.refresh_from_db()
+        self.assertGreaterEqual(result['matched_receipts'], 3)
+        self.assertEqual(paid_order.status, ProductOrder.STATUS_PAID)
+        self.assertEqual(under_order.status, ProductOrder.STATUS_PENDING_PAYMENT)
+        self.assertEqual(under_order.payment_order.status, PaymentOrder.STATUS_UNDERPAID)
+        self.assertEqual(over_order.status, ProductOrder.STATUS_PAID)
+        self.assertEqual(over_order.payment_order.status, PaymentOrder.STATUS_OVERPAID)
+
+    def test_stock_lock_and_release_timeout_idempotent(self):
+        buyer = self.create_user('stock-timeout-buyer@example.com')
+        _, _, product = self.create_store_product('stock-timeout-seller@example.com', slug='store-stock-timeout')
+        initial_stock = product.stock_quantity
+        address = self.create_shipping_address(buyer)
+        order, _ = self.create_product_order(buyer, product, address)
+        product.refresh_from_db()
+        self.assertEqual(product.stock_quantity, initial_stock - 1)
+
+        order.expires_at = django_timezone.now() - timedelta(minutes=1)
+        order.save(update_fields=['expires_at', 'updated_at'])
+        result1 = ProductOrderService().release_expired_pending_orders()
+        result2 = ProductOrderService().release_expired_pending_orders()
+        order.refresh_from_db()
+        product.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_CANCELLED)
+        self.assertEqual(order.cancel_reason, 'payment_timeout')
+        self.assertEqual(product.stock_quantity, initial_stock)
+        self.assertGreaterEqual(result1['released_orders'], 1)
+        self.assertEqual(result2['released_orders'], 0)
+
+    def test_paid_product_order_expiry_does_not_release_stock(self):
+        admin = self.create_user('stock-paid-admin@example.com', is_staff=True, is_superuser=True)
+        buyer = self.create_user('stock-paid-buyer@example.com')
+        _, _, product = self.create_store_product('stock-paid-seller@example.com', slug='store-stock-paid')
+        initial_stock = product.stock_quantity
+        address = self.create_shipping_address(buyer)
+        order, _ = self.create_product_order(buyer, product, address)
+        self.client.force_authenticate(user=admin)
+        self.client.post(reverse('product-order-mark-paid', args=[order.order_no]), format='json')
+        order.refresh_from_db()
+        order.expires_at = django_timezone.now() - timedelta(minutes=1)
+        order.save(update_fields=['expires_at', 'updated_at'])
+        ProductOrderService().release_expired_pending_orders()
+        product.refresh_from_db()
+        self.assertEqual(product.stock_quantity, initial_stock - 1)
+
+    def test_seller_payout_address_crud(self):
+        seller, _, _ = self.create_store_product('payout-address-seller@example.com', slug='store-payout-address')
+        self.client.force_authenticate(user=seller)
+        create_response = self.client.post(
+            reverse('seller-payout-address-list-create'),
+            {'address': 'bSellerPayout1', 'is_default': True, 'is_active': True},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        address_id = create_response.data['id']
+        list_response = self.client.get(reverse('seller-payout-address-list-create'))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        patch_response = self.client.patch(
+            reverse('seller-payout-address-detail', args=[address_id]),
+            {'address': 'bSellerPayoutUpdated'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        delete_response = self.client.delete(reverse('seller-payout-address-detail', args=[address_id]))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+
+    @override_settings(PRODUCT_AUTO_PAYOUT_ENABLED=False)
+    def test_auto_payout_disabled_does_nothing(self):
+        result = ProductPayoutSettlementService().settle_pending_payouts()
+        self.assertEqual(result['processed'], 0)
+        self.assertEqual(result['settled'], 0)
+
+    @override_settings(
+        PRODUCT_AUTO_PAYOUT_ENABLED=True,
+        PRODUCT_PAYOUT_WALLET_ID='wallet-main',
+        PRODUCT_PAYOUT_ACCOUNT_ID='account-main',
+    )
+    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
+    def test_auto_payout_settles_completed_order_when_enabled(self, mock_send):
+        admin = self.create_user('auto-payout-admin@example.com', is_staff=True, is_superuser=True)
+        buyer = self.create_user('auto-payout-buyer@example.com')
+        seller, _, product = self.create_store_product('auto-payout-seller@example.com', slug='store-auto-payout')
+        SellerPayoutAddress.objects.create(seller_store=seller.seller_store, address='bAutoPayoutAddress', is_default=True, is_active=True)
+        address = self.create_shipping_address(buyer)
+        order, _ = self.create_product_order(buyer, product, address)
+        self.client.force_authenticate(user=admin)
+        self.client.post(reverse('product-order-mark-paid', args=[order.order_no]), format='json')
+        self.client.force_authenticate(user=seller)
+        self.client.post(reverse('seller-product-order-ship', args=[order.order_no]), {'carrier': 'TH', 'tracking_number': 'TNX'}, format='json')
+        self.client.force_authenticate(user=buyer)
+        self.client.post(reverse('product-order-confirm-received', args=[order.order_no]), format='json')
+        mock_send.return_value = {'txid': 'tx-payout-1'}
+
+        result = ProductPayoutSettlementService().settle_pending_payouts()
+        order.refresh_from_db()
+        payout = SellerPayout.objects.get(product_order=order)
+        self.assertEqual(result['settled'], 1)
+        self.assertEqual(order.status, ProductOrder.STATUS_SETTLED)
+        self.assertEqual(payout.status, SellerPayout.STATUS_PAID)
+        self.assertEqual(payout.txid, 'tx-payout-1')
+
+    def test_refund_request_creation_visibility_and_admin_transitions(self):
+        admin = self.create_user('refund-admin@example.com', is_staff=True, is_superuser=True)
+        buyer = self.create_user('refund-buyer@example.com')
+        seller, _, product = self.create_store_product('refund-seller@example.com', slug='store-refund')
+        address = self.create_shipping_address(buyer)
+        order, _ = self.create_product_order(buyer, product, address)
+        self.client.force_authenticate(user=admin)
+        self.client.post(reverse('product-order-mark-paid', args=[order.order_no]), format='json')
+
+        self.client.force_authenticate(user=buyer)
+        create_response = self.client.post(
+            reverse('product-order-refund-requests', args=[order.order_no]),
+            {'reason': 'damaged', 'requested_amount': '50.00'},
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        refund_id = create_response.data['id']
+        list_response = self.client.get(reverse('product-order-refund-requests', args=[order.order_no]))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+
+        self.client.force_authenticate(user=seller)
+        seller_list = self.client.get(reverse('seller-refund-request-list'))
+        self.assertEqual(seller_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(seller_list.data), 1)
+
+        self.client.force_authenticate(user=admin)
+        approve = self.client.post(reverse('admin-refund-request-approve', args=[refund_id]), {'admin_note': 'ok'}, format='json')
+        self.assertEqual(approve.status_code, status.HTTP_200_OK)
+        reject = self.client.post(reverse('admin-refund-request-reject', args=[refund_id]), {'admin_note': 'no'}, format='json')
+        self.assertEqual(reject.status_code, status.HTTP_200_OK)
+        mark_refunded = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'refund_txid': 'tx-ref-1'}, format='json')
+        self.assertEqual(mark_refunded.status_code, status.HTTP_200_OK)
+        refund = ProductRefundRequest.objects.get(id=refund_id)
+        self.assertEqual(refund.status, ProductRefundRequest.STATUS_REFUNDED)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

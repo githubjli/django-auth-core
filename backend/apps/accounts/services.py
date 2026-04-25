@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKEN_SYMBOL
@@ -29,7 +30,9 @@ from apps.accounts.models import (
     Product,
     ProductOrder,
     ProductShipment,
+    ProductRefundRequest,
     SellerPayout,
+    SellerPayoutAddress,
     UserMembership,
     UserShippingAddress,
     WalletAddress,
@@ -977,9 +980,14 @@ class ProductOrderService:
             raise RuntimeError('No platform receive address configured for product payments.')
 
         with transaction.atomic():
+            updated = Product.objects.filter(id=product.id, stock_quantity__gte=quantity).update(stock_quantity=F('stock_quantity') - quantity)
+            if updated == 0:
+                raise ValueError('Insufficient product stock.')
+            product.refresh_from_db(fields=['stock_quantity'])
             order_no = self._generate_order_no()
             total_amount = (product.price_amount or Decimal('0')) * Decimal(quantity)
-            expires_at = timezone.now() + timedelta(minutes=int(settings.PRODUCT_ORDER_EXPIRE_MINUTES))
+            now = timezone.now()
+            expires_at = now + timedelta(minutes=int(settings.PRODUCT_ORDER_EXPIRE_MINUTES))
             payment_order = PaymentOrder.objects.create(
                 user=buyer,
                 product=product,
@@ -1005,6 +1013,8 @@ class ProductOrderService:
                 status=ProductOrder.STATUS_PENDING_PAYMENT,
                 shipping_address_snapshot=self._shipping_snapshot(shipping_address),
                 payment_order=payment_order,
+                stock_locked_at=now,
+                expires_at=expires_at,
             )
             payment_order.target_id = product_order.id
             payment_order.save(update_fields=['target_id', 'updated_at'])
@@ -1041,11 +1051,13 @@ class ProductOrderService:
     def mark_paid(self, *, order: ProductOrder):
         now = timezone.now()
         with transaction.atomic():
-            if order.status != ProductOrder.STATUS_PENDING_PAYMENT:
+            if order.status not in {ProductOrder.STATUS_PENDING_PAYMENT, ProductOrder.STATUS_CANCELLED}:
                 raise ValueError('Only pending payment orders can be marked paid.')
             order.status = ProductOrder.STATUS_PAID
             order.paid_at = now
-            order.save(update_fields=['status', 'paid_at', 'updated_at'])
+            order.cancelled_at = None
+            order.cancel_reason = ''
+            order.save(update_fields=['status', 'paid_at', 'cancelled_at', 'cancel_reason', 'updated_at'])
             if order.payment_order:
                 order.payment_order.status = PaymentOrder.STATUS_PAID
                 if order.payment_order.paid_at is None:
@@ -1112,6 +1124,41 @@ class ProductOrderService:
             order.settled_at = now
             order.save(update_fields=['status', 'settled_at', 'updated_at'])
 
+    @transaction.atomic
+    def release_expired_pending_orders(self) -> dict:
+        now = timezone.now()
+        orders = list(
+            ProductOrder.objects.select_related('payment_order', 'product').filter(
+                status=ProductOrder.STATUS_PENDING_PAYMENT,
+                expires_at__isnull=False,
+                expires_at__lt=now,
+                stock_released_at__isnull=True,
+            )
+        )
+        released = 0
+        for order in orders:
+            self._release_stock_for_order(order=order, reason='payment_timeout')
+            released += 1
+        return {'scanned_orders': len(orders), 'released_orders': released}
+
+    def _release_stock_for_order(self, *, order: ProductOrder, reason: str):
+        now = timezone.now()
+        if order.stock_released_at is not None:
+            return
+        Product.objects.filter(id=order.product_id).update(stock_quantity=F('stock_quantity') + order.quantity)
+        order.status = ProductOrder.STATUS_CANCELLED
+        order.cancel_reason = reason
+        order.cancelled_at = now
+        order.stock_released_at = now
+        order.save(update_fields=['status', 'cancel_reason', 'cancelled_at', 'stock_released_at', 'updated_at'])
+        if order.payment_order and order.payment_order.status in {
+            PaymentOrder.STATUS_PENDING,
+            PaymentOrder.STATUS_UNDERPAID,
+            PaymentOrder.STATUS_EXPIRED,
+        }:
+            order.payment_order.status = PaymentOrder.STATUS_EXPIRED
+            order.payment_order.save(update_fields=['status', 'updated_at'])
+
     def _shipping_snapshot(self, shipping_address: UserShippingAddress) -> dict:
         return {
             'receiver_name': shipping_address.receiver_name,
@@ -1130,6 +1177,310 @@ class ProductOrderService:
             if not ProductOrder.objects.filter(order_no=candidate).exists():
                 return candidate
         raise RuntimeError('Unable to generate unique product order number.')
+
+
+class ProductPaymentDetectionService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+        self.min_confirmations = int(settings.LBC_MIN_CONFIRMATIONS)
+        self.page_size = int(settings.LBC_TX_PAGE_SIZE)
+
+    @transaction.atomic
+    def sync_product_orders(self) -> dict:
+        orders = list(
+            PaymentOrder.objects.filter(
+                order_type=PaymentOrder.TYPE_PRODUCT,
+                target_type='product_order',
+                status__in=[PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_UNDERPAID, PaymentOrder.STATUS_EXPIRED],
+            ).exclude(pay_to_address='')
+        )
+        stats = {
+            'scanned_orders': len(orders),
+            'matched_receipts': 0,
+            'paid_orders': 0,
+            'underpaid_orders': 0,
+            'overpaid_orders': 0,
+            'errors': 0,
+        }
+        if not orders:
+            return stats
+        order_by_id = {order.id: order for order in orders}
+        order_by_address: dict[str, list[PaymentOrder]] = {}
+        for order in orders:
+            order_by_address.setdefault(order.pay_to_address, []).append(order)
+        txids: set[str] = set()
+        for tx in self.daemon_client.transaction_list(page=1, page_size=self.page_size):
+            txid = (tx.get('txid') or tx.get('id') or '').strip() if isinstance(tx, dict) else ''
+            if txid:
+                txids.add(txid)
+        for txid in txids:
+            try:
+                tx_detail = self.daemon_client.transaction_show(txid)
+            except LbryDaemonError:
+                stats['errors'] += 1
+                continue
+            confirmations = self._extract_confirmations(tx_detail)
+            block_height = tx_detail.get('height') or tx_detail.get('block_height')
+            for output in self._extract_outputs(tx_detail):
+                address = (output.get('address') or '').strip()
+                candidate_orders = order_by_address.get(address) or []
+                if not candidate_orders:
+                    continue
+                amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+                if amount is None:
+                    continue
+                order = self._select_candidate_order(candidate_orders, txid=txid)
+                if order is None:
+                    continue
+                vout = output.get('nout') if output.get('nout') is not None else output.get('vout')
+                receipt = self._upsert_receipt(
+                    txid=txid,
+                    vout=vout,
+                    address=address,
+                    amount=amount,
+                    confirmations=confirmations,
+                    block_height=block_height,
+                    raw_payload=tx_detail,
+                    matched_order=order,
+                )
+                self._upsert_order_payment(order=order, receipt=receipt, txid=txid, amount=amount, confirmations=confirmations)
+                stats['matched_receipts'] += 1
+                outcome = self._apply_product_payment_state(order=order, amount=amount, confirmations=confirmations, txid=txid)
+                if outcome == PaymentOrder.STATUS_PAID:
+                    stats['paid_orders'] += 1
+                elif outcome == PaymentOrder.STATUS_OVERPAID:
+                    stats['overpaid_orders'] += 1
+                elif outcome == PaymentOrder.STATUS_UNDERPAID:
+                    stats['underpaid_orders'] += 1
+                order_by_id[order.id] = order
+        return stats
+
+    @transaction.atomic
+    def verify_product_order_once(self, *, order: PaymentOrder, txid_hint: str) -> dict:
+        if order.order_type != PaymentOrder.TYPE_PRODUCT or order.target_type != 'product_order':
+            return {'verified': False, 'message': 'unsupported_order_type'}
+        txid = (txid_hint or '').strip()
+        if not txid:
+            return {'verified': False, 'message': 'txid_required'}
+        try:
+            tx_detail = self.daemon_client.transaction_show(txid)
+        except LbryDaemonError:
+            return {'verified': False, 'matched': False, 'paid': False, 'status': order.status, 'confirmations': order.confirmations, 'txid': order.txid}
+        confirmations = self._extract_confirmations(tx_detail)
+        block_height = tx_detail.get('height') or tx_detail.get('block_height')
+        matched = False
+        for output in self._extract_outputs(tx_detail):
+            address = (output.get('address') or '').strip()
+            if address != order.pay_to_address:
+                continue
+            amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+            if amount is None:
+                continue
+            vout = output.get('nout') if output.get('nout') is not None else output.get('vout')
+            receipt = self._upsert_receipt(
+                txid=txid,
+                vout=vout,
+                address=address,
+                amount=amount,
+                confirmations=confirmations,
+                block_height=block_height,
+                raw_payload=tx_detail,
+                matched_order=order,
+            )
+            self._upsert_order_payment(order=order, receipt=receipt, txid=txid, amount=amount, confirmations=confirmations)
+            self._apply_product_payment_state(order=order, amount=amount, confirmations=confirmations, txid=txid)
+            matched = True
+            break
+        order.refresh_from_db()
+        product_order = ProductOrder.objects.filter(payment_order=order).first()
+        return {
+            'verified': True,
+            'matched': matched,
+            'paid': order.status in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID},
+            'status': order.status,
+            'confirmations': order.confirmations,
+            'txid': order.txid,
+            'product_order_status': product_order.status if product_order else '',
+        }
+
+    def _select_candidate_order(self, candidate_orders: list[PaymentOrder], *, txid: str) -> PaymentOrder | None:
+        for order in candidate_orders:
+            if order.txid == txid and order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_UNDERPAID, PaymentOrder.STATUS_EXPIRED}:
+                return order
+        for order in candidate_orders:
+            if order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_UNDERPAID, PaymentOrder.STATUS_EXPIRED}:
+                return order
+        return None
+
+    def _apply_product_payment_state(self, *, order: PaymentOrder, amount: Decimal, confirmations: int, txid: str) -> str:
+        expected = order.amount or Decimal('0')
+        order.actual_amount_lbc = amount
+        order.txid = txid
+        order.confirmations = confirmations
+        order_fields = ['actual_amount_lbc', 'txid', 'confirmations', 'updated_at']
+        product_order = ProductOrder.objects.filter(payment_order=order).first()
+        if amount < expected:
+            order.status = PaymentOrder.STATUS_UNDERPAID
+            order_fields.append('status')
+            order.save(update_fields=order_fields)
+            return order.status
+        if confirmations < self.min_confirmations:
+            order.save(update_fields=order_fields)
+            return order.status
+        order.status = PaymentOrder.STATUS_PAID if amount == expected else PaymentOrder.STATUS_OVERPAID
+        order.paid_at = order.paid_at or timezone.now()
+        order_fields.extend(['status', 'paid_at'])
+        order.save(update_fields=order_fields)
+        if product_order:
+            product_order.status = ProductOrder.STATUS_PAID
+            product_order.paid_at = product_order.paid_at or timezone.now()
+            product_order.cancel_reason = ''
+            product_order.cancelled_at = None
+            product_order.save(update_fields=['status', 'paid_at', 'cancel_reason', 'cancelled_at', 'updated_at'])
+        return order.status
+
+    def _upsert_receipt(self, *, txid: str, vout, address: str, amount: Decimal, confirmations: int, block_height, raw_payload: dict, matched_order: PaymentOrder):
+        receipt, _ = ChainReceipt.objects.update_or_create(
+            currency=ChainReceipt.CURRENCY_LBC,
+            txid=txid,
+            vout=vout,
+            defaults={
+                'wallet_id': '',
+                'address': address,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'block_height': block_height,
+                'seen_at': timezone.now(),
+                'confirmed_at': timezone.now() if confirmations >= self.min_confirmations else None,
+                'raw_payload': raw_payload,
+                'matched_order': matched_order,
+                'match_status': ChainReceipt.MATCH_MATCHED,
+            },
+        )
+        return receipt
+
+    def _upsert_order_payment(self, *, order: PaymentOrder, receipt: ChainReceipt, txid: str, amount: Decimal, confirmations: int):
+        is_confirmed = confirmations >= self.min_confirmations and amount >= (order.amount or Decimal('0'))
+        payment_status = OrderPayment.PAYMENT_CONFIRMED if is_confirmed else OrderPayment.PAYMENT_PENDING
+        OrderPayment.objects.update_or_create(
+            order=order,
+            receipt=receipt,
+            defaults={
+                'txid': txid,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'payment_status': payment_status,
+                'matched_at': timezone.now(),
+            },
+        )
+
+    def _extract_outputs(self, tx_detail: dict) -> list[dict]:
+        outputs = tx_detail.get('outputs')
+        if isinstance(outputs, list):
+            parsed = []
+            for idx, output in enumerate(outputs):
+                if not isinstance(output, dict):
+                    continue
+                address = output.get('address') or ((output.get('addresses') or [None])[0])
+                parsed.append({'address': address, 'amount': output.get('amount'), 'vout': output.get('vout'), 'nout': output.get('nout', idx)})
+            return parsed
+        return []
+
+    def _extract_confirmations(self, tx_detail: dict) -> int:
+        try:
+            return max(0, int(tx_detail.get('confirmations') or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+
+
+class ProductPayoutSettlementService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client
+
+    @transaction.atomic
+    def settle_pending_payouts(self) -> dict:
+        if not settings.PRODUCT_AUTO_PAYOUT_ENABLED:
+            return {'processed': 0, 'settled': 0, 'skipped': 0}
+        if self.daemon_client is None:
+            self.daemon_client = self.daemon_client_class()
+        min_delay = int(settings.PRODUCT_PAYOUT_MIN_DELAY_HOURS)
+        threshold = timezone.now() - timedelta(hours=min_delay)
+        payouts = list(
+            SellerPayout.objects.select_related('product_order', 'seller_store').filter(
+                status=SellerPayout.STATUS_PENDING,
+                product_order__status=ProductOrder.STATUS_COMPLETED,
+                product_order__completed_at__lte=threshold,
+            )
+        )
+        settled = 0
+        skipped = 0
+        for payout in payouts:
+            address = (payout.payout_address or '').strip() or self._resolve_default_address(payout.seller_store_id)
+            if not address:
+                payout.failure_note = 'missing_payout_address'
+                payout.save(update_fields=['failure_note', 'updated_at'])
+                skipped += 1
+                continue
+            if not settings.PRODUCT_PAYOUT_WALLET_ID:
+                payout.failure_note = 'missing_payout_wallet_id'
+                payout.save(update_fields=['failure_note', 'updated_at'])
+                skipped += 1
+                continue
+            try:
+                send_result = self.daemon_client.wallet_send(
+                    wallet_id=settings.PRODUCT_PAYOUT_WALLET_ID,
+                    amount=payout.amount,
+                    addresses=[address],
+                    change_account_id=(settings.PRODUCT_PAYOUT_ACCOUNT_ID or None),
+                    funding_account_ids=[settings.PRODUCT_PAYOUT_ACCOUNT_ID] if settings.PRODUCT_PAYOUT_ACCOUNT_ID else None,
+                    blocking=True,
+                )
+                txid = str(send_result.get('txid') or send_result.get('id') or '') if isinstance(send_result, dict) else str(send_result or '')
+            except LbryDaemonError:
+                payout.failure_note = 'wallet_send_failed'
+                payout.status = SellerPayout.STATUS_FAILED
+                payout.save(update_fields=['failure_note', 'status', 'updated_at'])
+                skipped += 1
+                continue
+            now = timezone.now()
+            payout.status = SellerPayout.STATUS_PAID
+            payout.txid = txid
+            payout.payout_address = address
+            payout.paid_at = now
+            payout.failure_note = ''
+            payout.save(update_fields=['status', 'txid', 'payout_address', 'paid_at', 'failure_note', 'updated_at'])
+            order = payout.product_order
+            order.status = ProductOrder.STATUS_SETTLED
+            order.settled_at = now
+            order.save(update_fields=['status', 'settled_at', 'updated_at'])
+            settled += 1
+        return {'processed': len(payouts), 'settled': settled, 'skipped': skipped}
+
+    def _resolve_default_address(self, seller_store_id: int) -> str:
+        address = SellerPayoutAddress.objects.filter(
+            seller_store_id=seller_store_id,
+            is_active=True,
+            is_default=True,
+        ).order_by('-updated_at', '-id').first()
+        if address:
+            return address.address
+        fallback = SellerPayoutAddress.objects.filter(
+            seller_store_id=seller_store_id,
+            is_active=True,
+        ).order_by('-updated_at', '-id').first()
+        return fallback.address if fallback else ''
 
 
 class WalletPrototypePayOrderService:
