@@ -1,9 +1,11 @@
 import shutil
 import tempfile
+from io import StringIO
 from unittest.mock import Mock, patch
 from datetime import datetime, timedelta, timezone
 
 from django.contrib.auth import get_user_model
+from django.core import management
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from django.test import override_settings
@@ -30,11 +32,9 @@ from apps.accounts.models import (
     OrderPayment,
     PaymentOrder,
     ProductOrder,
-    ProductRefundRequest,
     ProductShipment,
     Product,
     SellerPayout,
-    SellerPayoutAddress,
     SellerStore,
     StreamPaymentMethod,
     UserMembership,
@@ -50,7 +50,6 @@ from apps.accounts.services import (
     PaymentDetectionService,
     ProductOrderService,
     ProductPaymentDetectionService,
-    ProductPayoutSettlementService,
     verify_product_qr_signature,
 )
 
@@ -4074,98 +4073,41 @@ class ProductOrderFlowAPITestCase(APITestCase):
         product.refresh_from_db()
         self.assertEqual(product.stock_quantity, initial_stock - 1)
 
-    def test_seller_payout_address_crud(self):
-        seller, _, _ = self.create_store_product('payout-address-seller@example.com', slug='store-payout-address')
-        self.client.force_authenticate(user=seller)
-        create_response = self.client.post(
-            reverse('seller-payout-address-list-create'),
-            {'address': 'bSellerPayout1', 'is_default': True, 'is_active': True},
-            format='json',
-        )
-        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
-        address_id = create_response.data['id']
-        list_response = self.client.get(reverse('seller-payout-address-list-create'))
-        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(list_response.data), 1)
-        patch_response = self.client.patch(
-            reverse('seller-payout-address-detail', args=[address_id]),
-            {'address': 'bSellerPayoutUpdated'},
-            format='json',
-        )
-        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
-        delete_response = self.client.delete(reverse('seller-payout-address-detail', args=[address_id]))
-        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
-
-    @override_settings(PRODUCT_AUTO_PAYOUT_ENABLED=False)
-    def test_auto_payout_disabled_does_nothing(self):
-        result = ProductPayoutSettlementService().settle_pending_payouts()
-        self.assertEqual(result['processed'], 0)
-        self.assertEqual(result['settled'], 0)
-
-    @override_settings(
-        PRODUCT_AUTO_PAYOUT_ENABLED=True,
-        PRODUCT_PAYOUT_WALLET_ID='wallet-main',
-        PRODUCT_PAYOUT_ACCOUNT_ID='account-main',
-    )
-    @patch('apps.accounts.services.LbryDaemonClient.wallet_send')
-    def test_auto_payout_settles_completed_order_when_enabled(self, mock_send):
-        admin = self.create_user('auto-payout-admin@example.com', is_staff=True, is_superuser=True)
-        buyer = self.create_user('auto-payout-buyer@example.com')
-        seller, _, product = self.create_store_product('auto-payout-seller@example.com', slug='store-auto-payout')
-        SellerPayoutAddress.objects.create(seller_store=seller.seller_store, address='bAutoPayoutAddress', is_default=True, is_active=True)
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_list')
+    def test_sync_product_payments_command_prints_summary(self, mock_list, mock_show):
+        buyer = self.create_user('cmd-sync-buyer@example.com')
+        _, _, product = self.create_store_product('cmd-sync-seller@example.com', slug='store-cmd-sync')
         address = self.create_shipping_address(buyer)
         order, _ = self.create_product_order(buyer, product, address)
-        self.client.force_authenticate(user=admin)
-        self.client.post(reverse('product-order-mark-paid', args=[order.order_no]), format='json')
-        self.client.force_authenticate(user=seller)
-        self.client.post(reverse('seller-product-order-ship', args=[order.order_no]), {'carrier': 'TH', 'tracking_number': 'TNX'}, format='json')
-        self.client.force_authenticate(user=buyer)
-        self.client.post(reverse('product-order-confirm-received', args=[order.order_no]), format='json')
-        mock_send.return_value = {'txid': 'tx-payout-1'}
+        mock_list.return_value = [{'txid': 'tx-cmd-sync'}]
+        mock_show.return_value = {
+            'txid': 'tx-cmd-sync',
+            'confirmations': 2,
+            'outputs': [{'nout': 0, 'address': order.payment_order.pay_to_address, 'amount': str(order.total_amount)}],
+        }
+        out = StringIO()
+        management.call_command('sync_product_payments', stdout=out)
+        rendered = out.getvalue()
+        self.assertIn('scanned_orders=', rendered)
+        self.assertIn('matched_receipts=', rendered)
+        self.assertIn('paid_orders=', rendered)
+        self.assertIn('underpaid_orders=', rendered)
+        self.assertIn('overpaid_orders=', rendered)
 
-        result = ProductPayoutSettlementService().settle_pending_payouts()
-        order.refresh_from_db()
-        payout = SellerPayout.objects.get(product_order=order)
-        self.assertEqual(result['settled'], 1)
-        self.assertEqual(order.status, ProductOrder.STATUS_SETTLED)
-        self.assertEqual(payout.status, SellerPayout.STATUS_PAID)
-        self.assertEqual(payout.txid, 'tx-payout-1')
-
-    def test_refund_request_creation_visibility_and_admin_transitions(self):
-        admin = self.create_user('refund-admin@example.com', is_staff=True, is_superuser=True)
-        buyer = self.create_user('refund-buyer@example.com')
-        seller, _, product = self.create_store_product('refund-seller@example.com', slug='store-refund')
+    def test_release_expired_product_orders_command_prints_summary(self):
+        buyer = self.create_user('cmd-release-buyer@example.com')
+        _, _, product = self.create_store_product('cmd-release-seller@example.com', slug='store-cmd-release')
         address = self.create_shipping_address(buyer)
         order, _ = self.create_product_order(buyer, product, address)
-        self.client.force_authenticate(user=admin)
-        self.client.post(reverse('product-order-mark-paid', args=[order.order_no]), format='json')
-
-        self.client.force_authenticate(user=buyer)
-        create_response = self.client.post(
-            reverse('product-order-refund-requests', args=[order.order_no]),
-            {'reason': 'damaged', 'requested_amount': '50.00'},
-            format='json',
-        )
-        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
-        refund_id = create_response.data['id']
-        list_response = self.client.get(reverse('product-order-refund-requests', args=[order.order_no]))
-        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(list_response.data), 1)
-
-        self.client.force_authenticate(user=seller)
-        seller_list = self.client.get(reverse('seller-refund-request-list'))
-        self.assertEqual(seller_list.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(seller_list.data), 1)
-
-        self.client.force_authenticate(user=admin)
-        approve = self.client.post(reverse('admin-refund-request-approve', args=[refund_id]), {'admin_note': 'ok'}, format='json')
-        self.assertEqual(approve.status_code, status.HTTP_200_OK)
-        reject = self.client.post(reverse('admin-refund-request-reject', args=[refund_id]), {'admin_note': 'no'}, format='json')
-        self.assertEqual(reject.status_code, status.HTTP_200_OK)
-        mark_refunded = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'refund_txid': 'tx-ref-1'}, format='json')
-        self.assertEqual(mark_refunded.status_code, status.HTTP_200_OK)
-        refund = ProductRefundRequest.objects.get(id=refund_id)
-        self.assertEqual(refund.status, ProductRefundRequest.STATUS_REFUNDED)
+        order.expires_at = django_timezone.now() - timedelta(minutes=1)
+        order.save(update_fields=['expires_at', 'updated_at'])
+        out = StringIO()
+        management.call_command('release_expired_product_orders', stdout=out)
+        rendered = out.getvalue()
+        self.assertIn('scanned_orders=', rendered)
+        self.assertIn('released_orders=', rendered)
+        self.assertIn('restored_stock_quantity=', rendered)
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

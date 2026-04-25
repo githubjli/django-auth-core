@@ -20,9 +20,7 @@ from apps.accounts.models import (
     PaymentOrder,
     Product,
     ProductOrder,
-    ProductRefundRequest,
     ProductShipment,
-    SellerPayoutAddress,
     SellerStore,
     SellerPayout,
     StreamPaymentMethod,
@@ -1064,7 +1062,6 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
     shipment = ProductShipmentSerializer(read_only=True)
     payout = serializers.SerializerMethodField()
     payment_summary = serializers.SerializerMethodField()
-    refund_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductOrder
@@ -1094,7 +1091,6 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
             'payment_summary',
             'shipment',
             'payout',
-            'refund_summary',
             'created_at',
             'updated_at',
         )
@@ -1132,23 +1128,14 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
         if payment is None:
             return None
         return {
-            'status': payment.status,
+            'payment_status': payment.status,
             'txid': payment.txid,
             'confirmations': payment.confirmations,
+            'actual_amount': payment.actual_amount_lbc,
+            'expected_amount': obj.total_amount,
+            'pay_to_address': payment.pay_to_address,
             'paid_at': payment.paid_at,
             'expires_at': payment.expires_at,
-        }
-
-    def get_refund_summary(self, obj):
-        latest = obj.refund_requests.order_by('-created_at', '-id').first()
-        if latest is None:
-            return None
-        return {
-            'id': latest.id,
-            'status': latest.status,
-            'requested_amount': latest.requested_amount,
-            'currency': latest.currency,
-            'updated_at': latest.updated_at,
         }
 
 
@@ -1219,65 +1206,6 @@ class SellerProductOrderListSerializer(serializers.ModelSerializer):
         if not hasattr(obj, 'seller_payout'):
             return None
         return SellerPayoutSummarySerializer(obj.seller_payout).data
-
-
-class SellerPayoutAddressSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SellerPayoutAddress
-        fields = (
-            'id',
-            'blockchain',
-            'token_symbol',
-            'address',
-            'is_default',
-            'is_active',
-            'created_at',
-            'updated_at',
-        )
-        read_only_fields = ('id', 'blockchain', 'token_symbol', 'created_at', 'updated_at')
-
-
-class ProductRefundRequestSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ProductRefundRequest
-        fields = (
-            'id',
-            'product_order',
-            'requester',
-            'reason',
-            'status',
-            'requested_amount',
-            'currency',
-            'admin_note',
-            'seller_note',
-            'refund_txid',
-            'created_at',
-            'updated_at',
-            'resolved_at',
-        )
-        read_only_fields = (
-            'id',
-            'product_order',
-            'requester',
-            'status',
-            'currency',
-            'admin_note',
-            'seller_note',
-            'refund_txid',
-            'created_at',
-            'updated_at',
-            'resolved_at',
-        )
-
-
-class ProductRefundRequestCreateSerializer(serializers.Serializer):
-    reason = serializers.CharField()
-    requested_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-
-
-class ProductRefundAdminActionSerializer(serializers.Serializer):
-    admin_note = serializers.CharField(required=False, allow_blank=True)
-    refund_txid = serializers.CharField(required=False, allow_blank=True, max_length=255)
 
 
 class BillingPlanSerializer(serializers.ModelSerializer):

@@ -12,6 +12,7 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 'Expired product orders release complete: '
                 f"scanned_orders={result['scanned_orders']} "
-                f"released_orders={result['released_orders']}"
+                f"released_orders={result['released_orders']} "
+                f"restored_stock_quantity={result['restored_stock_quantity']}"
             )
         )

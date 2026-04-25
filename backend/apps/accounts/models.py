@@ -456,67 +456,9 @@ class SellerPayout(models.Model):
     status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
     txid = models.CharField(max_length=255, blank=True, default='')
     note = models.TextField(blank=True, default='')
-    failure_note = models.CharField(max_length=255, blank=True, default='')
     paid_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
-
-    class Meta:
-        ordering = ['-created_at', '-id']
-
-
-class SellerPayoutAddress(models.Model):
-    seller_store = models.ForeignKey(
-        SellerStore,
-        on_delete=models.CASCADE,
-        related_name='payout_addresses',
-    )
-    blockchain = models.CharField(max_length=24, default='LTT')
-    token_symbol = models.CharField(max_length=24, default=TOKEN_SYMBOL)
-    address = models.CharField(max_length=255)
-    is_default = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
-
-    class Meta:
-        ordering = ['-is_default', '-updated_at', '-id']
-
-
-class ProductRefundRequest(models.Model):
-    STATUS_REQUESTED = 'requested'
-    STATUS_APPROVED = 'approved'
-    STATUS_REJECTED = 'rejected'
-    STATUS_REFUNDED = 'refunded'
-    STATUS_CANCELLED = 'cancelled'
-    STATUS_CHOICES = [
-        (STATUS_REQUESTED, 'Requested'),
-        (STATUS_APPROVED, 'Approved'),
-        (STATUS_REJECTED, 'Rejected'),
-        (STATUS_REFUNDED, 'Refunded'),
-        (STATUS_CANCELLED, 'Cancelled'),
-    ]
-
-    product_order = models.ForeignKey(
-        ProductOrder,
-        on_delete=models.CASCADE,
-        related_name='refund_requests',
-    )
-    requester = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='product_refund_requests',
-    )
-    reason = models.TextField()
-    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_REQUESTED)
-    requested_amount = models.DecimalField(max_digits=12, decimal_places=2)
-    currency = models.CharField(max_length=10, default=TOKEN_SYMBOL)
-    admin_note = models.TextField(blank=True, default='')
-    seller_note = models.TextField(blank=True, default='')
-    refund_txid = models.CharField(max_length=255, blank=True, default='')
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
-    resolved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at', '-id']

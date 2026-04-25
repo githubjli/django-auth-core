@@ -30,9 +30,7 @@ from apps.accounts.models import (
     Product,
     ProductOrder,
     ProductShipment,
-    ProductRefundRequest,
     SellerPayout,
-    SellerPayoutAddress,
     UserMembership,
     UserShippingAddress,
     WalletAddress,
@@ -1136,10 +1134,16 @@ class ProductOrderService:
             )
         )
         released = 0
+        restored_stock_quantity = 0
         for order in orders:
             self._release_stock_for_order(order=order, reason='payment_timeout')
             released += 1
-        return {'scanned_orders': len(orders), 'released_orders': released}
+            restored_stock_quantity += order.quantity
+        return {
+            'scanned_orders': len(orders),
+            'released_orders': released,
+            'restored_stock_quantity': restored_stock_quantity,
+        }
 
     def _release_stock_for_order(self, *, order: ProductOrder, reason: str):
         now = timezone.now()
@@ -1401,86 +1405,6 @@ class ProductPaymentDetectionService:
             return Decimal(str(value))
         except (InvalidOperation, ValueError):
             return None
-
-
-class ProductPayoutSettlementService:
-    daemon_client_class = LbryDaemonClient
-
-    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
-        self.daemon_client = daemon_client
-
-    @transaction.atomic
-    def settle_pending_payouts(self) -> dict:
-        if not settings.PRODUCT_AUTO_PAYOUT_ENABLED:
-            return {'processed': 0, 'settled': 0, 'skipped': 0}
-        if self.daemon_client is None:
-            self.daemon_client = self.daemon_client_class()
-        min_delay = int(settings.PRODUCT_PAYOUT_MIN_DELAY_HOURS)
-        threshold = timezone.now() - timedelta(hours=min_delay)
-        payouts = list(
-            SellerPayout.objects.select_related('product_order', 'seller_store').filter(
-                status=SellerPayout.STATUS_PENDING,
-                product_order__status=ProductOrder.STATUS_COMPLETED,
-                product_order__completed_at__lte=threshold,
-            )
-        )
-        settled = 0
-        skipped = 0
-        for payout in payouts:
-            address = (payout.payout_address or '').strip() or self._resolve_default_address(payout.seller_store_id)
-            if not address:
-                payout.failure_note = 'missing_payout_address'
-                payout.save(update_fields=['failure_note', 'updated_at'])
-                skipped += 1
-                continue
-            if not settings.PRODUCT_PAYOUT_WALLET_ID:
-                payout.failure_note = 'missing_payout_wallet_id'
-                payout.save(update_fields=['failure_note', 'updated_at'])
-                skipped += 1
-                continue
-            try:
-                send_result = self.daemon_client.wallet_send(
-                    wallet_id=settings.PRODUCT_PAYOUT_WALLET_ID,
-                    amount=payout.amount,
-                    addresses=[address],
-                    change_account_id=(settings.PRODUCT_PAYOUT_ACCOUNT_ID or None),
-                    funding_account_ids=[settings.PRODUCT_PAYOUT_ACCOUNT_ID] if settings.PRODUCT_PAYOUT_ACCOUNT_ID else None,
-                    blocking=True,
-                )
-                txid = str(send_result.get('txid') or send_result.get('id') or '') if isinstance(send_result, dict) else str(send_result or '')
-            except LbryDaemonError:
-                payout.failure_note = 'wallet_send_failed'
-                payout.status = SellerPayout.STATUS_FAILED
-                payout.save(update_fields=['failure_note', 'status', 'updated_at'])
-                skipped += 1
-                continue
-            now = timezone.now()
-            payout.status = SellerPayout.STATUS_PAID
-            payout.txid = txid
-            payout.payout_address = address
-            payout.paid_at = now
-            payout.failure_note = ''
-            payout.save(update_fields=['status', 'txid', 'payout_address', 'paid_at', 'failure_note', 'updated_at'])
-            order = payout.product_order
-            order.status = ProductOrder.STATUS_SETTLED
-            order.settled_at = now
-            order.save(update_fields=['status', 'settled_at', 'updated_at'])
-            settled += 1
-        return {'processed': len(payouts), 'settled': settled, 'skipped': skipped}
-
-    def _resolve_default_address(self, seller_store_id: int) -> str:
-        address = SellerPayoutAddress.objects.filter(
-            seller_store_id=seller_store_id,
-            is_active=True,
-            is_default=True,
-        ).order_by('-updated_at', '-id').first()
-        if address:
-            return address.address
-        fallback = SellerPayoutAddress.objects.filter(
-            seller_store_id=seller_store_id,
-            is_active=True,
-        ).order_by('-updated_at', '-id').first()
-        return fallback.address if fallback else ''
 
 
 class WalletPrototypePayOrderService:

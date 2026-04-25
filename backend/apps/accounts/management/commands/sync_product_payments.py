@@ -18,7 +18,6 @@ class Command(BaseCommand):
                 f"matched_receipts={result['matched_receipts']} "
                 f"paid_orders={result['paid_orders']} "
                 f"underpaid_orders={result['underpaid_orders']} "
-                f"overpaid_orders={result['overpaid_orders']} "
-                f"errors={result['errors']}"
+                f"overpaid_orders={result['overpaid_orders']}"
             )
         )

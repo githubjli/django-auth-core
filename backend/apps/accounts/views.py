@@ -28,8 +28,6 @@ from apps.accounts.models import (
     PaymentOrder,
     Product,
     ProductOrder,
-    ProductRefundRequest,
-    SellerPayoutAddress,
     SellerStore,
     StreamPaymentMethod,
     UserShippingAddress,
@@ -70,10 +68,6 @@ from apps.accounts.serializers import (
     ProductOrderMarkSettledSerializer,
     ProductOrderShipSerializer,
     ProductOrderTxHintSerializer,
-    ProductRefundAdminActionSerializer,
-    ProductRefundRequestCreateSerializer,
-    ProductRefundRequestSerializer,
-    SellerPayoutAddressSerializer,
     SellerProductOrderListSerializer,
     PaymentOrderCreateSerializer,
     PaymentOrderSerializer,
@@ -464,126 +458,6 @@ class ProductOrderConfirmReceivedAPIView(APIView):
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         order.refresh_from_db()
         return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
-
-
-class SellerPayoutAddressListCreateAPIView(generics.ListCreateAPIView):
-    serializer_class = SellerPayoutAddressSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    pagination_class = None
-
-    def get_queryset(self):
-        return SellerPayoutAddress.objects.filter(seller_store__owner=self.request.user)
-
-    def perform_create(self, serializer):
-        store = generics.get_object_or_404(SellerStore, owner=self.request.user, is_active=True)
-        is_default = serializer.validated_data.get('is_default', False)
-        if is_default:
-            SellerPayoutAddress.objects.filter(seller_store=store, is_default=True).update(is_default=False)
-        serializer.save(seller_store=store)
-
-
-class SellerPayoutAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
-    serializer_class = SellerPayoutAddressSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    lookup_field = 'id'
-
-    def get_queryset(self):
-        return SellerPayoutAddress.objects.filter(seller_store__owner=self.request.user)
-
-    def perform_update(self, serializer):
-        instance = self.get_object()
-        is_default = serializer.validated_data.get('is_default')
-        if is_default:
-            SellerPayoutAddress.objects.filter(seller_store=instance.seller_store, is_default=True).exclude(id=instance.id).update(is_default=False)
-        serializer.save()
-
-
-class ProductRefundRequestListCreateAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [JSONParser, FormParser]
-
-    def get(self, request, order_no):
-        order = generics.get_object_or_404(ProductOrder, order_no=order_no, buyer=request.user)
-        queryset = ProductRefundRequest.objects.filter(product_order=order)
-        return Response(ProductRefundRequestSerializer(queryset, many=True).data, status=status.HTTP_200_OK)
-
-    def post(self, request, order_no):
-        order = generics.get_object_or_404(ProductOrder, order_no=order_no, buyer=request.user)
-        if order.status not in {ProductOrder.STATUS_PAID, ProductOrder.STATUS_SHIPPING, ProductOrder.STATUS_COMPLETED}:
-            return Response({'detail': 'Refund request not allowed for current order status.'}, status=status.HTTP_400_BAD_REQUEST)
-        serializer = ProductRefundRequestCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        requested_amount = serializer.validated_data.get('requested_amount') or order.total_amount
-        refund = ProductRefundRequest.objects.create(
-            product_order=order,
-            requester=request.user,
-            reason=serializer.validated_data['reason'],
-            requested_amount=requested_amount,
-            currency=order.currency,
-        )
-        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_201_CREATED)
-
-
-class SellerRefundRequestListAPIView(generics.ListAPIView):
-    serializer_class = ProductRefundRequestSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    pagination_class = None
-
-    def get_queryset(self):
-        return ProductRefundRequest.objects.select_related('product_order').filter(product_order__seller_store__owner=self.request.user)
-
-
-class AdminRefundRequestApproveAPIView(APIView):
-    permission_classes = [IsStaffOrSuperuser]
-    parser_classes = [JSONParser, FormParser]
-
-    def post(self, request, pk):
-        refund = generics.get_object_or_404(ProductRefundRequest, pk=pk)
-        serializer = ProductRefundAdminActionSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        refund.status = ProductRefundRequest.STATUS_APPROVED
-        refund.admin_note = serializer.validated_data.get('admin_note') or ''
-        refund.resolved_at = None
-        refund.save(update_fields=['status', 'admin_note', 'resolved_at', 'updated_at'])
-        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
-
-
-class AdminRefundRequestRejectAPIView(APIView):
-    permission_classes = [IsStaffOrSuperuser]
-    parser_classes = [JSONParser, FormParser]
-
-    def post(self, request, pk):
-        refund = generics.get_object_or_404(ProductRefundRequest, pk=pk)
-        serializer = ProductRefundAdminActionSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        refund.status = ProductRefundRequest.STATUS_REJECTED
-        refund.admin_note = serializer.validated_data.get('admin_note') or ''
-        refund.resolved_at = timezone.now()
-        refund.save(update_fields=['status', 'admin_note', 'resolved_at', 'updated_at'])
-        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
-
-
-class AdminRefundRequestMarkRefundedAPIView(APIView):
-    permission_classes = [IsStaffOrSuperuser]
-    parser_classes = [JSONParser, FormParser]
-
-    def post(self, request, pk):
-        refund = generics.get_object_or_404(ProductRefundRequest.objects.select_related('product_order'), pk=pk)
-        serializer = ProductRefundAdminActionSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        order = refund.product_order
-        if order.status != ProductOrder.STATUS_SETTLED:
-            payout = getattr(order, 'seller_payout', None)
-            if payout and payout.status == payout.STATUS_PENDING:
-                payout.status = payout.STATUS_FAILED
-                payout.failure_note = 'refund_marked'
-                payout.save(update_fields=['status', 'failure_note', 'updated_at'])
-        refund.status = ProductRefundRequest.STATUS_REFUNDED
-        refund.admin_note = serializer.validated_data.get('admin_note') or ''
-        refund.refund_txid = serializer.validated_data.get('refund_txid') or ''
-        refund.resolved_at = timezone.now()
-        refund.save(update_fields=['status', 'admin_note', 'refund_txid', 'resolved_at', 'updated_at'])
-        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
 
 
 class AdminProductOrderMarkSettledAPIView(APIView):
