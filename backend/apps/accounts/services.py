@@ -1773,11 +1773,15 @@ class WalletPrototypePayOrderService:
             if 'Not enough funds' in exc_message:
                 logger.warning(
                     'wallet_prototype_pay_order insufficient_funds order_no=%s user_id=%s wallet_id=%s required_amount=%s '
-                    'funding_account_ids=%s change_account_id=%s',
+                    'amount_type=%s pay_to_address=%s pay_to_address_len=%s addresses=%s funding_account_ids=%s change_account_id=%s',
                     order.order_no,
                     user.id,
                     wallet_id,
                     amount,
+                    type(amount).__name__,
+                    pay_to_address,
+                    len(pay_to_address),
+                    [pay_to_address],
                     funding_account_ids,
                     change_account_id,
                 )
