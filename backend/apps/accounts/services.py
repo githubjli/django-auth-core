@@ -1740,10 +1740,18 @@ class WalletPrototypePayOrderService:
         except LbryDaemonError as exc:
             exc_message = str(exc)
             if 'Not enough funds' in exc_message:
+                logger.warning(
+                    'wallet_prototype_pay_order insufficient_funds order_no=%s user_id=%s wallet_id=%s required_amount=%s '
+                    'funding_account_ids=%s change_account_id=%s',
+                    order.order_no,
+                    user.id,
+                    wallet_id,
+                    amount,
+                    funding_account_ids,
+                    change_account_id,
+                )
                 raise WalletPrototypeError(
-                    'Buyer wallet does not have enough spendable funds for this transaction. '
-                    f'required_amount={amount} wallet_id={wallet_id} '
-                    f'funding_account_ids={funding_account_ids} change_account_id={change_account_id}'
+                    'Buyer wallet does not have enough spendable funds for this transaction.'
                 ) from exc
             logger.exception(
                 'wallet_prototype_pay_order daemon_error order_no=%s user_id=%s wallet_id=%s unlock_ok=%s send_ok=%s',
