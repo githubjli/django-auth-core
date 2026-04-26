@@ -1662,6 +1662,23 @@ class WalletPrototypePayOrderService:
         if amount <= 0 or not pay_to_address:
             raise WalletPrototypeValidationError('Order is missing payment amount/address.')
 
+        product_order = None
+        if order.order_type == PaymentOrder.TYPE_PRODUCT:
+            try:
+                product_order = order.linked_product_order
+            except ProductOrder.DoesNotExist:
+                product_order = None
+        existing_txid = (order.txid or '').strip()
+        if existing_txid:
+            return {
+                'order_no': order.order_no,
+                'txid': existing_txid,
+                'payment_order_status': order.status,
+                'product_order_status': product_order.status if product_order else None,
+                'detail': 'Payment already submitted and is waiting for confirmation.',
+                'wallet_relocked': False,
+            }
+
         change_account_id = (user.primary_user_address or '').strip() or None
         funding_account_ids = [change_account_id] if change_account_id else None
         product_order = None
@@ -1762,6 +1779,9 @@ class WalletPrototypePayOrderService:
             response_payload = {
                 'order_no': order.order_no,
                 'txid': txid,
+                'payment_order_status': order.status,
+                'product_order_status': product_order.status if product_order else None,
+                'detail': 'Payment submitted. Waiting for on-chain confirmation.',
                 'pay_to_address': pay_to_address,
                 'expected_amount_lbc': str(amount),
                 'status': order.status,

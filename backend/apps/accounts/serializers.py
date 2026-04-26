@@ -1072,6 +1072,7 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
     payment_uri = serializers.SerializerMethodField()
     shipment = ProductShipmentSerializer(read_only=True)
     payout = serializers.SerializerMethodField()
+    payment_state = serializers.SerializerMethodField()
     payment_summary = serializers.SerializerMethodField()
     refund_summary = serializers.SerializerMethodField()
 
@@ -1100,6 +1101,7 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
             'shipped_at',
             'completed_at',
             'settled_at',
+            'payment_state',
             'payment_summary',
             'shipment',
             'payout',
@@ -1135,6 +1137,23 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
         if not hasattr(obj, 'seller_payout'):
             return None
         return SellerPayoutSummarySerializer(obj.seller_payout).data
+
+    def get_payment_state(self, obj):
+        payment = obj.payment_order
+        if payment is None:
+            return 'pending'
+        if payment.status == PaymentOrder.STATUS_PENDING:
+            return 'submitted' if (payment.txid or '').strip() else 'pending'
+        if payment.status in {
+            PaymentOrder.STATUS_PAID,
+            PaymentOrder.STATUS_UNDERPAID,
+            PaymentOrder.STATUS_OVERPAID,
+            PaymentOrder.STATUS_FAILED,
+            PaymentOrder.STATUS_EXPIRED,
+            PaymentOrder.STATUS_CANCELLED,
+        }:
+            return payment.status
+        return payment.status
 
     def get_payment_summary(self, obj):
         payment = obj.payment_order

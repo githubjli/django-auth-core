@@ -1946,11 +1946,13 @@ class WalletPrototypePayProductOrderAPIView(APIView):
         if existing_txid:
             return Response(
                 {
-                    'detail': 'Payment already submitted for this order. Waiting for blockchain confirmation.',
+                    'detail': 'Payment already submitted and is waiting for confirmation.',
                     'order_no': order.order_no,
                     'txid': existing_txid,
+                    'payment_order_status': payment_order.status,
+                    'product_order_status': order.status,
                 },
-                status=status.HTTP_409_CONFLICT,
+                status=status.HTTP_200_OK,
             )
         if not (payment_order.pay_to_address or '').strip():
             return Response({'detail': 'Product payment order is missing pay_to_address.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1990,7 +1992,9 @@ class WalletPrototypePayProductOrderAPIView(APIView):
             {
                 'order_no': order.order_no,
                 'txid': result.get('txid', ''),
-                'message': 'Payment submitted. Waiting for blockchain confirmation.',
+                'detail': result.get('detail', 'Payment submitted. Waiting for on-chain confirmation.'),
+                'payment_order_status': result.get('payment_order_status', payment_order.status),
+                'product_order_status': result.get('product_order_status', order.status),
                 'wallet_relocked': bool(result.get('wallet_relocked')),
             },
             status=status.HTTP_200_OK,
