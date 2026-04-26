@@ -411,11 +411,11 @@ class LbryDaemonClient:
         change_account_value = str(change_account_id) if change_account_id else None
         funding_account_list = [str(account_id) for account_id in funding_account_ids] if funding_account_ids else None
         blocking_value = bool(blocking)
-        logger.debug(
-            'lbry_daemon wallet_send params method=%s wallet_id=%s amount=%s amount_type=%s addresses=%s addresses_type=%s '
+        # TODO: downgrade/remove INFO diagnostics after wallet_send production debugging is complete.
+        logger.info(
+            'lbry_daemon wallet_send_final_params wallet_id=%s amount=%s amount_type=%s addresses=%s addresses_type=%s '
             'address_item_types=%s change_account_id=%s change_account_id_type=%s funding_account_ids=%s funding_account_ids_type=%s '
-            'funding_account_item_types=%s blocking=%s blocking_type=%s',
-            'wallet_send',
+            'funding_account_item_types=%s blocking=%s blocking_type=%s params_keys=%s',
             wallet_id,
             amount_value,
             type(amount_value).__name__,
@@ -429,6 +429,7 @@ class LbryDaemonClient:
             [type(item).__name__ for item in funding_account_list] if funding_account_list is not None else None,
             blocking_value,
             type(blocking_value).__name__,
+            ['wallet_id', 'amount', 'addresses', *(['change_account_id'] if change_account_value else []), *(['funding_account_ids'] if funding_account_list else []), 'blocking'],
         )
         params: dict[str, object] = {
             'wallet_id': wallet_id,
@@ -466,6 +467,16 @@ class LbryDaemonClient:
             parsed_url.netloc,
             self.timeout,
         )
+        if method == 'wallet_send':
+            # TODO: downgrade/remove INFO diagnostics after wallet_send production debugging is complete.
+            logger.info(
+                'lbry_daemon rpc_wallet_send_envelope method=%s params_keys=%s params_value_types=%s daemon_hostport=%s timeout=%s',
+                method,
+                sorted(params_payload.keys()),
+                {key: type(value).__name__ for key, value in params_payload.items()},
+                parsed_url.netloc,
+                self.timeout,
+            )
         body = json.dumps(payload).encode('utf-8')
         request_obj = urllib_request.Request(
             self.url,
@@ -1709,6 +1720,26 @@ class WalletPrototypePayOrderService:
                 blocking_flag,
                 daemon_hostport,
                 self.daemon_client.timeout,
+            )
+            # TODO: downgrade/remove INFO diagnostics after wallet_send production debugging is complete.
+            logger.info(
+                'wallet_prototype_pay_order before_wallet_send order_no=%s user_id=%s wallet_id=%s amount=%s amount_type=%s '
+                'pay_to_address=%s pay_to_address_len=%s addresses=%s change_account_id=%s change_account_id_type=%s '
+                'funding_account_ids=%s funding_account_ids_type=%s blocking=%s blocking_type=%s',
+                order.order_no,
+                user.id,
+                wallet_id,
+                amount,
+                type(amount).__name__,
+                pay_to_address,
+                len(pay_to_address),
+                [pay_to_address],
+                change_account_id,
+                type(change_account_id).__name__ if change_account_id is not None else None,
+                funding_account_ids,
+                type(funding_account_ids).__name__ if funding_account_ids is not None else None,
+                blocking_flag,
+                type(blocking_flag).__name__,
             )
             self._log_wallet_balance_diagnostics(
                 wallet_id=wallet_id,
