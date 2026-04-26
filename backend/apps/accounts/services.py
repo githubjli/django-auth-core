@@ -1604,7 +1604,7 @@ class WalletPrototypePayOrderService:
     def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
         self.daemon_client = daemon_client or self.daemon_client_class()
 
-    def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str, amount_override: Decimal | None = None) -> dict:
+    def pay_payment_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str, amount_override: Decimal | None = None) -> dict:
         amount = amount_override if amount_override is not None else (order.expected_amount_lbc or order.amount or Decimal('0'))
         pay_to_address = (order.pay_to_address or '').strip()
         if amount <= 0 or not pay_to_address:
@@ -1684,7 +1684,7 @@ class WalletPrototypePayOrderService:
                 unlock_ok,
                 send_ok,
             )
-            raise WalletPrototypeError('Wallet prototype payment failed.') from exc
+            raise WalletPrototypeError(f'Wallet prototype payment failed: {exc}') from exc
         finally:
             if unlock_ok:
                 lock_attempted = True
@@ -1716,6 +1716,15 @@ class WalletPrototypePayOrderService:
             response_payload['wallet_relocked'] = lock_ok
             return response_payload
         raise WalletPrototypeError('Wallet prototype payment failed.')
+
+    def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str, amount_override: Decimal | None = None) -> dict:
+        return self.pay_payment_order(
+            user=user,
+            order=order,
+            wallet_id=wallet_id,
+            password=password,
+            amount_override=amount_override,
+        )
 
     def _extract_txid(self, payload) -> str:
         if isinstance(payload, str):

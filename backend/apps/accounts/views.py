@@ -1894,7 +1894,16 @@ class WalletPrototypePayOrderAPIView(APIView):
 
         service = WalletPrototypePayOrderService()
         try:
-            result = service.pay_order(
+            logger.info(
+                'wallet_prototype_membership_submit order_no=%s order_type=%s wallet_id=%s amount=%s pay_to_address=%s method=%s',
+                order.order_no,
+                order.order_type,
+                wallet_id,
+                order.expected_amount_lbc,
+                order.pay_to_address,
+                'WalletPrototypePayOrderService.pay_payment_order',
+            )
+            result = service.pay_payment_order(
                 user=request.user,
                 order=order,
                 wallet_id=wallet_id,
@@ -1933,6 +1942,10 @@ class WalletPrototypePayProductOrderAPIView(APIView):
         payment_order = order.payment_order
         if payment_order is None or payment_order.order_type != PaymentOrder.TYPE_PRODUCT:
             return Response({'detail': 'Invalid product payment order linkage.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not (payment_order.pay_to_address or '').strip():
+            return Response({'detail': 'Product payment order is missing pay_to_address.'}, status=status.HTTP_400_BAD_REQUEST)
+        if payment_order.expected_amount_lbc is None or payment_order.expected_amount_lbc <= 0:
+            return Response({'detail': 'Product payment order is missing expected_amount_lbc.'}, status=status.HTTP_400_BAD_REQUEST)
         wallet_id = (serializer.validated_data.get('wallet_id') or request.user.linked_wallet_id or '').strip()
         if not wallet_id:
             return Response({'detail': 'Missing linked wallet.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1941,8 +1954,17 @@ class WalletPrototypePayProductOrderAPIView(APIView):
 
         service = WalletPrototypePayOrderService()
         try:
-            send_amount = get_product_wallet_send_amount(payment_order=payment_order, product_order=order)
-            result = service.pay_order(
+            send_amount = payment_order.expected_amount_lbc
+            logger.info(
+                'wallet_prototype_product_submit order_no=%s order_type=%s wallet_id=%s amount=%s pay_to_address=%s method=%s',
+                payment_order.order_no,
+                payment_order.order_type,
+                wallet_id,
+                send_amount,
+                payment_order.pay_to_address,
+                'WalletPrototypePayOrderService.pay_payment_order',
+            )
+            result = service.pay_payment_order(
                 user=request.user,
                 order=payment_order,
                 wallet_id=wallet_id,
