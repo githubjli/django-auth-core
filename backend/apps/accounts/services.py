@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import shutil
@@ -15,15 +17,24 @@ from decimal import Decimal, InvalidOperation
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
+from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKEN_SYMBOL
 from apps.accounts.models import (
     ChainReceipt,
     LiveStream,
     MembershipPlan,
     OrderPayment,
     PaymentOrder,
+    Product,
+    ProductOrder,
+    ProductShipment,
+    ProductRefundRequest,
+    SellerPayout,
+    SellerPayoutAddress,
     UserMembership,
+    UserShippingAddress,
     WalletAddress,
 )
 
@@ -285,6 +296,36 @@ class MembershipOrderPersistenceError(LbryDaemonError):
 
 class WalletPrototypeError(LbryDaemonError):
     pass
+
+
+class WalletPrototypeValidationError(WalletPrototypeError):
+    pass
+
+
+def get_product_wallet_send_amount(payment_order: PaymentOrder, product_order: ProductOrder) -> Decimal:
+    """
+    Resolve the native-chain amount to send for product wallet prototype payments.
+
+    Priority:
+      1) payment_order.expected_amount_lbc (explicit settlement amount)
+      2) payment_order.amount (legacy fallback for older rows)
+    """
+    treat_thb_ltt_as_native = bool(getattr(settings, 'PRODUCT_WALLET_PAYMENT_TREAT_THB_LTT_AS_NATIVE', True))
+    product_currency = (product_order.currency or '').strip()
+
+    if product_currency == TOKEN_SYMBOL and not treat_thb_ltt_as_native:
+        raise WalletPrototypeValidationError(
+            'Product wallet payment for THB-LTT is disabled by configuration.'
+        )
+
+    expected_amount = payment_order.expected_amount_lbc
+    if expected_amount is not None and expected_amount > 0:
+        return expected_amount
+
+    if payment_order.amount and payment_order.amount > 0:
+        return payment_order.amount
+
+    raise WalletPrototypeValidationError('Product payment order is missing settlement amount.')
 
 
 class LbryDaemonClient:
@@ -884,20 +925,699 @@ class PaymentDetectionService:
         return True
 
 
+def build_product_qr_signature_payload(
+    *,
+    version: int,
+    payload_type: str,
+    blockchain: str,
+    token_symbol: str,
+    order_no: str,
+    pay_to_address: str,
+    expected_amount: str,
+    currency: str,
+    expires_at: str,
+) -> str:
+    payload = {
+        'version': version,
+        'type': payload_type,
+        'blockchain': blockchain,
+        'token_symbol': token_symbol,
+        'order_no': order_no,
+        'pay_to_address': pay_to_address,
+        'expected_amount': expected_amount,
+        'currency': currency,
+        'expires_at': expires_at,
+    }
+    return json.dumps(payload, separators=(',', ':'), sort_keys=True)
+
+
+def sign_product_qr_payload(
+    *,
+    version: int,
+    payload_type: str,
+    order_no: str,
+    pay_to_address: str,
+    expected_amount: str,
+    currency: str,
+    expires_at: str,
+) -> str:
+    message = build_product_qr_signature_payload(
+        version=version,
+        payload_type=payload_type,
+        blockchain=BLOCKCHAIN_NAME,
+        token_symbol=TOKEN_SYMBOL,
+        order_no=order_no,
+        pay_to_address=pay_to_address,
+        expected_amount=expected_amount,
+        currency=currency,
+        expires_at=expires_at,
+    )
+    secret = (settings.PAYMENT_QR_SIGNING_SECRET or settings.SECRET_KEY).encode('utf-8')
+    return hmac.new(secret, message.encode('utf-8'), hashlib.sha256).hexdigest()
+
+
+def verify_product_qr_signature(payload: dict) -> bool:
+    expected_sig = sign_product_qr_payload(
+        version=int(payload.get('version') or 0),
+        payload_type=str(payload.get('type') or ''),
+        order_no=str(payload.get('order_no') or ''),
+        pay_to_address=str(payload.get('pay_to_address') or ''),
+        expected_amount=str(payload.get('expected_amount') or ''),
+        currency=str(payload.get('currency') or ''),
+        expires_at=str(payload.get('expires_at') or ''),
+    )
+    provided_sig = str(payload.get('sig') or '')
+    return bool(provided_sig) and hmac.compare_digest(provided_sig, expected_sig)
+
+
+class ProductOrderService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+
+    def _resolve_receive_address(self) -> str:
+        return (settings.PRODUCT_PLATFORM_RECEIVE_ADDRESS or settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+
+    def create_order(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress) -> ProductOrder:
+        if quantity <= 0:
+            raise ValueError('Quantity must be greater than zero.')
+        if product.status != Product.STATUS_ACTIVE:
+            raise ValueError('Product is not active.')
+        if not product.store.is_active:
+            raise ValueError('Seller store is not active.')
+        if product.stock_quantity < quantity:
+            raise ValueError('Insufficient product stock.')
+        if shipping_address.user_id != buyer.id:
+            raise ValueError('Shipping address does not belong to buyer.')
+        receive_address = ''
+        wallet_id = ''
+        account_id = ''
+        is_dynamic_address = False
+        configured_receive_address = self._resolve_receive_address()
+        if configured_receive_address:
+            receive_address = configured_receive_address
+            wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip()
+            account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip()
+        else:
+            daemon_wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip() or None
+            daemon_account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
+            try:
+                daemon_result = self.daemon_client.address_unused(
+                    wallet_id=daemon_wallet_id,
+                    account_id=daemon_account_id,
+                )
+            except LbryDaemonError as exc:
+                raise RuntimeError('Unable to allocate product payment address from platform wallet.') from exc
+            receive_address = (daemon_result.get('address') or '').strip()
+            wallet_id = (daemon_result.get('wallet_id') or daemon_wallet_id or '').strip()
+            account_id = (daemon_result.get('account_id') or daemon_account_id or '').strip()
+            is_dynamic_address = True
+        if not receive_address:
+            raise RuntimeError('Unable to allocate product payment address from platform wallet.')
+
+        with transaction.atomic():
+            updated = Product.objects.filter(id=product.id, stock_quantity__gte=quantity).update(stock_quantity=F('stock_quantity') - quantity)
+            if updated == 0:
+                raise ValueError('Insufficient product stock.')
+            product.refresh_from_db(fields=['stock_quantity'])
+            order_no = self._generate_order_no()
+            total_amount = (product.price_amount or Decimal('0')) * Decimal(quantity)
+            now = timezone.now()
+            expires_at = now + timedelta(minutes=int(settings.PRODUCT_ORDER_EXPIRE_MINUTES))
+            payment_order = PaymentOrder.objects.create(
+                user=buyer,
+                product=product,
+                order_type=PaymentOrder.TYPE_PRODUCT,
+                target_type='product_order',
+                amount=total_amount,
+                expected_amount_lbc=total_amount,
+                currency=TOKEN_SYMBOL,
+                status=PaymentOrder.STATUS_PENDING,
+                order_no=order_no,
+                pay_to_address=receive_address,
+                expires_at=expires_at,
+            )
+            if is_dynamic_address:
+                existing_assigned = WalletAddress.objects.filter(
+                    address=receive_address,
+                    assigned_order__isnull=False,
+                ).exclude(assigned_order=payment_order).first()
+                if existing_assigned is not None:
+                    raise RuntimeError('Unable to allocate product payment address from platform wallet.')
+                wallet_address, _ = WalletAddress.objects.update_or_create(
+                    address=receive_address,
+                    defaults={
+                        'label': f'product:{order_no}',
+                        'usage_type': WalletAddress.USAGE_PRODUCT,
+                        'status': WalletAddress.STATUS_ASSIGNED,
+                        'assigned_order': payment_order,
+                        'assigned_at': now,
+                        'wallet_id': wallet_id,
+                        'account_id': account_id,
+                    },
+                )
+            else:
+                wallet_address, _ = WalletAddress.objects.update_or_create(
+                    address=receive_address,
+                    defaults={
+                        'label': f'product:{order_no}',
+                        'usage_type': WalletAddress.USAGE_PRODUCT,
+                        'status': WalletAddress.STATUS_AVAILABLE,
+                        'assigned_order': None,
+                        'assigned_at': None,
+                        'wallet_id': wallet_id,
+                        'account_id': account_id,
+                    },
+                )
+            payment_order.wallet_address = wallet_address
+            payment_order.save(update_fields=['wallet_address', 'updated_at'])
+            product_order = ProductOrder.objects.create(
+                order_no=order_no,
+                buyer=buyer,
+                seller_store=product.store,
+                product=product,
+                product_title_snapshot=product.title,
+                product_price_snapshot=product.price_amount,
+                quantity=quantity,
+                total_amount=total_amount,
+                currency=TOKEN_SYMBOL,
+                status=ProductOrder.STATUS_PENDING_PAYMENT,
+                shipping_address_snapshot=self._shipping_snapshot(shipping_address),
+                payment_order=payment_order,
+                stock_locked_at=now,
+                expires_at=expires_at,
+            )
+            payment_order.target_id = product_order.id
+            payment_order.save(update_fields=['target_id', 'updated_at'])
+            return product_order
+
+    def build_qr_payload(self, order: ProductOrder) -> dict:
+        payment_order = order.payment_order
+        expires_at_iso = payment_order.expires_at.isoformat() if payment_order and payment_order.expires_at else ''
+        expected_amount = str(order.total_amount)
+        payload = {
+            'version': 1,
+            'type': 'product_payment',
+            'blockchain': BLOCKCHAIN_NAME,
+            'token_name': TOKEN_NAME,
+            'token_symbol': TOKEN_SYMBOL,
+            'peg': TOKEN_PEG,
+            'pay_to_address': (payment_order.pay_to_address if payment_order else ''),
+            'expected_amount': expected_amount,
+            'currency': order.currency,
+            'order_no': order.order_no,
+            'expires_at': expires_at_iso,
+        }
+        payload['sig'] = sign_product_qr_payload(
+            version=payload['version'],
+            payload_type=payload['type'],
+            order_no=payload['order_no'],
+            pay_to_address=payload['pay_to_address'],
+            expected_amount=payload['expected_amount'],
+            currency=payload['currency'],
+            expires_at=payload['expires_at'],
+        )
+        return payload
+
+    def mark_paid(self, *, order: ProductOrder):
+        now = timezone.now()
+        with transaction.atomic():
+            if order.status not in {ProductOrder.STATUS_PENDING_PAYMENT, ProductOrder.STATUS_CANCELLED}:
+                raise ValueError('Only pending payment orders can be marked paid.')
+            order.status = ProductOrder.STATUS_PAID
+            order.paid_at = now
+            order.cancelled_at = None
+            order.cancel_reason = ''
+            order.save(update_fields=['status', 'paid_at', 'cancelled_at', 'cancel_reason', 'updated_at'])
+            if order.payment_order:
+                order.payment_order.status = PaymentOrder.STATUS_PAID
+                if order.payment_order.paid_at is None:
+                    order.payment_order.paid_at = now
+                order.payment_order.save(update_fields=['status', 'paid_at', 'updated_at'])
+
+    def ship_order(self, *, order: ProductOrder, created_by, carrier: str, tracking_number: str, tracking_url: str = '', shipped_note: str = ''):
+        if order.status != ProductOrder.STATUS_PAID:
+            raise ValueError('Only paid orders can be shipped.')
+        now = timezone.now()
+        ProductShipment.objects.update_or_create(
+            product_order=order,
+            defaults={
+                'carrier': carrier,
+                'tracking_number': tracking_number,
+                'tracking_url': tracking_url,
+                'shipped_note': shipped_note,
+                'created_by': created_by,
+            },
+        )
+        order.status = ProductOrder.STATUS_SHIPPING
+        order.shipped_at = now
+        order.save(update_fields=['status', 'shipped_at', 'updated_at'])
+
+    def confirm_received(self, *, order: ProductOrder):
+        if order.status != ProductOrder.STATUS_SHIPPING:
+            raise ValueError('Only shipping orders can be confirmed as received.')
+        now = timezone.now()
+        with transaction.atomic():
+            order.status = ProductOrder.STATUS_COMPLETED
+            order.completed_at = now
+            order.save(update_fields=['status', 'completed_at', 'updated_at'])
+            SellerPayout.objects.get_or_create(
+                product_order=order,
+                defaults={
+                    'seller_store': order.seller_store,
+                    'amount': order.total_amount,
+                    'currency': order.currency,
+                    'status': SellerPayout.STATUS_PENDING,
+                },
+            )
+
+    def mark_settled(self, *, order: ProductOrder, txid: str, payout_address: str = '', note: str = ''):
+        if order.status != ProductOrder.STATUS_COMPLETED:
+            raise ValueError('Only completed orders can be settled.')
+        now = timezone.now()
+        with transaction.atomic():
+            payout, _ = SellerPayout.objects.get_or_create(
+                product_order=order,
+                defaults={
+                    'seller_store': order.seller_store,
+                    'amount': order.total_amount,
+                    'currency': order.currency,
+                    'status': SellerPayout.STATUS_PENDING,
+                },
+            )
+            payout.status = SellerPayout.STATUS_PAID
+            payout.txid = txid
+            payout.payout_address = payout_address
+            payout.note = note
+            payout.paid_at = now
+            payout.save(update_fields=['status', 'txid', 'payout_address', 'note', 'paid_at', 'updated_at'])
+            order.status = ProductOrder.STATUS_SETTLED
+            order.settled_at = now
+            order.save(update_fields=['status', 'settled_at', 'updated_at'])
+
+    @transaction.atomic
+    def release_expired_pending_orders(self) -> dict:
+        now = timezone.now()
+        orders = list(
+            ProductOrder.objects.select_related('payment_order', 'product').filter(
+                status=ProductOrder.STATUS_PENDING_PAYMENT,
+                expires_at__isnull=False,
+                expires_at__lt=now,
+                stock_released_at__isnull=True,
+            )
+        )
+        released = 0
+        restored_stock_quantity = 0
+        for order in orders:
+            self._release_stock_for_order(order=order, reason='payment_timeout')
+            released += 1
+            restored_stock_quantity += order.quantity
+        return {
+            'scanned_orders': len(orders),
+            'released_orders': released,
+            'restored_stock_quantity': restored_stock_quantity,
+        }
+
+    def _release_stock_for_order(self, *, order: ProductOrder, reason: str):
+        now = timezone.now()
+        if order.stock_released_at is not None:
+            return
+        Product.objects.filter(id=order.product_id).update(stock_quantity=F('stock_quantity') + order.quantity)
+        order.status = ProductOrder.STATUS_CANCELLED
+        order.cancel_reason = reason
+        order.cancelled_at = now
+        order.stock_released_at = now
+        order.save(update_fields=['status', 'cancel_reason', 'cancelled_at', 'stock_released_at', 'updated_at'])
+        if order.payment_order and order.payment_order.status in {
+            PaymentOrder.STATUS_PENDING,
+            PaymentOrder.STATUS_UNDERPAID,
+            PaymentOrder.STATUS_EXPIRED,
+        }:
+            order.payment_order.status = PaymentOrder.STATUS_EXPIRED
+            order.payment_order.save(update_fields=['status', 'updated_at'])
+
+    def _shipping_snapshot(self, shipping_address: UserShippingAddress) -> dict:
+        return {
+            'receiver_name': shipping_address.receiver_name,
+            'phone': shipping_address.phone,
+            'country': shipping_address.country,
+            'province': shipping_address.province,
+            'city': shipping_address.city,
+            'district': shipping_address.district,
+            'street_address': shipping_address.street_address,
+            'postal_code': shipping_address.postal_code,
+        }
+
+    def _generate_order_no(self) -> str:
+        for _ in range(16):
+            candidate = f'PO{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not ProductOrder.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise RuntimeError('Unable to generate unique product order number.')
+
+
+class ProductPaymentDetectionService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+        self.min_confirmations = int(settings.LBC_MIN_CONFIRMATIONS)
+        self.page_size = int(settings.LBC_TX_PAGE_SIZE)
+
+    @transaction.atomic
+    def sync_product_orders(self) -> dict:
+        orders = list(
+            PaymentOrder.objects.filter(
+                order_type=PaymentOrder.TYPE_PRODUCT,
+                target_type='product_order',
+                status__in=[PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_UNDERPAID, PaymentOrder.STATUS_EXPIRED],
+            ).exclude(pay_to_address='')
+        )
+        stats = {
+            'scanned_orders': len(orders),
+            'matched_receipts': 0,
+            'paid_orders': 0,
+            'underpaid_orders': 0,
+            'overpaid_orders': 0,
+            'errors': 0,
+        }
+        if not orders:
+            return stats
+        order_by_id = {order.id: order for order in orders}
+        order_by_address: dict[str, list[PaymentOrder]] = {}
+        for order in orders:
+            order_by_address.setdefault(order.pay_to_address, []).append(order)
+        txids: set[str] = set()
+        for tx in self.daemon_client.transaction_list(page=1, page_size=self.page_size):
+            txid = (tx.get('txid') or tx.get('id') or '').strip() if isinstance(tx, dict) else ''
+            if txid:
+                txids.add(txid)
+        for txid in txids:
+            try:
+                tx_detail = self.daemon_client.transaction_show(txid)
+            except LbryDaemonError:
+                stats['errors'] += 1
+                continue
+            confirmations = self._extract_confirmations(tx_detail)
+            block_height = tx_detail.get('height') or tx_detail.get('block_height')
+            for output in self._extract_outputs(tx_detail):
+                address = (output.get('address') or '').strip()
+                candidate_orders = order_by_address.get(address) or []
+                if not candidate_orders:
+                    continue
+                amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+                if amount is None:
+                    continue
+                order = self._select_candidate_order(candidate_orders, txid=txid)
+                if order is None:
+                    continue
+                vout = output.get('nout') if output.get('nout') is not None else output.get('vout')
+                receipt = self._upsert_receipt(
+                    txid=txid,
+                    vout=vout,
+                    address=address,
+                    amount=amount,
+                    confirmations=confirmations,
+                    block_height=block_height,
+                    raw_payload=tx_detail,
+                    matched_order=order,
+                )
+                self._upsert_order_payment(order=order, receipt=receipt, txid=txid, amount=amount, confirmations=confirmations)
+                stats['matched_receipts'] += 1
+                outcome = self._apply_product_payment_state(order=order, amount=amount, confirmations=confirmations, txid=txid)
+                if outcome == PaymentOrder.STATUS_PAID:
+                    stats['paid_orders'] += 1
+                elif outcome == PaymentOrder.STATUS_OVERPAID:
+                    stats['overpaid_orders'] += 1
+                elif outcome == PaymentOrder.STATUS_UNDERPAID:
+                    stats['underpaid_orders'] += 1
+                order_by_id[order.id] = order
+        return stats
+
+    @transaction.atomic
+    def verify_product_order_once(self, *, order: PaymentOrder, txid_hint: str) -> dict:
+        if order.order_type != PaymentOrder.TYPE_PRODUCT or order.target_type != 'product_order':
+            return {'verified': False, 'message': 'unsupported_order_type'}
+        txid = (txid_hint or '').strip()
+        if not txid:
+            return {'verified': False, 'message': 'txid_required'}
+        try:
+            tx_detail = self.daemon_client.transaction_show(txid)
+        except LbryDaemonError:
+            return {'verified': False, 'matched': False, 'paid': False, 'status': order.status, 'confirmations': order.confirmations, 'txid': order.txid}
+        confirmations = self._extract_confirmations(tx_detail)
+        block_height = tx_detail.get('height') or tx_detail.get('block_height')
+        matched = False
+        for output in self._extract_outputs(tx_detail):
+            address = (output.get('address') or '').strip()
+            if address != order.pay_to_address:
+                continue
+            amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+            if amount is None:
+                continue
+            vout = output.get('nout') if output.get('nout') is not None else output.get('vout')
+            receipt = self._upsert_receipt(
+                txid=txid,
+                vout=vout,
+                address=address,
+                amount=amount,
+                confirmations=confirmations,
+                block_height=block_height,
+                raw_payload=tx_detail,
+                matched_order=order,
+            )
+            self._upsert_order_payment(order=order, receipt=receipt, txid=txid, amount=amount, confirmations=confirmations)
+            self._apply_product_payment_state(order=order, amount=amount, confirmations=confirmations, txid=txid)
+            matched = True
+            break
+        order.refresh_from_db()
+        product_order = ProductOrder.objects.filter(payment_order=order).first()
+        return {
+            'verified': True,
+            'matched': matched,
+            'paid': order.status in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID},
+            'status': order.status,
+            'confirmations': order.confirmations,
+            'txid': order.txid,
+            'product_order_status': product_order.status if product_order else '',
+        }
+
+    def _select_candidate_order(self, candidate_orders: list[PaymentOrder], *, txid: str) -> PaymentOrder | None:
+        for order in candidate_orders:
+            if order.txid == txid and order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_UNDERPAID, PaymentOrder.STATUS_EXPIRED}:
+                return order
+        for order in candidate_orders:
+            if order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_UNDERPAID, PaymentOrder.STATUS_EXPIRED}:
+                return order
+        return None
+
+    def _apply_product_payment_state(self, *, order: PaymentOrder, amount: Decimal, confirmations: int, txid: str) -> str:
+        expected = order.amount or Decimal('0')
+        order.actual_amount_lbc = amount
+        order.txid = txid
+        order.confirmations = confirmations
+        order_fields = ['actual_amount_lbc', 'txid', 'confirmations', 'updated_at']
+        product_order = ProductOrder.objects.filter(payment_order=order).first()
+        if amount < expected:
+            order.status = PaymentOrder.STATUS_UNDERPAID
+            order_fields.append('status')
+            order.save(update_fields=order_fields)
+            return order.status
+        if confirmations < self.min_confirmations:
+            order.save(update_fields=order_fields)
+            return order.status
+        order.status = PaymentOrder.STATUS_PAID if amount == expected else PaymentOrder.STATUS_OVERPAID
+        order.paid_at = order.paid_at or timezone.now()
+        order_fields.extend(['status', 'paid_at'])
+        order.save(update_fields=order_fields)
+        if product_order:
+            product_order.status = ProductOrder.STATUS_PAID
+            product_order.paid_at = product_order.paid_at or timezone.now()
+            product_order.cancel_reason = ''
+            product_order.cancelled_at = None
+            product_order.save(update_fields=['status', 'paid_at', 'cancel_reason', 'cancelled_at', 'updated_at'])
+        return order.status
+
+    def _upsert_receipt(self, *, txid: str, vout, address: str, amount: Decimal, confirmations: int, block_height, raw_payload: dict, matched_order: PaymentOrder):
+        receipt, _ = ChainReceipt.objects.update_or_create(
+            currency=ChainReceipt.CURRENCY_LBC,
+            txid=txid,
+            vout=vout,
+            defaults={
+                'wallet_id': '',
+                'address': address,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'block_height': block_height,
+                'seen_at': timezone.now(),
+                'confirmed_at': timezone.now() if confirmations >= self.min_confirmations else None,
+                'raw_payload': raw_payload,
+                'matched_order': matched_order,
+                'match_status': ChainReceipt.MATCH_MATCHED,
+            },
+        )
+        return receipt
+
+    def _upsert_order_payment(self, *, order: PaymentOrder, receipt: ChainReceipt, txid: str, amount: Decimal, confirmations: int):
+        is_confirmed = confirmations >= self.min_confirmations and amount >= (order.amount or Decimal('0'))
+        payment_status = OrderPayment.PAYMENT_CONFIRMED if is_confirmed else OrderPayment.PAYMENT_PENDING
+        OrderPayment.objects.update_or_create(
+            order=order,
+            receipt=receipt,
+            defaults={
+                'txid': txid,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'payment_status': payment_status,
+                'matched_at': timezone.now(),
+            },
+        )
+
+    def _extract_outputs(self, tx_detail: dict) -> list[dict]:
+        outputs = tx_detail.get('outputs')
+        if isinstance(outputs, list):
+            parsed = []
+            for idx, output in enumerate(outputs):
+                if not isinstance(output, dict):
+                    continue
+                address = output.get('address') or ((output.get('addresses') or [None])[0])
+                parsed.append({'address': address, 'amount': output.get('amount'), 'vout': output.get('vout'), 'nout': output.get('nout', idx)})
+            return parsed
+        return []
+
+    def _extract_confirmations(self, tx_detail: dict) -> int:
+        try:
+            return max(0, int(tx_detail.get('confirmations') or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+
+
+class ProductPayoutService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client
+
+    @transaction.atomic
+    def settle_pending_payouts(self) -> dict:
+        stats = {
+            'scanned_payouts': 0,
+            'eligible_payouts': 0,
+            'settled_payouts': 0,
+            'skipped_payouts': 0,
+            'failed_payouts': 0,
+        }
+        if not settings.PRODUCT_AUTO_PAYOUT_ENABLED:
+            return stats
+        if self.daemon_client is None:
+            self.daemon_client = self.daemon_client_class()
+        threshold = timezone.now() - timedelta(hours=int(settings.PRODUCT_PAYOUT_MIN_DELAY_HOURS))
+        payouts = list(
+            SellerPayout.objects.select_related('product_order', 'seller_store').filter(
+                status=SellerPayout.STATUS_PENDING,
+                product_order__status=ProductOrder.STATUS_COMPLETED,
+                product_order__completed_at__isnull=False,
+                product_order__completed_at__lte=threshold,
+            )
+        )
+        stats['scanned_payouts'] = len(payouts)
+        for payout in payouts:
+            order = payout.product_order
+            has_active_refund = ProductRefundRequest.objects.filter(
+                product_order=order,
+                status__in=[ProductRefundRequest.STATUS_REQUESTED, ProductRefundRequest.STATUS_APPROVED],
+            ).exists()
+            if has_active_refund:
+                stats['skipped_payouts'] += 1
+                continue
+            payout_address = self._resolve_payout_address(payout)
+            if not payout_address:
+                payout.failure_note = 'missing_default_payout_address'
+                payout.save(update_fields=['failure_note', 'updated_at'])
+                stats['skipped_payouts'] += 1
+                continue
+            wallet_id = (settings.PRODUCT_PAYOUT_WALLET_ID or settings.LBRY_PLATFORM_WALLET_ID or '').strip()
+            if not wallet_id:
+                payout.failure_note = 'missing_payout_wallet_id'
+                payout.save(update_fields=['failure_note', 'updated_at'])
+                stats['skipped_payouts'] += 1
+                continue
+            change_account_id = (settings.PRODUCT_PAYOUT_ACCOUNT_ID or settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
+            stats['eligible_payouts'] += 1
+            try:
+                result = self.daemon_client.wallet_send(
+                    wallet_id=wallet_id,
+                    amount=payout.amount,
+                    addresses=[payout_address.address],
+                    change_account_id=change_account_id,
+                    funding_account_ids=[change_account_id] if change_account_id else None,
+                    blocking=True,
+                )
+                txid = self._extract_txid(result)
+            except LbryDaemonError:
+                payout.status = SellerPayout.STATUS_FAILED
+                payout.failure_note = 'wallet_send_failed'
+                payout.save(update_fields=['status', 'failure_note', 'updated_at'])
+                stats['failed_payouts'] += 1
+                continue
+            now = timezone.now()
+            payout.status = SellerPayout.STATUS_PAID
+            payout.txid = txid
+            payout.payout_address = payout_address.address
+            payout.paid_at = now
+            payout.failure_note = ''
+            payout.save(update_fields=['status', 'txid', 'payout_address', 'paid_at', 'failure_note', 'updated_at'])
+            order.status = ProductOrder.STATUS_SETTLED
+            order.settled_at = now
+            order.save(update_fields=['status', 'settled_at', 'updated_at'])
+            stats['settled_payouts'] += 1
+        return stats
+
+    def _resolve_payout_address(self, payout: SellerPayout) -> SellerPayoutAddress | None:
+        address = SellerPayoutAddress.objects.filter(
+            seller_store=payout.seller_store,
+            is_active=True,
+            is_default=True,
+        ).order_by('-updated_at', '-id').first()
+        return address
+
+    def _extract_txid(self, payload) -> str:
+        if isinstance(payload, str):
+            return payload.strip()
+        if isinstance(payload, dict):
+            return str(payload.get('txid') or payload.get('id') or '').strip()
+        return ''
+
+
 class WalletPrototypePayOrderService:
     daemon_client_class = LbryDaemonClient
 
     def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
         self.daemon_client = daemon_client or self.daemon_client_class()
 
-    def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str) -> dict:
-        amount = order.expected_amount_lbc or Decimal('0')
+    def pay_order(self, *, user, order: PaymentOrder, wallet_id: str, password: str, amount_override: Decimal | None = None) -> dict:
+        amount = amount_override if amount_override is not None else (order.expected_amount_lbc or order.amount or Decimal('0'))
         pay_to_address = (order.pay_to_address or '').strip()
         if amount <= 0 or not pay_to_address:
-            raise WalletPrototypeError('Order is missing payment amount/address.')
+            raise WalletPrototypeValidationError('Order is missing payment amount/address.')
 
         change_account_id = (user.primary_user_address or '').strip() or None
         funding_account_ids = [change_account_id] if change_account_id else None
+        product_order = None
+        if order.order_type == PaymentOrder.TYPE_PRODUCT:
+            try:
+                product_order = order.linked_product_order
+            except ProductOrder.DoesNotExist:
+                product_order = None
         unlock_ok = False
         send_ok = False
         lock_attempted = False
@@ -916,6 +1636,23 @@ class WalletPrototypePayOrderService:
         try:
             self.daemon_client.wallet_unlock(wallet_id=wallet_id, password=password)
             unlock_ok = True
+            logger.info(
+                'wallet_prototype_pay_order wallet_send_params order_no=%s order_type=%s wallet_id=%s pay_to_address=%s daemon_amount=%s '
+                'business_currency=%s expected_amount_lbc=%s product_total_amount=%s payment_order_amount=%s payment_order_currency=%s '
+                'funding_account_ids=%s change_account_id=%s',
+                order.order_no,
+                order.order_type,
+                wallet_id,
+                pay_to_address,
+                amount,
+                product_order.currency if product_order else order.currency,
+                order.expected_amount_lbc,
+                product_order.total_amount if product_order else None,
+                order.amount,
+                order.currency,
+                funding_account_ids,
+                change_account_id,
+            )
             send_result = self.daemon_client.wallet_send(
                 wallet_id=wallet_id,
                 amount=amount,
@@ -976,6 +1713,7 @@ class WalletPrototypePayOrderService:
                 txid,
             )
         if send_ok and response_payload is not None:
+            response_payload['wallet_relocked'] = lock_ok
             return response_payload
         raise WalletPrototypeError('Wallet prototype payment failed.')
 
