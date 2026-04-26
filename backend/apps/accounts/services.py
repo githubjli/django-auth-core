@@ -1634,7 +1634,17 @@ class WalletPrototypePayOrderService:
             amount,
         )
         try:
-            self.daemon_client.wallet_unlock(wallet_id=wallet_id, password=password)
+            unlock_result = self.daemon_client.wallet_unlock(wallet_id=wallet_id, password=password)
+            logger.info(
+                'wallet_prototype_pay_order unlock_result order_no=%s user_id=%s wallet_id=%s unlock_result_type=%s unlock_result_keys=%s',
+                order.order_no,
+                user.id,
+                wallet_id,
+                type(unlock_result).__name__,
+                sorted(unlock_result.keys()) if isinstance(unlock_result, dict) else None,
+            )
+            if not self._is_wallet_unlock_success(unlock_result):
+                raise LbryDaemonError('wallet_unlock did not return success.')
             unlock_ok = True
             logger.info(
                 'wallet_prototype_pay_order wallet_send_params order_no=%s order_type=%s wallet_id=%s pay_to_address=%s daemon_amount=%s '
@@ -1732,6 +1742,13 @@ class WalletPrototypePayOrderService:
         if isinstance(payload, dict):
             return str(payload.get('txid') or payload.get('id') or '').strip()
         return ''
+
+    def _is_wallet_unlock_success(self, unlock_result) -> bool:
+        if unlock_result is True:
+            return True
+        if isinstance(unlock_result, dict):
+            return unlock_result.get('result') is True
+        return False
 
 
 def generate_video_thumbnail(video, time_offset: float = 1.0) -> bool:
