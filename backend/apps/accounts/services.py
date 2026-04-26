@@ -406,16 +406,40 @@ class LbryDaemonClient:
         funding_account_ids: list[str] | None = None,
         blocking: bool = True,
     ):
+        amount_value = format(amount, 'f') if isinstance(amount, Decimal) else str(amount)
+        addresses_list = [str(address) for address in (addresses or [])]
+        change_account_value = str(change_account_id) if change_account_id else None
+        funding_account_list = [str(account_id) for account_id in funding_account_ids] if funding_account_ids else None
+        blocking_value = bool(blocking)
+        logger.debug(
+            'lbry_daemon wallet_send params method=%s wallet_id=%s amount=%s amount_type=%s addresses=%s addresses_type=%s '
+            'address_item_types=%s change_account_id=%s change_account_id_type=%s funding_account_ids=%s funding_account_ids_type=%s '
+            'funding_account_item_types=%s blocking=%s blocking_type=%s',
+            'wallet_send',
+            wallet_id,
+            amount_value,
+            type(amount_value).__name__,
+            addresses_list,
+            type(addresses_list).__name__,
+            [type(item).__name__ for item in addresses_list],
+            change_account_value,
+            type(change_account_value).__name__ if change_account_value is not None else None,
+            funding_account_list,
+            type(funding_account_list).__name__ if funding_account_list is not None else None,
+            [type(item).__name__ for item in funding_account_list] if funding_account_list is not None else None,
+            blocking_value,
+            type(blocking_value).__name__,
+        )
         params: dict[str, object] = {
             'wallet_id': wallet_id,
-            'amount': str(amount),
-            'addresses': addresses,
-            'blocking': bool(blocking),
+            'amount': amount_value,
+            'addresses': addresses_list,
+            'blocking': blocking_value,
         }
-        if change_account_id:
-            params['change_account_id'] = change_account_id
-        if funding_account_ids:
-            params['funding_account_ids'] = funding_account_ids
+        if change_account_value:
+            params['change_account_id'] = change_account_value
+        if funding_account_list:
+            params['funding_account_ids'] = funding_account_list
         return self._rpc_call('wallet_send', params)
 
     def account_balance(self, wallet_id: str, account_id: str | None = None):
@@ -431,6 +455,17 @@ class LbryDaemonClient:
             'params': params or {},
             'id': uuid4().hex,
         }
+        parsed_url = urlparse(self.url or '')
+        params_payload = payload.get('params') if isinstance(payload.get('params'), dict) else {}
+        logger.debug(
+            'lbry_daemon rpc_envelope method=%s top_level_keys=%s params_keys=%s params_value_types=%s hostport=%s timeout=%s',
+            method,
+            sorted(payload.keys()),
+            sorted(params_payload.keys()),
+            {key: type(value).__name__ for key, value in params_payload.items()},
+            parsed_url.netloc,
+            self.timeout,
+        )
         body = json.dumps(payload).encode('utf-8')
         request_obj = urllib_request.Request(
             self.url,
