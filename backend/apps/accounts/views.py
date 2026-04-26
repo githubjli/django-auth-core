@@ -1942,6 +1942,16 @@ class WalletPrototypePayProductOrderAPIView(APIView):
         payment_order = order.payment_order
         if payment_order is None or payment_order.order_type != PaymentOrder.TYPE_PRODUCT:
             return Response({'detail': 'Invalid product payment order linkage.'}, status=status.HTTP_400_BAD_REQUEST)
+        existing_txid = (payment_order.txid or '').strip()
+        if existing_txid:
+            return Response(
+                {
+                    'detail': 'Payment already submitted for this order. Waiting for blockchain confirmation.',
+                    'order_no': order.order_no,
+                    'txid': existing_txid,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         if not (payment_order.pay_to_address or '').strip():
             return Response({'detail': 'Product payment order is missing pay_to_address.'}, status=status.HTTP_400_BAD_REQUEST)
         if payment_order.expected_amount_lbc is None or payment_order.expected_amount_lbc <= 0:
