@@ -1951,6 +1951,7 @@ class WalletPrototypePayProductOrderAPIView(APIView):
                     'txid': existing_txid,
                     'payment_order_status': payment_order.status,
                     'product_order_status': order.status,
+                    'confirmations': payment_order.confirmations,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -1995,6 +1996,7 @@ class WalletPrototypePayProductOrderAPIView(APIView):
                 'detail': result.get('detail', 'Payment submitted. Waiting for on-chain confirmation.'),
                 'payment_order_status': result.get('payment_order_status', payment_order.status),
                 'product_order_status': result.get('product_order_status', order.status),
+                'confirmations': result.get('confirmations', payment_order.confirmations),
                 'wallet_relocked': bool(result.get('wallet_relocked')),
             },
             status=status.HTTP_200_OK,

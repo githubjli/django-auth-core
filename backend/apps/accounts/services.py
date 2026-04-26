@@ -411,8 +411,7 @@ class LbryDaemonClient:
         change_account_value = str(change_account_id) if change_account_id else None
         funding_account_list = [str(account_id) for account_id in funding_account_ids] if funding_account_ids else None
         blocking_value = bool(blocking)
-        # TODO: downgrade/remove INFO diagnostics after wallet_send production debugging is complete.
-        logger.info(
+        logger.debug(
             'lbry_daemon wallet_send_final_params wallet_id=%s amount=%s amount_type=%s addresses=%s addresses_type=%s '
             'address_item_types=%s change_account_id=%s change_account_id_type=%s funding_account_ids=%s funding_account_ids_type=%s '
             'funding_account_item_types=%s blocking=%s blocking_type=%s params_keys=%s',
@@ -468,8 +467,7 @@ class LbryDaemonClient:
             self.timeout,
         )
         if method == 'wallet_send':
-            # TODO: downgrade/remove INFO diagnostics after wallet_send production debugging is complete.
-            logger.info(
+            logger.debug(
                 'lbry_daemon rpc_wallet_send_envelope method=%s params_keys=%s params_value_types=%s daemon_hostport=%s timeout=%s',
                 method,
                 sorted(params_payload.keys()),
@@ -1675,6 +1673,7 @@ class WalletPrototypePayOrderService:
                 'txid': existing_txid,
                 'payment_order_status': order.status,
                 'product_order_status': product_order.status if product_order else None,
+                'confirmations': order.confirmations,
                 'detail': 'Payment already submitted and is waiting for confirmation.',
                 'wallet_relocked': False,
             }
@@ -1719,7 +1718,7 @@ class WalletPrototypePayOrderService:
             parsed_url = urlparse(daemon_url) if daemon_url else None
             daemon_hostport = parsed_url.netloc if parsed_url else ''
             blocking_flag = True
-            logger.info(
+            logger.debug(
                 'wallet_prototype_pay_order wallet_send_params order_no=%s order_type=%s wallet_id=%s pay_to_address=%s daemon_amount=%s '
                 'business_currency=%s expected_amount_lbc=%s payment_order_amount=%s payment_order_currency=%s '
                 'funding_account_ids=%s change_account_id=%s blocking=%s daemon_hostport=%s daemon_timeout=%s',
@@ -1739,7 +1738,7 @@ class WalletPrototypePayOrderService:
                 self.daemon_client.timeout,
             )
             # TODO: downgrade/remove INFO diagnostics after wallet_send production debugging is complete.
-            logger.info(
+            logger.debug(
                 'wallet_prototype_pay_order before_wallet_send order_no=%s user_id=%s wallet_id=%s amount=%s amount_type=%s '
                 'pay_to_address=%s pay_to_address_len=%s addresses=%s change_account_id=%s change_account_id_type=%s '
                 'funding_account_ids=%s funding_account_ids_type=%s blocking=%s blocking_type=%s',
@@ -1781,6 +1780,7 @@ class WalletPrototypePayOrderService:
                 'txid': txid,
                 'payment_order_status': order.status,
                 'product_order_status': product_order.status if product_order else None,
+                'confirmations': order.confirmations,
                 'detail': 'Payment submitted. Waiting for on-chain confirmation.',
                 'pay_to_address': pay_to_address,
                 'expected_amount_lbc': str(amount),
@@ -1833,7 +1833,7 @@ class WalletPrototypePayOrderService:
                     )
                     if send_ok and response_payload is not None:
                         response_payload['warning'] = 'wallet_lock_failed'
-            logger.info(
+            logger.debug(
                 'wallet_prototype_pay_order complete order_no=%s user_id=%s wallet_id=%s unlock_ok=%s send_ok=%s lock_attempted=%s lock_ok=%s txid=%s',
                 order.order_no,
                 user.id,
@@ -1846,6 +1846,7 @@ class WalletPrototypePayOrderService:
             )
         if send_ok and response_payload is not None:
             response_payload['wallet_relocked'] = lock_ok
+            logger.info('wallet_prototype_pay_order success order_no=%s txid=%s', order.order_no, txid)
             return response_payload
         raise WalletPrototypeError('Wallet prototype payment failed.')
 
