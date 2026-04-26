@@ -308,21 +308,21 @@ def get_product_wallet_send_amount(payment_order: PaymentOrder, product_order: P
 
     Priority:
       1) payment_order.expected_amount_lbc (explicit settlement amount)
-      2) payment_order.amount only when PRODUCT_WALLET_PAYMENT_TREAT_THB_LTT_AS_NATIVE=True (dev/test fallback)
+      2) payment_order.amount (legacy fallback for older rows)
     """
-    treat_thb_ltt_as_native = bool(getattr(settings, 'PRODUCT_WALLET_PAYMENT_TREAT_THB_LTT_AS_NATIVE', False))
+    treat_thb_ltt_as_native = bool(getattr(settings, 'PRODUCT_WALLET_PAYMENT_TREAT_THB_LTT_AS_NATIVE', True))
     product_currency = (product_order.currency or '').strip()
 
     if product_currency == TOKEN_SYMBOL and not treat_thb_ltt_as_native:
         raise WalletPrototypeValidationError(
-            'Product wallet payment requires THB-LTT token transfer support; native wallet_send cannot send THB-LTT.'
+            'Product wallet payment for THB-LTT is disabled by configuration.'
         )
 
     expected_amount = payment_order.expected_amount_lbc
     if expected_amount is not None and expected_amount > 0:
         return expected_amount
 
-    if treat_thb_ltt_as_native and payment_order.amount and payment_order.amount > 0:
+    if payment_order.amount and payment_order.amount > 0:
         return payment_order.amount
 
     raise WalletPrototypeValidationError('Product payment order is missing settlement amount.')
