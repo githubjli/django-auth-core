@@ -418,6 +418,12 @@ class LbryDaemonClient:
             params['funding_account_ids'] = funding_account_ids
         return self._rpc_call('wallet_send', params)
 
+    def account_balance(self, wallet_id: str, account_id: str | None = None):
+        params: dict[str, str] = {'wallet_id': wallet_id}
+        if account_id:
+            params['account_id'] = account_id
+        return self._rpc_call('account_balance', params)
+
     def _rpc_call(self, method: str, params: dict | None = None):
         payload = {
             'jsonrpc': '2.0',
@@ -1646,10 +1652,14 @@ class WalletPrototypePayOrderService:
             if not self._is_wallet_unlock_success(unlock_result):
                 raise LbryDaemonError('wallet_unlock did not return success.')
             unlock_ok = True
+            daemon_url = self.daemon_client.url or ''
+            parsed_url = urlparse(daemon_url) if daemon_url else None
+            daemon_hostport = parsed_url.netloc if parsed_url else ''
+            blocking_flag = True
             logger.info(
                 'wallet_prototype_pay_order wallet_send_params order_no=%s order_type=%s wallet_id=%s pay_to_address=%s daemon_amount=%s '
-                'business_currency=%s expected_amount_lbc=%s product_total_amount=%s payment_order_amount=%s payment_order_currency=%s '
-                'funding_account_ids=%s change_account_id=%s',
+                'business_currency=%s expected_amount_lbc=%s payment_order_amount=%s payment_order_currency=%s '
+                'funding_account_ids=%s change_account_id=%s blocking=%s daemon_hostport=%s daemon_timeout=%s',
                 order.order_no,
                 order.order_type,
                 wallet_id,
@@ -1657,11 +1667,18 @@ class WalletPrototypePayOrderService:
                 amount,
                 product_order.currency if product_order else order.currency,
                 order.expected_amount_lbc,
-                product_order.total_amount if product_order else None,
                 order.amount,
                 order.currency,
                 funding_account_ids,
                 change_account_id,
+                blocking_flag,
+                daemon_hostport,
+                self.daemon_client.timeout,
+            )
+            self._log_wallet_balance_diagnostics(
+                wallet_id=wallet_id,
+                change_account_id=change_account_id,
+                funding_account_ids=funding_account_ids,
             )
             send_result = self.daemon_client.wallet_send(
                 wallet_id=wallet_id,
@@ -1669,7 +1686,7 @@ class WalletPrototypePayOrderService:
                 addresses=[pay_to_address],
                 change_account_id=change_account_id,
                 funding_account_ids=funding_account_ids,
-                blocking=True,
+                blocking=blocking_flag,
             )
             send_ok = True
             txid = self._extract_txid(send_result)
@@ -1686,6 +1703,13 @@ class WalletPrototypePayOrderService:
                 'warning': None,
             }
         except LbryDaemonError as exc:
+            exc_message = str(exc)
+            if 'Not enough funds' in exc_message:
+                raise WalletPrototypeError(
+                    'Buyer wallet does not have enough spendable funds for this transaction. '
+                    f'required_amount={amount} wallet_id={wallet_id} '
+                    f'funding_account_ids={funding_account_ids} change_account_id={change_account_id}'
+                ) from exc
             logger.exception(
                 'wallet_prototype_pay_order daemon_error order_no=%s user_id=%s wallet_id=%s unlock_ok=%s send_ok=%s',
                 order.order_no,
@@ -1749,6 +1773,34 @@ class WalletPrototypePayOrderService:
         if isinstance(unlock_result, dict):
             return unlock_result.get('result') is True
         return False
+
+    def _log_wallet_balance_diagnostics(self, *, wallet_id: str, change_account_id: str | None, funding_account_ids: list[str] | None):
+        target_account_id = change_account_id or (funding_account_ids[0] if funding_account_ids else None)
+        try:
+            balance_payload = self.daemon_client.account_balance(wallet_id=wallet_id, account_id=target_account_id)
+        except LbryDaemonError as exc:
+            logger.warning(
+                'wallet_prototype_pay_order balance_diagnostics_failed wallet_id=%s account_id=%s error=%s',
+                wallet_id,
+                target_account_id,
+                exc,
+            )
+            return
+        balance_type = type(balance_payload).__name__
+        balance_keys = sorted(balance_payload.keys()) if isinstance(balance_payload, dict) else None
+        confirmed = balance_payload.get('confirmed') if isinstance(balance_payload, dict) else None
+        available = balance_payload.get('available') if isinstance(balance_payload, dict) else None
+        total = balance_payload.get('total') if isinstance(balance_payload, dict) else None
+        logger.info(
+            'wallet_prototype_pay_order balance_diagnostics wallet_id=%s account_id=%s payload_type=%s payload_keys=%s confirmed=%s available=%s total=%s',
+            wallet_id,
+            target_account_id,
+            balance_type,
+            balance_keys,
+            confirmed,
+            available,
+            total,
+        )
 
 
 def generate_video_thumbnail(video, time_offset: float = 1.0) -> bool:
