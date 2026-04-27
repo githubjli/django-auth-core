@@ -1245,6 +1245,11 @@ class ProductOrderService:
     def mark_settled(self, *, order: ProductOrder, txid: str, payout_address: str = '', note: str = ''):
         if order.status != ProductOrder.STATUS_COMPLETED:
             raise ValueError('Only completed orders can be settled.')
+        has_active_refund = order.refund_requests.filter(
+            status__in=[ProductRefundRequest.STATUS_REQUESTED, ProductRefundRequest.STATUS_APPROVED]
+        ).exists()
+        if has_active_refund:
+            raise ValueError('Cannot settle order with active refund request.')
         now = timezone.now()
         with transaction.atomic():
             payout, _ = SellerPayout.objects.get_or_create(
@@ -1261,7 +1266,8 @@ class ProductOrderService:
             payout.payout_address = payout_address
             payout.note = note
             payout.paid_at = now
-            payout.save(update_fields=['status', 'txid', 'payout_address', 'note', 'paid_at', 'updated_at'])
+            payout.failure_note = ''
+            payout.save(update_fields=['status', 'txid', 'payout_address', 'note', 'paid_at', 'failure_note', 'updated_at'])
             order.status = ProductOrder.STATUS_SETTLED
             order.settled_at = now
             order.save(update_fields=['status', 'settled_at', 'updated_at'])

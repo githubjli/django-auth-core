@@ -638,7 +638,7 @@ class AdminProductOrderMarkSettledAPIView(APIView):
         try:
             ProductOrderService().mark_settled(
                 order=order,
-                txid=serializer.validated_data['txid'],
+                txid=serializer.validated_data.get('txid') or '',
                 payout_address=serializer.validated_data.get('payout_address') or '',
                 note=serializer.validated_data.get('note') or '',
             )

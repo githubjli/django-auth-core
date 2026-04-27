@@ -1200,7 +1200,7 @@ class ProductOrderShipSerializer(serializers.Serializer):
 
 
 class ProductOrderMarkSettledSerializer(serializers.Serializer):
-    txid = serializers.CharField(max_length=255)
+    txid = serializers.CharField(required=False, allow_blank=True, max_length=255)
     payout_address = serializers.CharField(required=False, allow_blank=True, max_length=255)
     note = serializers.CharField(required=False, allow_blank=True)
 
