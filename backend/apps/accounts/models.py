@@ -230,6 +230,53 @@ class DramaEpisode(models.Model):
         return f'{self.series_id} - Ep {self.episode_no}: {self.title}'
 
 
+class DramaWatchProgress(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_watch_progress',
+    )
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='watch_progress',
+    )
+    episode = models.ForeignKey(
+        DramaEpisode,
+        on_delete=models.CASCADE,
+        related_name='watch_progress',
+    )
+    progress_seconds = models.PositiveIntegerField(default=0)
+    completed = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'series'], name='unique_drama_progress_per_user_series'),
+        ]
+
+
+class DramaFavorite(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_favorites',
+    )
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='favorites',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'series'], name='unique_drama_favorite_per_user_series'),
+        ]
+
+
 class VideoView(models.Model):
     video = models.ForeignKey(
         Video,
