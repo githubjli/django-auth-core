@@ -1683,6 +1683,12 @@ class WalletPrototypePayOrderService:
 
         change_account_id = (user.primary_user_address or '').strip() or None
         funding_account_ids = [change_account_id] if change_account_id else None
+        product_order = None
+        if order.order_type == PaymentOrder.TYPE_PRODUCT:
+            try:
+                product_order = order.linked_product_order
+            except ProductOrder.DoesNotExist:
+                product_order = None
         unlock_ok = False
         send_ok = False
         lock_attempted = False
