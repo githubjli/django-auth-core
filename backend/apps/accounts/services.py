@@ -1011,6 +1011,11 @@ def sign_product_qr_payload(
     currency: str,
     expires_at: str,
 ) -> str:
+    normalized_expected_amount = str(expected_amount).strip()
+    try:
+        normalized_expected_amount = format(Decimal(normalized_expected_amount).normalize(), 'f')
+    except Exception:
+        normalized_expected_amount = str(expected_amount)
     message = build_product_qr_signature_payload(
         version=version,
         payload_type=payload_type,
@@ -1018,7 +1023,7 @@ def sign_product_qr_payload(
         token_symbol=TOKEN_SYMBOL,
         order_no=order_no,
         pay_to_address=pay_to_address,
-        expected_amount=expected_amount,
+        expected_amount=normalized_expected_amount,
         currency=currency,
         expires_at=expires_at,
     )
@@ -1165,30 +1170,22 @@ class ProductOrderService:
     def build_qr_payload(self, order: ProductOrder) -> dict:
         payment_order = order.payment_order
         expires_at_iso = payment_order.expires_at.isoformat() if payment_order and payment_order.expires_at else ''
-        expected_amount = str(order.total_amount)
-        payload = {
-            'version': 1,
-            'type': 'product_payment',
-            'blockchain': BLOCKCHAIN_NAME,
-            'token_name': TOKEN_NAME,
-            'token_symbol': TOKEN_SYMBOL,
-            'peg': TOKEN_PEG,
-            'pay_to_address': (payment_order.pay_to_address if payment_order else ''),
-            'expected_amount': expected_amount,
-            'currency': order.currency,
-            'order_no': order.order_no,
-            'expires_at': expires_at_iso,
-        }
-        payload['sig'] = sign_product_qr_payload(
-            version=payload['version'],
-            payload_type=payload['type'],
-            order_no=payload['order_no'],
-            pay_to_address=payload['pay_to_address'],
-            expected_amount=payload['expected_amount'],
-            currency=payload['currency'],
-            expires_at=payload['expires_at'],
+        expected_amount = str(payment_order.expected_amount_lbc if payment_order and payment_order.expected_amount_lbc is not None else order.total_amount)
+        signature = sign_product_qr_payload(
+            version=1,
+            payload_type='product_payment',
+            order_no=order.order_no,
+            pay_to_address=(payment_order.pay_to_address if payment_order else ''),
+            expected_amount=expected_amount,
+            currency=order.currency,
+            expires_at=expires_at_iso,
         )
-        return payload
+        return {
+            'v': 1,
+            't': 'product_payment',
+            'o': order.order_no,
+            's': signature,
+        }
 
     def mark_paid(self, *, order: ProductOrder):
         now = timezone.now()

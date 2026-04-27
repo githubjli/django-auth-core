@@ -5,6 +5,8 @@ from django.utils.dateparse import parse_date
 from django.db import IntegrityError
 from django.db.models import Count, Exists, F, OuterRef, Q
 from datetime import timedelta
+import json
+import hmac
 import logging
 from asgiref.sync import async_to_sync
 from rest_framework import generics, permissions, status
@@ -69,6 +71,7 @@ from apps.accounts.serializers import (
     ProductSerializer,
     ProductOrderCreateSerializer,
     ProductOrderDetailSerializer,
+    PaymentQRResolveSerializer,
     ProductOrderMarkSettledSerializer,
     ProductOrderShipSerializer,
     ProductOrderTxHintSerializer,
@@ -99,6 +102,8 @@ from apps.accounts.services import (
     MembershipOrderService,
     ProductOrderService,
     ProductPaymentDetectionService,
+    sign_product_qr_payload,
+    verify_product_qr_signature,
     MembershipOrderPersistenceError,
     PaymentDetectionService,
     WalletPrototypeError,
@@ -413,6 +418,80 @@ class ProductOrderTxHintAPIView(APIView):
         payment_order.save(update_fields=['txid', 'updated_at'])
         verification = ProductPaymentDetectionService().verify_product_order_once(order=payment_order, txid_hint=txid)
         return Response(verification, status=status.HTTP_200_OK)
+
+
+class PaymentQRResolveAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = PaymentQRResolveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        raw_payload = (serializer.validated_data.get('payload') or '').strip()
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return Response({'detail': 'Invalid QR payload format.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(payload, dict):
+            return Response({'detail': 'Invalid QR payload format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_short_payload = {'v', 't', 'o', 's'}.issubset(payload.keys())
+        is_legacy_payload = {'version', 'type', 'order_no', 'sig'}.issubset(payload.keys())
+        if is_short_payload:
+            payload_type = str(payload.get('t') or '')
+            order_no = str(payload.get('o') or '').strip()
+            provided_sig = str(payload.get('s') or '')
+            if int(payload.get('v') or 0) != 1 or payload_type != 'product_payment' or not order_no:
+                return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif is_legacy_payload:
+            payload_type = str(payload.get('type') or '')
+            order_no = str(payload.get('order_no') or '').strip()
+            provided_sig = str(payload.get('sig') or '')
+            if int(payload.get('version') or 0) != 1 or payload_type != 'product_payment' or not order_no:
+                return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = ProductOrder.objects.select_related('payment_order').filter(order_no=order_no).first()
+        if order is None or order.payment_order is None or order.payment_order.order_type != PaymentOrder.TYPE_PRODUCT:
+            return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+        payment_order = order.payment_order
+        if payment_order.expires_at and payment_order.expires_at <= timezone.now():
+            return Response({'detail': 'Payment order has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        expires_at_iso = payment_order.expires_at.isoformat() if payment_order.expires_at else ''
+        expected_amount = str(payment_order.expected_amount_lbc if payment_order.expected_amount_lbc is not None else order.total_amount)
+        expected_sig = sign_product_qr_payload(
+            version=1,
+            payload_type='product_payment',
+            order_no=order.order_no,
+            pay_to_address=payment_order.pay_to_address or '',
+            expected_amount=expected_amount,
+            currency=order.currency,
+            expires_at=expires_at_iso,
+        )
+        if is_short_payload:
+            signature_valid = bool(provided_sig) and hmac.compare_digest(provided_sig, expected_sig)
+        else:
+            signature_valid = verify_product_qr_signature(payload) and hmac.compare_digest(str(payload.get('sig') or ''), expected_sig)
+        if not signature_valid:
+            return Response({'detail': 'Invalid QR signature.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'type': 'product_payment',
+                'order_no': order.order_no,
+                'product_title': order.product_title_snapshot,
+                'expected_amount': expected_amount,
+                'currency': order.currency,
+                'pay_to_address': payment_order.pay_to_address,
+                'expires_at': payment_order.expires_at,
+                'payment_status': payment_order.status,
+                'txid': payment_order.txid,
+                'confirmations': payment_order.confirmations,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ProductOrderMarkPaidAPIView(APIView):

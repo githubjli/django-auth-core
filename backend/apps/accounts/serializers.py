@@ -1209,6 +1209,10 @@ class ProductOrderTxHintSerializer(serializers.Serializer):
     txid = serializers.CharField(max_length=128)
 
 
+class PaymentQRResolveSerializer(serializers.Serializer):
+    payload = serializers.CharField()
+
+
 class SellerProductOrderListSerializer(serializers.ModelSerializer):
     buyer = serializers.SerializerMethodField()
     payment_summary = serializers.SerializerMethodField()
