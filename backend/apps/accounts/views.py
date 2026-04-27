@@ -5,6 +5,8 @@ from django.utils.dateparse import parse_date
 from django.db import IntegrityError
 from django.db.models import Count, Exists, F, OuterRef, Q
 from datetime import timedelta
+import json
+import hmac
 import logging
 from asgiref.sync import async_to_sync
 from rest_framework import generics, permissions, status
@@ -27,8 +29,13 @@ from apps.accounts.models import (
     MembershipPlan,
     PaymentOrder,
     Product,
+    ProductOrder,
+    ProductRefundRequest,
+    SellerPayout,
+    SellerPayoutAddress,
     SellerStore,
     StreamPaymentMethod,
+    UserShippingAddress,
     UserMembership,
     Video,
     VideoComment,
@@ -52,6 +59,7 @@ from apps.accounts.serializers import (
     MembershipPlanSerializer,
     MyMembershipSerializer,
     WalletPrototypePayOrderSerializer,
+    WalletPrototypePayProductOrderSerializer,
     LiveStreamSerializer,
     LiveStreamProductListingSerializer,
     LiveStreamProductManageCreateSerializer,
@@ -61,10 +69,22 @@ from apps.accounts.serializers import (
     EmailTokenObtainPairSerializer,
     PublicCategorySerializer,
     ProductSerializer,
+    ProductOrderCreateSerializer,
+    ProductOrderDetailSerializer,
+    PaymentQRResolveSerializer,
+    ProductOrderMarkSettledSerializer,
+    ProductOrderShipSerializer,
+    ProductOrderTxHintSerializer,
+    ProductRefundAdminActionSerializer,
+    ProductRefundRequestCreateSerializer,
+    ProductRefundRequestSerializer,
+    SellerPayoutAddressSerializer,
+    SellerProductOrderListSerializer,
     PaymentOrderCreateSerializer,
     PaymentOrderSerializer,
     RegisterSerializer,
     SellerStoreSerializer,
+    UserShippingAddressSerializer,
     StreamPaymentMethodSerializer,
     UserSerializer,
     VideoCommentCreateSerializer,
@@ -80,9 +100,14 @@ from apps.accounts.services import (
     LbryDaemonInvalidParamsError,
     LbryDaemonRpcError,
     MembershipOrderService,
+    ProductOrderService,
+    ProductPaymentDetectionService,
+    sign_product_qr_payload,
+    verify_product_qr_signature,
     MembershipOrderPersistenceError,
     PaymentDetectionService,
     WalletPrototypeError,
+    WalletPrototypeValidationError,
     WalletPrototypePayOrderService,
     WalletAddressConflictError,
     generate_video_thumbnail,
@@ -254,6 +279,451 @@ class AccountPaymentOrderListAPIView(generics.ListAPIView):
             queryset = queryset.filter(created_at__date__lte=date_to)
 
         return queryset
+
+
+class AccountShippingAddressListCreateAPIView(generics.ListCreateAPIView):
+    serializer_class = UserShippingAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return UserShippingAddress.objects.filter(user=self.request.user)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
+
+class AccountShippingAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = UserShippingAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        return UserShippingAddress.objects.filter(user=self.request.user)
+
+    def perform_destroy(self, instance):
+        was_default = instance.is_default
+        user = instance.user
+        instance.delete()
+        if was_default:
+            next_address = UserShippingAddress.objects.filter(user=user).order_by('-updated_at', '-id').first()
+            if next_address:
+                next_address.is_default = True
+                next_address.save(update_fields=['is_default', 'updated_at'])
+
+
+class ProductOrderListCreateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def get(self, request):
+        queryset = ProductOrder.objects.filter(buyer=request.user).select_related(
+            'payment_order',
+            'product',
+            'seller_store',
+            'shipment',
+            'seller_payout',
+        )
+        serializer = ProductOrderDetailSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = ProductOrderCreateSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        service = ProductOrderService()
+        try:
+            order = service.create_order(
+                buyer=request.user,
+                product=serializer.validated_data['product'],
+                quantity=serializer.validated_data['quantity'],
+                shipping_address=serializer.validated_data['shipping_address'],
+            )
+        except RuntimeError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        response_serializer = ProductOrderDetailSerializer(order)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class ProductOrderDetailAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, order_no):
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('payment_order', 'shipment', 'seller_payout'),
+            order_no=order_no,
+            buyer=request.user,
+        )
+        serializer = ProductOrderDetailSerializer(order)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class SellerProductOrderListAPIView(generics.ListAPIView):
+    serializer_class = SellerProductOrderListSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        queryset = ProductOrder.objects.select_related('buyer', 'payment_order', 'shipment', 'seller_payout').filter(
+            seller_store__owner=self.request.user
+        ).order_by('-created_at', '-id')
+        status_filter = self.request.query_params.get('status')
+        if status_filter in {choice for choice, _ in ProductOrder.STATUS_CHOICES}:
+            queryset = queryset.filter(status=status_filter)
+        date_from = parse_date(self.request.query_params.get('date_from') or '')
+        if date_from:
+            queryset = queryset.filter(created_at__date__gte=date_from)
+        date_to = parse_date(self.request.query_params.get('date_to') or '')
+        if date_to:
+            queryset = queryset.filter(created_at__date__lte=date_to)
+        search = (self.request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(Q(order_no__icontains=search) | Q(product_title_snapshot__icontains=search))
+        return queryset
+
+
+class SellerProductOrderDetailAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, order_no):
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('buyer', 'payment_order', 'shipment', 'seller_payout'),
+            order_no=order_no,
+            seller_store__owner=request.user,
+        )
+        return Response(SellerProductOrderListSerializer(order).data, status=status.HTTP_200_OK)
+
+
+class ProductOrderTxHintAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, order_no):
+        base_qs = ProductOrder.objects.select_related('payment_order')
+        if request.user.is_staff or request.user.is_superuser:
+            order = generics.get_object_or_404(base_qs, order_no=order_no)
+        else:
+            order = generics.get_object_or_404(base_qs, order_no=order_no, buyer=request.user)
+        serializer = ProductOrderTxHintSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        txid = serializer.validated_data['txid'].strip()
+        payment_order = order.payment_order
+        if payment_order is None:
+            return Response({'verified': False, 'matched': False, 'paid': False, 'status': '', 'confirmations': 0, 'txid': '', 'product_order_status': order.status}, status=status.HTTP_200_OK)
+        payment_order.txid = txid
+        payment_order.save(update_fields=['txid', 'updated_at'])
+        verification = ProductPaymentDetectionService().verify_product_order_once(order=payment_order, txid_hint=txid)
+        return Response(verification, status=status.HTTP_200_OK)
+
+
+class PaymentQRResolveAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = PaymentQRResolveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        raw_payload = (serializer.validated_data.get('payload') or '').strip()
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return Response({'detail': 'Invalid QR payload format.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(payload, dict):
+            return Response({'detail': 'Invalid QR payload format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_short_payload = {'v', 't', 'o', 's'}.issubset(payload.keys())
+        is_legacy_payload = {'version', 'type', 'order_no', 'sig'}.issubset(payload.keys())
+        if is_short_payload:
+            payload_type = str(payload.get('t') or '')
+            order_no = str(payload.get('o') or '').strip()
+            provided_sig = str(payload.get('s') or '')
+            if int(payload.get('v') or 0) != 1 or payload_type != 'product_payment' or not order_no:
+                return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif is_legacy_payload:
+            payload_type = str(payload.get('type') or '')
+            order_no = str(payload.get('order_no') or '').strip()
+            provided_sig = str(payload.get('sig') or '')
+            if int(payload.get('version') or 0) != 1 or payload_type != 'product_payment' or not order_no:
+                return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = ProductOrder.objects.select_related('payment_order').filter(order_no=order_no).first()
+        if order is None or order.payment_order is None or order.payment_order.order_type != PaymentOrder.TYPE_PRODUCT:
+            return Response({'detail': 'Unsupported QR payload type.'}, status=status.HTTP_400_BAD_REQUEST)
+        payment_order = order.payment_order
+        if payment_order.expires_at and payment_order.expires_at <= timezone.now():
+            return Response({'detail': 'Payment order has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        expires_at_iso = payment_order.expires_at.isoformat() if payment_order.expires_at else ''
+        expected_amount = str(payment_order.expected_amount_lbc if payment_order.expected_amount_lbc is not None else order.total_amount)
+        expected_sig = sign_product_qr_payload(
+            version=1,
+            payload_type='product_payment',
+            order_no=order.order_no,
+            pay_to_address=payment_order.pay_to_address or '',
+            expected_amount=expected_amount,
+            currency=order.currency,
+            expires_at=expires_at_iso,
+        )
+        if is_short_payload:
+            signature_valid = bool(provided_sig) and hmac.compare_digest(provided_sig, expected_sig)
+        else:
+            signature_valid = verify_product_qr_signature(payload) and hmac.compare_digest(str(payload.get('sig') or ''), expected_sig)
+        if not signature_valid:
+            return Response({'detail': 'Invalid QR signature.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'type': 'product_payment',
+                'order_no': order.order_no,
+                'product_title': order.product_title_snapshot,
+                'expected_amount': expected_amount,
+                'currency': order.currency,
+                'pay_to_address': payment_order.pay_to_address,
+                'expires_at': payment_order.expires_at,
+                'payment_status': payment_order.status,
+                'txid': payment_order.txid,
+                'confirmations': payment_order.confirmations,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ProductOrderMarkPaidAPIView(APIView):
+    permission_classes = [IsStaffOrSuperuser]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(ProductOrder.objects.select_related('payment_order'), order_no=order_no)
+        try:
+            ProductOrderService().mark_paid(order=order)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
+
+
+class SellerProductOrderShipAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('seller_store', 'shipment'),
+            order_no=order_no,
+            seller_store__owner=request.user,
+        )
+        serializer = ProductOrderShipSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            ProductOrderService().ship_order(
+                order=order,
+                created_by=request.user,
+                carrier=serializer.validated_data['carrier'],
+                tracking_number=serializer.validated_data['tracking_number'],
+                tracking_url=serializer.validated_data.get('tracking_url') or '',
+                shipped_note=serializer.validated_data.get('shipped_note') or '',
+            )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
+
+
+class ProductOrderConfirmReceivedAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('seller_payout'),
+            order_no=order_no,
+            buyer=request.user,
+        )
+        try:
+            ProductOrderService().confirm_received(order=order)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
+
+
+class SellerPayoutAddressListCreateAPIView(generics.ListCreateAPIView):
+    serializer_class = SellerPayoutAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return SellerPayoutAddress.objects.filter(seller_store__owner=self.request.user, is_active=True)
+
+    def perform_create(self, serializer):
+        store = generics.get_object_or_404(SellerStore, owner=self.request.user, is_active=True)
+        is_first = not SellerPayoutAddress.objects.filter(seller_store=store, is_active=True).exists()
+        is_default = serializer.validated_data.get('is_default', False) or is_first
+        if is_default:
+            SellerPayoutAddress.objects.filter(seller_store=store, is_default=True).update(is_default=False)
+        serializer.save(seller_store=store, is_default=is_default)
+
+
+class SellerPayoutAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = SellerPayoutAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        return SellerPayoutAddress.objects.filter(seller_store__owner=self.request.user)
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        is_default = serializer.validated_data.get('is_default')
+        if is_default:
+            SellerPayoutAddress.objects.filter(seller_store=instance.seller_store, is_default=True).exclude(id=instance.id).update(is_default=False)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        if instance.is_default:
+            instance.is_default = False
+        instance.save(update_fields=['is_active', 'is_default', 'updated_at'])
+
+
+class ProductRefundRequestListCreateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def get(self, request, order_no):
+        order = generics.get_object_or_404(ProductOrder, order_no=order_no, buyer=request.user)
+        queryset = ProductRefundRequest.objects.filter(product_order=order)
+        return Response(ProductRefundRequestSerializer(queryset, many=True).data, status=status.HTTP_200_OK)
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(ProductOrder, order_no=order_no, buyer=request.user)
+        if order.status not in {ProductOrder.STATUS_PAID, ProductOrder.STATUS_SHIPPING, ProductOrder.STATUS_COMPLETED}:
+            return Response({'detail': 'Refund request not allowed for current order status.'}, status=status.HTTP_400_BAD_REQUEST)
+        active_exists = ProductRefundRequest.objects.filter(
+            product_order=order,
+            status__in=[ProductRefundRequest.STATUS_REQUESTED, ProductRefundRequest.STATUS_APPROVED],
+        ).exists()
+        if active_exists:
+            return Response({'detail': 'Active refund request already exists for this order.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = ProductRefundRequestCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        requested_amount = serializer.validated_data.get('requested_amount') or order.total_amount
+        refund = ProductRefundRequest.objects.create(
+            product_order=order,
+            requester=request.user,
+            reason=serializer.validated_data['reason'],
+            requested_amount=requested_amount,
+            currency=order.currency,
+        )
+        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_201_CREATED)
+
+
+class SellerRefundRequestListAPIView(generics.ListAPIView):
+    serializer_class = ProductRefundRequestSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        queryset = ProductRefundRequest.objects.select_related('product_order').filter(
+            product_order__seller_store__owner=self.request.user
+        ).order_by('-created_at', '-id')
+        status_filter = self.request.query_params.get('status')
+        if status_filter in {choice for choice, _ in ProductRefundRequest.STATUS_CHOICES}:
+            queryset = queryset.filter(status=status_filter)
+        date_from = parse_date(self.request.query_params.get('date_from') or '')
+        if date_from:
+            queryset = queryset.filter(created_at__date__gte=date_from)
+        date_to = parse_date(self.request.query_params.get('date_to') or '')
+        if date_to:
+            queryset = queryset.filter(created_at__date__lte=date_to)
+        return queryset
+
+
+class AdminRefundRequestListAPIView(generics.ListAPIView):
+    serializer_class = ProductRefundRequestSerializer
+    permission_classes = [IsStaffOrSuperuser]
+    pagination_class = None
+    queryset = ProductRefundRequest.objects.select_related('product_order', 'requester').order_by('-created_at', '-id')
+
+
+class AdminRefundRequestApproveAPIView(APIView):
+    permission_classes = [IsStaffOrSuperuser]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, pk):
+        refund = generics.get_object_or_404(ProductRefundRequest, pk=pk)
+        if refund.status != ProductRefundRequest.STATUS_REQUESTED:
+            return Response({'detail': 'Only requested refunds can be approved.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = ProductRefundAdminActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        refund.status = ProductRefundRequest.STATUS_APPROVED
+        refund.admin_note = serializer.validated_data.get('admin_note') or ''
+        refund.resolved_at = None
+        refund.save(update_fields=['status', 'admin_note', 'resolved_at', 'updated_at'])
+        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
+
+
+class AdminRefundRequestRejectAPIView(APIView):
+    permission_classes = [IsStaffOrSuperuser]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, pk):
+        refund = generics.get_object_or_404(ProductRefundRequest, pk=pk)
+        if refund.status not in {ProductRefundRequest.STATUS_REQUESTED, ProductRefundRequest.STATUS_APPROVED}:
+            return Response({'detail': 'Only requested/approved refunds can be rejected.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = ProductRefundAdminActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        refund.status = ProductRefundRequest.STATUS_REJECTED
+        refund.admin_note = serializer.validated_data.get('admin_note') or ''
+        refund.resolved_at = timezone.now()
+        refund.save(update_fields=['status', 'admin_note', 'resolved_at', 'updated_at'])
+        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
+
+
+class AdminRefundRequestMarkRefundedAPIView(APIView):
+    permission_classes = [IsStaffOrSuperuser]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, pk):
+        refund = generics.get_object_or_404(ProductRefundRequest.objects.select_related('product_order'), pk=pk)
+        if refund.status not in {ProductRefundRequest.STATUS_REQUESTED, ProductRefundRequest.STATUS_APPROVED}:
+            return Response({'detail': 'Only requested/approved refunds can be marked refunded.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = ProductRefundAdminActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = refund.product_order
+        payout = getattr(order, 'seller_payout', None)
+        if payout and payout.status == SellerPayout.STATUS_PENDING:
+            payout.status = SellerPayout.STATUS_FAILED
+            payout.failure_note = 'refund_marked'
+            payout.save(update_fields=['status', 'failure_note', 'updated_at'])
+        refund.status = ProductRefundRequest.STATUS_REFUNDED
+        refund.admin_note = serializer.validated_data.get('admin_note') or ''
+        refund.refund_txid = serializer.validated_data.get('refund_txid') or ''
+        refund.resolved_at = timezone.now()
+        refund.save(update_fields=['status', 'admin_note', 'refund_txid', 'resolved_at', 'updated_at'])
+        return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
+
+
+class AdminProductOrderMarkSettledAPIView(APIView):
+    permission_classes = [IsStaffOrSuperuser]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(ProductOrder.objects.select_related('seller_payout'), order_no=order_no)
+        serializer = ProductOrderMarkSettledSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            ProductOrderService().mark_settled(
+                order=order,
+                txid=serializer.validated_data.get('txid') or '',
+                payout_address=serializer.validated_data.get('payout_address') or '',
+                note=serializer.validated_data.get('note') or '',
+            )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
 
 
 class AdminUserListAPIView(generics.ListAPIView):
@@ -1493,14 +1963,25 @@ class WalletPrototypePayOrderAPIView(APIView):
 
         service = WalletPrototypePayOrderService()
         try:
-            result = service.pay_order(
+            logger.info(
+                'wallet_prototype_membership_submit order_no=%s order_type=%s wallet_id=%s amount=%s pay_to_address=%s method=%s',
+                order.order_no,
+                order.order_type,
+                wallet_id,
+                order.expected_amount_lbc,
+                order.pay_to_address,
+                'WalletPrototypePayOrderService.pay_payment_order',
+            )
+            result = service.pay_payment_order(
                 user=request.user,
                 order=order,
                 wallet_id=wallet_id,
                 password=serializer.validated_data['password'],
             )
-        except WalletPrototypeError:
-            return Response({'detail': 'Wallet prototype payment failed.'}, status=status.HTTP_502_BAD_GATEWAY)
+        except WalletPrototypeValidationError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except WalletPrototypeError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
         verification = None
         txid_hint = (result.get('txid') or '').strip()
@@ -1511,6 +1992,84 @@ class WalletPrototypePayOrderAPIView(APIView):
                 verification = {'verified': False, 'message': 'verification_attempt_failed'}
         result['verification'] = verification
         return Response(result, status=status.HTTP_200_OK)
+
+
+class WalletPrototypePayProductOrderAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = WalletPrototypePayProductOrderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('payment_order'),
+            order_no=serializer.validated_data['order_no'],
+            buyer=request.user,
+        )
+        if order.status != ProductOrder.STATUS_PENDING_PAYMENT:
+            return Response({'detail': 'Product order is not pending payment.'}, status=status.HTTP_409_CONFLICT)
+        payment_order = order.payment_order
+        if payment_order is None or payment_order.order_type != PaymentOrder.TYPE_PRODUCT:
+            return Response({'detail': 'Invalid product payment order linkage.'}, status=status.HTTP_400_BAD_REQUEST)
+        existing_txid = (payment_order.txid or '').strip()
+        if existing_txid:
+            return Response(
+                {
+                    'detail': 'Payment already submitted and is waiting for confirmation.',
+                    'order_no': order.order_no,
+                    'txid': existing_txid,
+                    'payment_order_status': payment_order.status,
+                    'product_order_status': order.status,
+                    'confirmations': payment_order.confirmations,
+                },
+                status=status.HTTP_200_OK,
+            )
+        if not (payment_order.pay_to_address or '').strip():
+            return Response({'detail': 'Product payment order is missing pay_to_address.'}, status=status.HTTP_400_BAD_REQUEST)
+        if payment_order.expected_amount_lbc is None or payment_order.expected_amount_lbc <= 0:
+            return Response({'detail': 'Product payment order is missing expected_amount_lbc.'}, status=status.HTTP_400_BAD_REQUEST)
+        wallet_id = (serializer.validated_data.get('wallet_id') or request.user.linked_wallet_id or '').strip()
+        if not wallet_id:
+            return Response({'detail': 'Missing linked wallet.'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.linked_wallet_id and wallet_id != request.user.linked_wallet_id:
+            return Response({'detail': 'Wallet mismatch for user.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        service = WalletPrototypePayOrderService()
+        try:
+            send_amount = payment_order.expected_amount_lbc
+            logger.info(
+                'wallet_prototype_product_submit order_no=%s order_type=%s wallet_id=%s amount=%s pay_to_address=%s method=%s',
+                payment_order.order_no,
+                payment_order.order_type,
+                wallet_id,
+                send_amount,
+                payment_order.pay_to_address,
+                'WalletPrototypePayOrderService.pay_payment_order',
+            )
+            result = service.pay_payment_order(
+                user=request.user,
+                order=payment_order,
+                wallet_id=wallet_id,
+                password=serializer.validated_data['password'],
+                amount_override=send_amount,
+            )
+        except WalletPrototypeValidationError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except WalletPrototypeError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response(
+            {
+                'order_no': order.order_no,
+                'txid': result.get('txid', ''),
+                'detail': result.get('detail', 'Payment submitted. Waiting for on-chain confirmation.'),
+                'payment_order_status': result.get('payment_order_status', payment_order.status),
+                'product_order_status': result.get('product_order_status', order.status),
+                'confirmations': result.get('confirmations', payment_order.confirmations),
+                'wallet_relocked': bool(result.get('wallet_relocked')),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class MembershipMeAPIView(APIView):
