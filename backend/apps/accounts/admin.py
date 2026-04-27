@@ -8,6 +8,8 @@ from apps.accounts.models import (
     ChainReceipt,
     ChannelSubscription,
     CommentLike,
+    DramaEpisode,
+    DramaSeries,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
@@ -129,6 +131,49 @@ class VideoAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('like_count', 'comment_count', 'created_at', 'updated_at')
     autocomplete_fields = ('owner', 'category')
+
+
+@admin.register(DramaSeries)
+class DramaSeriesAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'title',
+        'category',
+        'status',
+        'is_active',
+        'total_episodes',
+        'view_count',
+        'favorite_count',
+        'created_at',
+        'updated_at',
+    )
+    list_filter = ('status', 'is_active', 'category', 'created_at')
+    search_fields = ('title', 'description', 'category__name', 'category__slug')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('view_count', 'favorite_count', 'created_at', 'updated_at')
+    autocomplete_fields = ('category',)
+
+
+@admin.register(DramaEpisode)
+class DramaEpisodeAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'series',
+        'episode_no',
+        'title',
+        'is_free',
+        'unlock_type',
+        'meow_points_price',
+        'sort_order',
+        'is_active',
+        'created_at',
+        'updated_at',
+    )
+    list_filter = ('is_active', 'is_free', 'unlock_type', 'created_at')
+    search_fields = ('title', 'series__title')
+    ordering = ('series', 'sort_order', 'episode_no', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('series',)
 
 
 @admin.register(VideoLike)

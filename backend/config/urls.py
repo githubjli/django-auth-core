@@ -18,6 +18,7 @@ urlpatterns = [
     path('api/wallet-prototype/', include('apps.accounts.wallet_prototype_urls')),
     path('api/', include('apps.accounts.product_order_urls')),
     path('api/live/', include('apps.accounts.live_urls')),
+    path('api/dramas/', include('apps.accounts.drama_urls')),
     path('api/public/categories/', include('apps.accounts.public_category_urls')),
     path('api/public/videos/', include('apps.accounts.public_video_urls')),
 ]

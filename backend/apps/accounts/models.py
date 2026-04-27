@@ -153,6 +153,83 @@ class Video(models.Model):
         return self.category.slug
 
 
+class DramaSeries(models.Model):
+    STATUS_DRAFT = 'draft'
+    STATUS_PUBLISHED = 'published'
+    STATUS_ARCHIVED = 'archived'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_PUBLISHED, 'Published'),
+        (STATUS_ARCHIVED, 'Archived'),
+    ]
+
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    cover = models.FileField(upload_to='dramas/covers/', blank=True)
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='drama_series',
+    )
+    tags = models.JSONField(default=list, blank=True)
+    total_episodes = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PUBLISHED)
+    is_active = models.BooleanField(default=True)
+    view_count = models.PositiveIntegerField(default=0)
+    favorite_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class DramaEpisode(models.Model):
+    UNLOCK_FREE = 'free'
+    UNLOCK_MEOW_POINTS = 'meow_points'
+    UNLOCK_MEMBERSHIP = 'membership'
+    UNLOCK_AD_REWARD = 'ad_reward'
+    UNLOCK_TYPE_CHOICES = [
+        (UNLOCK_FREE, 'Free'),
+        (UNLOCK_MEOW_POINTS, 'Meow Points'),
+        (UNLOCK_MEMBERSHIP, 'Membership'),
+        (UNLOCK_AD_REWARD, 'Ad Reward'),
+    ]
+
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='episodes',
+    )
+    episode_no = models.PositiveIntegerField()
+    title = models.CharField(max_length=255)
+    video_file = models.FileField(upload_to='dramas/videos/', blank=True)
+    video_url = models.URLField(blank=True)
+    hls_url = models.URLField(blank=True)
+    duration_seconds = models.PositiveIntegerField(default=0)
+    is_free = models.BooleanField(default=False)
+    unlock_type = models.CharField(max_length=20, choices=UNLOCK_TYPE_CHOICES, default=UNLOCK_MEOW_POINTS)
+    meow_points_price = models.PositiveIntegerField(default=0)
+    sort_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'episode_no', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['series', 'episode_no'], name='unique_drama_episode_no_per_series'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.series_id} - Ep {self.episode_no}: {self.title}'
+
+
 class VideoView(models.Model):
     video = models.ForeignKey(
         Video,
