@@ -15,6 +15,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import F
@@ -25,6 +26,8 @@ from apps.accounts.models import (
     ChainReceipt,
     LiveStream,
     MembershipPlan,
+    MeowPointLedger,
+    MeowPointWallet,
     OrderPayment,
     PaymentOrder,
     Product,
@@ -1952,3 +1955,87 @@ def _extract_thumbnail_with_ffmpeg(video, time_offset: float):
                 return ContentFile(output_path.read_bytes())
 
     return None
+
+
+class MeowPointService:
+    @staticmethod
+    def get_or_create_wallet(user):
+        wallet, _created = MeowPointWallet.objects.get_or_create(user=user)
+        return wallet
+
+    @staticmethod
+    def add_points(
+        *,
+        user,
+        amount: int,
+        entry_type: str,
+        target_type: str = '',
+        target_id: int | None = None,
+        payment_order: PaymentOrder | None = None,
+        note: str = '',
+        purchased_amount: int = 0,
+        bonus_amount: int = 0,
+    ):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        with transaction.atomic():
+            wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=user)[0]
+            balance_before = wallet.balance
+            balance_after = balance_before + amount
+
+            wallet.balance = balance_after
+            wallet.total_earned += amount
+            wallet.total_purchased += max(int(purchased_amount), 0)
+            wallet.total_bonus += max(int(bonus_amount), 0)
+            wallet.save(update_fields=['balance', 'total_earned', 'total_purchased', 'total_bonus', 'updated_at'])
+
+            ledger = MeowPointLedger.objects.create(
+                user=user,
+                entry_type=entry_type,
+                amount=amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type=target_type,
+                target_id=target_id,
+                payment_order=payment_order,
+                note=note,
+            )
+        return wallet, ledger
+
+    @staticmethod
+    def spend_points(
+        *,
+        user,
+        amount: int,
+        entry_type: str = MeowPointLedger.TYPE_SPEND,
+        target_type: str = '',
+        target_id: int | None = None,
+        payment_order: PaymentOrder | None = None,
+        note: str = '',
+    ):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        with transaction.atomic():
+            wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if wallet.balance < amount:
+                raise ValidationError('Insufficient Meow Points balance.')
+
+            balance_before = wallet.balance
+            balance_after = balance_before - amount
+
+            wallet.balance = balance_after
+            wallet.total_spent += amount
+            wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+
+            ledger = MeowPointLedger.objects.create(
+                user=user,
+                entry_type=entry_type,
+                amount=-amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type=target_type,
+                target_id=target_id,
+                payment_order=payment_order,
+                note=note,
+            )
+        return wallet, ledger

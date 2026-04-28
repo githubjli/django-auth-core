@@ -17,6 +17,9 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStreamProduct,
     MembershipPlan,
+    MeowPointLedger,
+    MeowPointPackage,
+    MeowPointWallet,
     OrderPayment,
     PaymentOrder,
     StreamPaymentMethod,
@@ -196,6 +199,34 @@ class DramaFavoriteAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at',)
     autocomplete_fields = ('user', 'series')
+
+
+@admin.register(MeowPointWallet)
+class MeowPointWalletAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'balance', 'total_earned', 'total_spent', 'updated_at')
+    search_fields = ('user__email',)
+    ordering = ('-updated_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('user',)
+
+
+@admin.register(MeowPointPackage)
+class MeowPointPackageAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'points_amount', 'bonus_points', 'price_amount', 'price_currency', 'status')
+    list_filter = ('status', 'price_currency')
+    search_fields = ('code', 'name', 'description')
+    ordering = ('sort_order', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(MeowPointLedger)
+class MeowPointLedgerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'entry_type', 'amount', 'balance_before', 'balance_after', 'created_at')
+    list_filter = ('entry_type', 'created_at')
+    search_fields = ('user__email', 'target_type', 'note')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('user', 'payment_order')
 
 
 @admin.register(VideoLike)

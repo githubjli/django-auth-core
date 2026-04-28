@@ -1194,3 +1194,86 @@ class BillingSubscription(models.Model):
 
     class Meta:
         ordering = ['-created_at', '-id']
+
+
+class MeowPointWallet(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_point_wallet',
+    )
+    balance = models.IntegerField(default=0)
+    total_earned = models.PositiveIntegerField(default=0)
+    total_spent = models.PositiveIntegerField(default=0)
+    total_purchased = models.PositiveIntegerField(default=0)
+    total_bonus = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-id']
+
+
+class MeowPointPackage(models.Model):
+    STATUS_ACTIVE = 'active'
+    STATUS_INACTIVE = 'inactive'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_INACTIVE, 'Inactive'),
+    ]
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255)
+    points_amount = models.PositiveIntegerField(default=0)
+    bonus_points = models.PositiveIntegerField(default=0)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=16, default=TOKEN_SYMBOL)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    sort_order = models.PositiveIntegerField(default=0)
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+
+class MeowPointLedger(models.Model):
+    TYPE_PURCHASE = 'purchase'
+    TYPE_BONUS = 'bonus'
+    TYPE_REWARD = 'reward'
+    TYPE_SPEND = 'spend'
+    TYPE_REFUND = 'refund'
+    TYPE_ADMIN_ADJUST = 'admin_adjust'
+    ENTRY_TYPE_CHOICES = [
+        (TYPE_PURCHASE, 'Purchase'),
+        (TYPE_BONUS, 'Bonus'),
+        (TYPE_REWARD, 'Reward'),
+        (TYPE_SPEND, 'Spend'),
+        (TYPE_REFUND, 'Refund'),
+        (TYPE_ADMIN_ADJUST, 'Admin Adjust'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_point_ledger_entries',
+    )
+    entry_type = models.CharField(max_length=24, choices=ENTRY_TYPE_CHOICES)
+    amount = models.IntegerField()
+    balance_before = models.IntegerField()
+    balance_after = models.IntegerField()
+    target_type = models.CharField(max_length=64, blank=True, default='')
+    target_id = models.PositiveBigIntegerField(null=True, blank=True)
+    payment_order = models.ForeignKey(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='meow_point_ledger_entries',
+    )
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
