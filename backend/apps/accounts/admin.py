@@ -9,12 +9,21 @@ from apps.accounts.models import (
     ChannelSubscription,
     CommentLike,
     DramaEpisode,
+    DramaFavorite,
+    DramaUnlock,
     DramaSeries,
+    DramaWatchProgress,
+    Gift,
+    GiftTransaction,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
     LiveStreamProduct,
     MembershipPlan,
+    MeowPointLedger,
+    MeowPointPackage,
+    MeowPointPurchase,
+    MeowPointWallet,
     OrderPayment,
     PaymentOrder,
     StreamPaymentMethod,
@@ -174,6 +183,92 @@ class DramaEpisodeAdmin(admin.ModelAdmin):
     ordering = ('series', 'sort_order', 'episode_no', 'id')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('series',)
+
+
+@admin.register(DramaWatchProgress)
+class DramaWatchProgressAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'series', 'episode', 'progress_seconds', 'completed', 'updated_at')
+    list_filter = ('completed', 'updated_at')
+    search_fields = ('user__email', 'series__title', 'episode__title')
+    ordering = ('-updated_at', '-id')
+    readonly_fields = ('updated_at',)
+    autocomplete_fields = ('user', 'series', 'episode')
+
+
+@admin.register(DramaFavorite)
+class DramaFavoriteAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'series', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('user__email', 'series__title')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('user', 'series')
+
+
+@admin.register(DramaUnlock)
+class DramaUnlockAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'series', 'episode', 'source', 'points_amount', 'unlocked_at')
+    list_filter = ('source', 'unlocked_at')
+    search_fields = ('user__email', 'series__title', 'episode__title')
+    ordering = ('-unlocked_at', '-id')
+    readonly_fields = ('unlocked_at',)
+    autocomplete_fields = ('user', 'series', 'episode', 'ledger_entry')
+
+
+@admin.register(MeowPointWallet)
+class MeowPointWalletAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'balance', 'total_earned', 'total_spent', 'updated_at')
+    search_fields = ('user__email',)
+    ordering = ('-updated_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('user',)
+
+
+@admin.register(MeowPointPackage)
+class MeowPointPackageAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'points_amount', 'bonus_points', 'price_amount', 'price_currency', 'status')
+    list_filter = ('status', 'price_currency')
+    search_fields = ('code', 'name', 'description')
+    ordering = ('sort_order', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(MeowPointLedger)
+class MeowPointLedgerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'entry_type', 'amount', 'balance_before', 'balance_after', 'created_at')
+    list_filter = ('entry_type', 'created_at')
+    search_fields = ('user__email', 'target_type', 'note')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('user', 'payment_order')
+
+
+@admin.register(MeowPointPurchase)
+class MeowPointPurchaseAdmin(admin.ModelAdmin):
+    list_display = ('id', 'order_no', 'user', 'package_code_snapshot', 'total_points', 'price_amount', 'status', 'created_at')
+    list_filter = ('status', 'price_currency', 'created_at')
+    search_fields = ('order_no', 'user__email', 'package_code_snapshot', 'package_name_snapshot')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at', 'updated_at', 'paid_at', 'credited_at')
+    autocomplete_fields = ('user', 'package', 'payment_order')
+
+
+@admin.register(Gift)
+class GiftAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'points_price', 'is_active', 'sort_order')
+    list_filter = ('is_active',)
+    search_fields = ('code', 'name')
+    ordering = ('sort_order', 'id')
+
+
+@admin.register(GiftTransaction)
+class GiftTransactionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'sender', 'receiver', 'stream', 'gift_name_snapshot', 'quantity', 'total_points', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('sender__email', 'receiver__email', 'gift_name_snapshot')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('sender', 'receiver', 'stream', 'gift', 'ledger_entry')
 
 
 @admin.register(VideoLike)

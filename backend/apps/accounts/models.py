@@ -230,6 +230,100 @@ class DramaEpisode(models.Model):
         return f'{self.series_id} - Ep {self.episode_no}: {self.title}'
 
 
+class DramaWatchProgress(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_watch_progress',
+    )
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='watch_progress',
+    )
+    episode = models.ForeignKey(
+        DramaEpisode,
+        on_delete=models.CASCADE,
+        related_name='watch_progress',
+    )
+    progress_seconds = models.PositiveIntegerField(default=0)
+    completed = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'series'], name='unique_drama_progress_per_user_series'),
+        ]
+
+
+class DramaFavorite(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_favorites',
+    )
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='favorites',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'series'], name='unique_drama_favorite_per_user_series'),
+        ]
+
+
+class DramaUnlock(models.Model):
+    SOURCE_MEOW_POINTS = 'meow_points'
+    SOURCE_MEMBERSHIP = 'membership'
+    SOURCE_FREE = 'free'
+    SOURCE_ADMIN = 'admin'
+    SOURCE_AD_REWARD = 'ad_reward'
+    SOURCE_CHOICES = [
+        (SOURCE_MEOW_POINTS, 'Meow Points'),
+        (SOURCE_MEMBERSHIP, 'Membership'),
+        (SOURCE_FREE, 'Free'),
+        (SOURCE_ADMIN, 'Admin'),
+        (SOURCE_AD_REWARD, 'Ad Reward'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_unlocks',
+    )
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='unlocks',
+    )
+    episode = models.ForeignKey(
+        DramaEpisode,
+        on_delete=models.CASCADE,
+        related_name='unlocks',
+    )
+    source = models.CharField(max_length=24, choices=SOURCE_CHOICES, default=SOURCE_MEOW_POINTS)
+    points_amount = models.PositiveIntegerField(default=0)
+    ledger_entry = models.OneToOneField(
+        'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='drama_unlock',
+    )
+    unlocked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-unlocked_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'episode'], name='unique_drama_unlock_per_user_episode'),
+        ]
+
+
 class VideoView(models.Model):
     video = models.ForeignKey(
         Video,
@@ -741,6 +835,61 @@ class LiveChatMessage(models.Model):
         ordering = ['id']
 
 
+class Gift(models.Model):
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255)
+    icon = models.FileField(upload_to='gifts/icons/', blank=True)
+    animation = models.FileField(upload_to='gifts/animations/', blank=True)
+    points_price = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+
+class GiftTransaction(models.Model):
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='gift_transactions_sent',
+    )
+    receiver = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='gift_transactions_received',
+    )
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transactions',
+    )
+    gift = models.ForeignKey(
+        Gift,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='transactions',
+    )
+    gift_name_snapshot = models.CharField(max_length=255, blank=True, default='')
+    points_price_snapshot = models.PositiveIntegerField(default=0)
+    quantity = models.PositiveIntegerField(default=1)
+    total_points = models.PositiveIntegerField(default=0)
+    ledger_entry = models.OneToOneField(
+        'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transaction',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
 class StreamPaymentMethod(models.Model):
     TYPE_WATCH_QR = 'watch_qr'
     TYPE_PAY_QR = 'pay_qr'
@@ -777,11 +926,13 @@ class PaymentOrder(models.Model):
     TYPE_PRODUCT = 'product'
     TYPE_PAID_PROGRAM = 'paid_program'
     TYPE_MEMBERSHIP = 'membership'
+    TYPE_MEOW_POINTS_RECHARGE = 'meow_points_recharge'
     ORDER_TYPE_CHOICES = [
         (TYPE_TIP, 'Tip'),
         (TYPE_PRODUCT, 'Product'),
         (TYPE_PAID_PROGRAM, 'Paid Program'),
         (TYPE_MEMBERSHIP, 'Membership'),
+        (TYPE_MEOW_POINTS_RECHARGE, 'Meow Points Recharge'),
     ]
 
     STATUS_PENDING = 'pending'
@@ -1142,6 +1293,140 @@ class BillingSubscription(models.Model):
     started_at = models.DateTimeField(auto_now_add=True)
     current_period_end = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class MeowPointWallet(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_point_wallet',
+    )
+    balance = models.IntegerField(default=0)
+    total_earned = models.PositiveIntegerField(default=0)
+    total_spent = models.PositiveIntegerField(default=0)
+    total_purchased = models.PositiveIntegerField(default=0)
+    total_bonus = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-id']
+
+
+class MeowPointPackage(models.Model):
+    STATUS_ACTIVE = 'active'
+    STATUS_INACTIVE = 'inactive'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_INACTIVE, 'Inactive'),
+    ]
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255)
+    points_amount = models.PositiveIntegerField(default=0)
+    bonus_points = models.PositiveIntegerField(default=0)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=16, default=TOKEN_SYMBOL)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    sort_order = models.PositiveIntegerField(default=0)
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+
+class MeowPointLedger(models.Model):
+    TYPE_PURCHASE = 'purchase'
+    TYPE_BONUS = 'bonus'
+    TYPE_REWARD = 'reward'
+    TYPE_SPEND = 'spend'
+    TYPE_REFUND = 'refund'
+    TYPE_ADMIN_ADJUST = 'admin_adjust'
+    ENTRY_TYPE_CHOICES = [
+        (TYPE_PURCHASE, 'Purchase'),
+        (TYPE_BONUS, 'Bonus'),
+        (TYPE_REWARD, 'Reward'),
+        (TYPE_SPEND, 'Spend'),
+        (TYPE_REFUND, 'Refund'),
+        (TYPE_ADMIN_ADJUST, 'Admin Adjust'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_point_ledger_entries',
+    )
+    entry_type = models.CharField(max_length=24, choices=ENTRY_TYPE_CHOICES)
+    amount = models.IntegerField()
+    balance_before = models.IntegerField()
+    balance_after = models.IntegerField()
+    target_type = models.CharField(max_length=64, blank=True, default='')
+    target_id = models.PositiveBigIntegerField(null=True, blank=True)
+    payment_order = models.ForeignKey(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='meow_point_ledger_entries',
+    )
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class MeowPointPurchase(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_EXPIRED, 'Expired'),
+        (STATUS_CANCELLED, 'Cancelled'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_point_purchases',
+    )
+    package = models.ForeignKey(
+        MeowPointPackage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='purchases',
+    )
+    payment_order = models.OneToOneField(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='meow_point_purchase',
+    )
+    order_no = models.CharField(max_length=64, unique=True)
+    package_code_snapshot = models.CharField(max_length=64, blank=True, default='')
+    package_name_snapshot = models.CharField(max_length=255, blank=True, default='')
+    points_amount = models.PositiveIntegerField(default=0)
+    bonus_points = models.PositiveIntegerField(default=0)
+    total_points = models.PositiveIntegerField(default=0)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=16, default=TOKEN_SYMBOL)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    credited_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
