@@ -1538,12 +1538,15 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
 
     def filter_videos(self, queryset):
         category = self.request.query_params.get('category')
+        access_type = self.request.query_params.get('access_type')
         search = self.request.query_params.get('search')
         ordering = self.request.query_params.get('ordering')
 
         category = LEGACY_CATEGORY_SLUG_ALIASES.get(category, category)
         if category:
             queryset = queryset.filter(category__slug=category)
+        if access_type:
+            queryset = queryset.filter(access_type=access_type)
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
         if ordering in {'created_at', '-created_at'}:
@@ -1601,12 +1604,15 @@ class PublicVideoListAPIView(generics.ListAPIView):
             self.request,
         )
         category = self.request.query_params.get('category')
+        access_type = self.request.query_params.get('access_type')
         search = self.request.query_params.get('search')
         ordering = self.request.query_params.get('ordering')
 
         category = LEGACY_CATEGORY_SLUG_ALIASES.get(category, category)
         if category:
             queryset = queryset.filter(category__slug=category)
+        if access_type:
+            queryset = queryset.filter(access_type=access_type)
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
         if ordering in {'created_at', '-created_at'}:
