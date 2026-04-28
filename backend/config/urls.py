@@ -16,6 +16,8 @@ urlpatterns = [
     path('api/billing/', include('apps.accounts.billing_urls')),
     path('api/membership/', include('apps.accounts.membership_urls')),
     path('api/wallet-prototype/', include('apps.accounts.wallet_prototype_urls')),
+    path('api/meow-points/', include('apps.accounts.meow_points_urls')),
+    path('api/gifts/', include('apps.accounts.gift_urls')),
     path('api/', include('apps.accounts.product_order_urls')),
     path('api/live/', include('apps.accounts.live_urls')),
     path('api/dramas/', include('apps.accounts.drama_urls')),

@@ -3,7 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import DramaEpisode, DramaSeries
+from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress, User
 
 
 class DramaReadOnlyAPITestCase(APITestCase):
@@ -124,3 +124,148 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertFalse(response.data['is_unlocked'])
         self.assertIsNone(response.data['video_url'])
         self.assertIsNone(response.data['hls_url'])
+
+
+class DramaPhase2APITestCase(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email='viewer@example.com', password='pass1234')
+        self.other_user = User.objects.create_user(email='other@example.com', password='pass1234')
+        self.series = DramaSeries.objects.create(
+            title='Bangkok Hearts',
+            description='A fast-paced city romance.',
+            total_episodes=2,
+            status=DramaSeries.STATUS_PUBLISHED,
+            is_active=True,
+            favorite_count=0,
+        )
+        self.episode_1 = DramaEpisode.objects.create(
+            series=self.series,
+            episode_no=1,
+            title='Episode 1',
+            duration_seconds=95,
+            is_free=True,
+            unlock_type=DramaEpisode.UNLOCK_FREE,
+            meow_points_price=0,
+            sort_order=1,
+            is_active=True,
+        )
+        self.episode_2 = DramaEpisode.objects.create(
+            series=self.series,
+            episode_no=2,
+            title='Episode 2',
+            duration_seconds=99,
+            is_free=False,
+            unlock_type=DramaEpisode.UNLOCK_MEOW_POINTS,
+            meow_points_price=30,
+            sort_order=2,
+            is_active=True,
+        )
+
+    def test_save_progress(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse('drama-progress-upsert', args=[self.series.id]),
+            {'episode_id': self.episode_1.id, 'progress_seconds': 85, 'completed': False},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['series_id'], self.series.id)
+        self.assertEqual(response.data['episode_id'], self.episode_1.id)
+        self.assertEqual(response.data['episode_no'], self.episode_1.episode_no)
+        self.assertEqual(response.data['progress_seconds'], 85)
+        self.assertFalse(response.data['completed'])
+
+    def test_update_progress_idempotently(self):
+        DramaWatchProgress.objects.create(
+            user=self.user,
+            series=self.series,
+            episode=self.episode_1,
+            progress_seconds=20,
+            completed=False,
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse('drama-progress-upsert', args=[self.series.id]),
+            {'episode_id': self.episode_2.id, 'progress_seconds': 50, 'completed': True},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(DramaWatchProgress.objects.filter(user=self.user, series=self.series).count(), 1)
+        progress = DramaWatchProgress.objects.get(user=self.user, series=self.series)
+        self.assertEqual(progress.episode_id, self.episode_2.id)
+        self.assertEqual(progress.progress_seconds, 50)
+        self.assertTrue(progress.completed)
+
+    def test_favorite(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(reverse('drama-favorite', args=[self.series.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_favorited'])
+        self.assertEqual(response.data['favorite_count'], 1)
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.favorite_count, 1)
+
+    def test_unfavorite(self):
+        DramaFavorite.objects.create(user=self.user, series=self.series)
+        self.series.favorite_count = 1
+        self.series.save(update_fields=['favorite_count'])
+        self.client.force_authenticate(user=self.user)
+        response = self.client.delete(reverse('drama-favorite', args=[self.series.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_favorited'])
+        self.assertEqual(response.data['favorite_count'], 0)
+        self.assertFalse(DramaFavorite.objects.filter(user=self.user, series=self.series).exists())
+
+    def test_favorites_are_user_scoped(self):
+        DramaFavorite.objects.create(user=self.user, series=self.series)
+        self.client.force_authenticate(user=self.other_user)
+        response = self.client.get(reverse('account-drama-favorites'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_progress_is_user_scoped(self):
+        DramaWatchProgress.objects.create(
+            user=self.user,
+            series=self.series,
+            episode=self.episode_1,
+            progress_seconds=85,
+            completed=False,
+        )
+        self.client.force_authenticate(user=self.other_user)
+        response = self.client.get(reverse('account-drama-progress'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_authenticated_drama_list_includes_favorite_and_progress_state(self):
+        DramaFavorite.objects.create(user=self.user, series=self.series)
+        DramaWatchProgress.objects.create(
+            user=self.user,
+            series=self.series,
+            episode=self.episode_2,
+            progress_seconds=42,
+            completed=False,
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(reverse('drama-series-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item = response.data['results'][0]
+        self.assertTrue(item['is_favorited'])
+        self.assertEqual(item['continue_episode_no'], 2)
+        self.assertEqual(item['continue_progress_seconds'], 42)
+
+    def test_anonymous_drama_list_still_works(self):
+        DramaFavorite.objects.create(user=self.user, series=self.series)
+        DramaWatchProgress.objects.create(
+            user=self.user,
+            series=self.series,
+            episode=self.episode_2,
+            progress_seconds=42,
+            completed=False,
+        )
+        self.client.force_authenticate(user=None)
+        response = self.client.get(reverse('drama-series-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item = response.data['results'][0]
+        self.assertFalse(item['is_favorited'])
+        self.assertIsNone(item['continue_episode_no'])
+        self.assertIsNone(item['continue_progress_seconds'])

@@ -15,6 +15,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import F
@@ -24,7 +25,16 @@ from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKE
 from apps.accounts.models import (
     ChainReceipt,
     LiveStream,
+    Gift,
+    GiftTransaction,
     MembershipPlan,
+    MeowPointLedger,
+    MeowPointPackage,
+    MeowPointPurchase,
+    MeowPointWallet,
+    DramaUnlock,
+    DramaEpisode,
+    UserMembership,
     OrderPayment,
     PaymentOrder,
     Product,
@@ -33,7 +43,6 @@ from apps.accounts.models import (
     ProductRefundRequest,
     SellerPayout,
     SellerPayoutAddress,
-    UserMembership,
     UserShippingAddress,
     WalletAddress,
 )
@@ -1952,3 +1961,278 @@ def _extract_thumbnail_with_ffmpeg(video, time_offset: float):
                 return ContentFile(output_path.read_bytes())
 
     return None
+
+
+class MeowPointService:
+    @staticmethod
+    def get_or_create_wallet(user):
+        wallet, _created = MeowPointWallet.objects.get_or_create(user=user)
+        return wallet
+
+    @staticmethod
+    def add_points(
+        *,
+        user,
+        amount: int,
+        entry_type: str,
+        target_type: str = '',
+        target_id: int | None = None,
+        payment_order: PaymentOrder | None = None,
+        note: str = '',
+        purchased_amount: int = 0,
+        bonus_amount: int = 0,
+    ):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        with transaction.atomic():
+            wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=user)[0]
+            balance_before = wallet.balance
+            balance_after = balance_before + amount
+
+            wallet.balance = balance_after
+            wallet.total_earned += amount
+            wallet.total_purchased += max(int(purchased_amount), 0)
+            wallet.total_bonus += max(int(bonus_amount), 0)
+            wallet.save(update_fields=['balance', 'total_earned', 'total_purchased', 'total_bonus', 'updated_at'])
+
+            ledger = MeowPointLedger.objects.create(
+                user=user,
+                entry_type=entry_type,
+                amount=amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type=target_type,
+                target_id=target_id,
+                payment_order=payment_order,
+                note=note,
+            )
+        return wallet, ledger
+
+    @staticmethod
+    def spend_points(
+        *,
+        user,
+        amount: int,
+        entry_type: str = MeowPointLedger.TYPE_SPEND,
+        target_type: str = '',
+        target_id: int | None = None,
+        payment_order: PaymentOrder | None = None,
+        note: str = '',
+    ):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        with transaction.atomic():
+            wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if wallet.balance < amount:
+                raise ValidationError('Insufficient Meow Points balance.')
+
+            balance_before = wallet.balance
+            balance_after = balance_before - amount
+
+            wallet.balance = balance_after
+            wallet.total_spent += amount
+            wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+
+            ledger = MeowPointLedger.objects.create(
+                user=user,
+                entry_type=entry_type,
+                amount=-amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type=target_type,
+                target_id=target_id,
+                payment_order=payment_order,
+                note=note,
+            )
+        return wallet, ledger
+
+
+class MeowPointPurchaseService:
+    @transaction.atomic
+    def create_order(self, *, user, package_code: str):
+        package = MeowPointPackage.objects.filter(code=package_code, status=MeowPointPackage.STATUS_ACTIVE).first()
+        if package is None:
+            raise ValidationError({'package_code': ['Active Meow Points package not found.']})
+
+        order_no = self._generate_order_no()
+        purchase = MeowPointPurchase.objects.create(
+            user=user,
+            package=package,
+            order_no=order_no,
+            package_code_snapshot=package.code,
+            package_name_snapshot=package.name,
+            points_amount=package.points_amount,
+            bonus_points=package.bonus_points,
+            total_points=package.points_amount + package.bonus_points,
+            price_amount=package.price_amount,
+            price_currency=package.price_currency,
+            status=MeowPointPurchase.STATUS_PENDING,
+        )
+        payment_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEOW_POINTS_RECHARGE,
+            target_type='meow_point_purchase',
+            target_id=purchase.id,
+            order_no=order_no,
+            amount=package.price_amount,
+            currency=package.price_currency,
+            status=PaymentOrder.STATUS_PENDING,
+        )
+        purchase.payment_order = payment_order
+        purchase.save(update_fields=['payment_order', 'updated_at'])
+        return purchase
+
+    @transaction.atomic
+    def credit_paid_purchase(self, purchase: MeowPointPurchase):
+        locked_purchase = MeowPointPurchase.objects.select_for_update().select_related('payment_order').get(pk=purchase.pk)
+        if locked_purchase.credited_at is not None:
+            return locked_purchase
+
+        payment_order = locked_purchase.payment_order
+        if payment_order is None:
+            raise ValidationError('Purchase does not have a linked payment order.')
+        if payment_order.status not in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+            return locked_purchase
+
+        wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=locked_purchase.user)[0]
+        balance_before = wallet.balance
+
+        purchase_points = int(locked_purchase.points_amount)
+        bonus_points = int(locked_purchase.bonus_points)
+        total_points = purchase_points + bonus_points
+
+        wallet.balance = balance_before + total_points
+        wallet.total_earned += total_points
+        wallet.total_purchased += purchase_points
+        wallet.total_bonus += bonus_points
+        wallet.save(update_fields=['balance', 'total_earned', 'total_purchased', 'total_bonus', 'updated_at'])
+
+        MeowPointLedger.objects.create(
+            user=locked_purchase.user,
+            entry_type=MeowPointLedger.TYPE_PURCHASE,
+            amount=purchase_points,
+            balance_before=balance_before,
+            balance_after=balance_before + purchase_points,
+            target_type='meow_point_purchase',
+            target_id=locked_purchase.id,
+            payment_order=payment_order,
+            note=f'Purchase credit for order {locked_purchase.order_no}',
+        )
+        if bonus_points > 0:
+            MeowPointLedger.objects.create(
+                user=locked_purchase.user,
+                entry_type=MeowPointLedger.TYPE_BONUS,
+                amount=bonus_points,
+                balance_before=balance_before + purchase_points,
+                balance_after=balance_before + total_points,
+                target_type='meow_point_purchase',
+                target_id=locked_purchase.id,
+                payment_order=payment_order,
+                note=f'Bonus credit for order {locked_purchase.order_no}',
+            )
+
+        paid_at = payment_order.paid_at or timezone.now()
+        locked_purchase.status = MeowPointPurchase.STATUS_PAID
+        locked_purchase.paid_at = paid_at
+        locked_purchase.credited_at = timezone.now()
+        locked_purchase.save(update_fields=['status', 'paid_at', 'credited_at', 'updated_at'])
+        return locked_purchase
+
+    def _generate_order_no(self):
+        for _ in range(8):
+            candidate = f'MP{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not MeowPointPurchase.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise ValidationError('Unable to generate unique Meow Points order number.')
+
+
+class DramaAccessService:
+    @staticmethod
+    def has_active_membership(user) -> bool:
+        if not getattr(user, 'is_authenticated', False):
+            return False
+        now = timezone.now()
+        return UserMembership.objects.filter(
+            user=user,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        ).exists()
+
+    @staticmethod
+    def can_watch_episode(*, user, episode: DramaEpisode, unlocked_episode_ids: set[int] | None = None, has_active_membership: bool = False) -> bool:
+        if episode.is_free:
+            return True
+        if unlocked_episode_ids and episode.id in unlocked_episode_ids:
+            return True
+        if episode.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and has_active_membership:
+            return True
+        return False
+
+    @staticmethod
+    @transaction.atomic
+    def unlock_with_meow_points(*, user, episode: DramaEpisode):
+        existing_unlock = DramaUnlock.objects.filter(user=user, episode=episode).select_related('ledger_entry').first()
+        if existing_unlock is not None:
+            return existing_unlock, False
+
+        if episode.is_free:
+            return None, False
+
+        if episode.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and DramaAccessService.has_active_membership(user):
+            return None, False
+
+        unlock = DramaUnlock.objects.create(
+            user=user,
+            series=episode.series,
+            episode=episode,
+            source=DramaUnlock.SOURCE_MEOW_POINTS,
+            points_amount=0,
+        )
+        try:
+            _wallet, ledger_entry = MeowPointService.spend_points(
+                user=user,
+                amount=episode.meow_points_price,
+                entry_type=MeowPointLedger.TYPE_SPEND,
+                target_type='drama_episode',
+                target_id=episode.id,
+                note=f'Drama unlock for episode {episode.id}',
+            )
+        except ValidationError:
+            unlock.delete()
+            raise
+
+        unlock.points_amount = episode.meow_points_price
+        unlock.ledger_entry = ledger_entry
+        unlock.save(update_fields=['points_amount', 'ledger_entry'])
+        return unlock, True
+
+
+class GiftService:
+    @staticmethod
+    @transaction.atomic
+    def send_gift(*, sender, receiver, stream: LiveStream, gift: Gift, quantity: int) -> GiftTransaction:
+        if quantity <= 0:
+            raise ValidationError({'quantity': ['Quantity must be greater than zero.']})
+        if not gift.is_active:
+            raise ValidationError({'gift_code': ['Gift is not active.']})
+        total_points = gift.points_price * quantity
+        _wallet, ledger_entry = MeowPointService.spend_points(
+            user=sender,
+            amount=total_points,
+            entry_type=MeowPointLedger.TYPE_SPEND,
+            target_type='live_gift',
+            target_id=stream.id,
+            note=f'Gift {gift.code} x{quantity} to stream {stream.id}',
+        )
+        return GiftTransaction.objects.create(
+            sender=sender,
+            receiver=receiver,
+            stream=stream,
+            gift=gift,
+            gift_name_snapshot=gift.name,
+            points_price_snapshot=gift.points_price,
+            quantity=quantity,
+            total_points=total_points,
+            ledger_entry=ledger_entry,
+        )

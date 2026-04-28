@@ -1,208 +1,81 @@
 # APP_API_CONTRACT_SHORT_DRAMA
 
-This document defines the initial backend-frontend API contract between Django backend and Flutter app for short-drama and Meow Points features.
+This document is the Flutter-facing API contract aligned to the **current backend implementation**.
 
-## Naming and currency rules
+## Naming and currency rules (authoritative)
 
-- Platform credit name in all app-credit contexts: **Meow Points**
-- Payment token symbol in payment contexts only: **THB-LTT**
+- Platform credit name: **Meow Points**
+- Payment token symbol: **THB-LTT**
 - Payment token full name: **LTT Thai Baht Stablecoin**
 - Blockchain: **LTT**
-- Peg reference: **1 THB-LTT = 1 THB**
-- Flutter must not hardcode conversion rate.
-- Flutter should render backend-provided `exchange_rate_label`.
+- Peg: **1 THB-LTT = 1 THB**
+
+Rules:
+
+- Flutter must not hardcode exchange rates.
+- Exchange rate/package snapshots are backend-controlled.
+- Flutter should display THB-LTT only in purchase/payment contexts.
 
 ---
 
-## A. Short drama APIs
+## A. Drama read APIs
 
 ### 1) GET /api/dramas/
 
-**Purpose**: List drama series for home sections.
-
-**Auth**: Optional JWT Bearer (recommended authenticated; when anonymous, user-personalized fields default safely).
-
-**Request example**:
-
-```http
-GET /api/dramas/?page=1&page_size=20
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-{
-  "count": 1,
-  "next": null,
-  "previous": null,
-  "results": [
-    {
-      "id": 10,
-      "title": "Bangkok Hearts",
-      "description": "A fast-paced city romance.",
-      "cover_url": "https://cdn.example.com/dramas/10/cover.jpg",
-      "tags": ["romance", "urban"],
-      "total_episodes": 24,
-      "free_episode_count": 3,
-      "locked_episode_count": 21,
-      "view_count": 156900,
-      "favorite_count": 8490,
-      "is_favorited": true,
-      "continue_episode_no": 7,
-      "continue_progress_seconds": 85
-    }
-  ]
-}
-```
-
-**Frontend notes**:
-
-- Use `continue_episode_no` and `continue_progress_seconds` to show “Continue Watching”.
-- For anonymous users, backend may return `is_favorited=false` and null/0 continue fields.
-
----
+- **Auth**: Optional
+- **Request**: `?page=&page_size=&category=` optional
+- **Response shape**: paginated series list with personalized fields (`is_favorited`, `continue_episode_no`, `continue_progress_seconds`) when authenticated.
+- **Frontend notes**:
+  - Anonymous users should treat personalized fields as defaults.
+- **Errors**: standard paginated endpoint errors (400 for invalid params).
+- **Idempotency**: read-only.
 
 ### 2) GET /api/dramas/{id}/
 
-**Purpose**: Get drama series detail.
-
-**Auth**: Optional JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/dramas/10/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-{
-  "id": 10,
-  "title": "Bangkok Hearts",
-  "description": "A fast-paced city romance.",
-  "cover_url": "https://cdn.example.com/dramas/10/cover.jpg",
-  "tags": ["romance", "urban"],
-  "total_episodes": 24,
-  "free_episode_count": 3,
-  "locked_episode_count": 21,
-  "view_count": 156900,
-  "favorite_count": 8490,
-  "is_favorited": true,
-  "continue_episode_no": 7,
-  "continue_progress_seconds": 85
-}
-```
-
----
+- **Auth**: Optional
+- **Request**: path param `id`
+- **Response shape**: single series with same personalized fields as list.
+- **Frontend notes**: same default handling for anonymous users.
+- **Errors**: `404` if series not active/published/not found.
+- **Idempotency**: read-only.
 
 ### 3) GET /api/dramas/{id}/episodes/
 
-**Purpose**: List episodes for one drama series.
-
-**Auth**: Optional JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/dramas/10/episodes/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-{
-  "series_id": 10,
-  "episodes": [
-    {
-      "id": 101,
-      "series_id": 10,
-      "episode_no": 1,
-      "title": "Episode 1",
-      "duration_seconds": 95,
-      "video_url": "https://cdn.example.com/dramas/10/e01.mp4",
-      "hls_url": "https://cdn.example.com/dramas/10/e01.m3u8",
-      "is_free": true,
-      "unlock_type": "free",
-      "meow_points_price": 0,
-      "is_locked": false,
-      "is_unlocked": true
-    },
-    {
-      "id": 102,
-      "series_id": 10,
-      "episode_no": 2,
-      "title": "Episode 2",
-      "duration_seconds": 99,
-      "video_url": "https://cdn.example.com/dramas/10/e02.mp4",
-      "hls_url": "https://cdn.example.com/dramas/10/e02.m3u8",
-      "is_free": false,
-      "unlock_type": "meow_points",
-      "meow_points_price": 30,
-      "is_locked": true,
-      "is_unlocked": false
-    }
-  ]
-}
-```
-
-**Frontend notes**:
-
-- Treat `is_locked` as canonical gating flag.
-- `unlock_type` may be `free`, `meow_points`, `membership`, or `ad_reward`.
-
----
+- **Auth**: Optional (recommended authenticated)
+- **Request**: path param `id`
+- **Response shape**:
+  - `series_id`
+  - `episodes[]` containing:
+    - `id`, `series_id`, `episode_no`, `title`, `duration_seconds`
+    - `unlock_type`, `is_free`, `meow_points_price`, `points_price`
+    - `can_watch`, `is_unlocked`, `is_locked`
+    - `playback_url`, `video_url`, `hls_url`
+- **Frontend notes**:
+  - Use `can_watch` as playback gate.
+  - `playback_url` is only valid when `can_watch=true`.
+  - Locked episodes should show unlock UI.
+- **Errors**: `404` for unavailable series.
+- **Idempotency**: read-only.
 
 ### 4) GET /api/dramas/{id}/episodes/{episode_no}/
 
-**Purpose**: Get one episode detail.
-
-**Auth**: Optional JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/dramas/10/episodes/2/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-{
-  "id": 102,
-  "series_id": 10,
-  "episode_no": 2,
-  "title": "Episode 2",
-  "duration_seconds": 99,
-  "video_url": "https://cdn.example.com/dramas/10/e02.mp4",
-  "hls_url": "https://cdn.example.com/dramas/10/e02.m3u8",
-  "is_free": false,
-  "unlock_type": "meow_points",
-  "meow_points_price": 30,
-  "is_locked": true,
-  "is_unlocked": false
-}
-```
+- **Auth**: Optional
+- **Request**: path params `id`, `episode_no`
+- **Response shape**: single episode with same access fields as episode list.
+- **Frontend notes**: same as episode list.
+- **Errors**: `404` if series/episode not accessible.
+- **Idempotency**: read-only.
 
 ---
 
-### 5) POST /api/dramas/{id}/progress/
+## B. Drama retention APIs
 
-**Purpose**: Save watch progress.
+### 1) POST /api/dramas/{id}/progress/
 
-**Auth**: Required JWT Bearer.
+- **Auth**: Required
+- **Request**:
 
-**Request example**:
-
-```http
-POST /api/dramas/10/progress/
-Authorization: Bearer <access_token>
-Content-Type: application/json
-
+```json
 {
   "episode_id": 101,
   "progress_seconds": 85,
@@ -210,581 +83,314 @@ Content-Type: application/json
 }
 ```
 
-**Response example**:
+- **Response shape**:
 
 ```json
 {
-  "ok": true,
   "series_id": 10,
   "episode_id": 101,
+  "episode_no": 1,
   "progress_seconds": 85,
   "completed": false,
-  "updated_at": "2026-04-27T08:00:00Z"
+  "updated_at": "2026-04-28T00:00:00Z"
 }
 ```
 
----
+- **Frontend notes**: call repeatedly while watching; latest values overwrite by series context.
+- **Errors**: `400` invalid payload; `404` invalid series/episode relation.
+- **Idempotency**: upsert-style (same series can be updated repeatedly).
 
-### 6) POST /api/dramas/{id}/favorite/
+### 2) POST /api/dramas/{id}/favorite/
 
-**Purpose**: Favorite drama.
-
-**Auth**: Required JWT Bearer.
-
-**Request example**:
-
-```http
-POST /api/dramas/10/favorite/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
+- **Auth**: Required
+- **Request**: empty body
+- **Response shape**:
 
 ```json
 {
   "series_id": 10,
-  "is_favorited": true
+  "is_favorited": true,
+  "favorite_count": 8801
 }
 ```
 
----
+- **Frontend notes**: safe to call even if already favorited.
+- **Errors**: `404` invalid series.
+- **Idempotency**: idempotent target state (`is_favorited=true`).
 
-### 7) DELETE /api/dramas/{id}/favorite/
+### 3) DELETE /api/dramas/{id}/favorite/
 
-**Purpose**: Unfavorite drama.
-
-**Auth**: Required JWT Bearer.
-
-**Request example**:
-
-```http
-DELETE /api/dramas/10/favorite/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
+- **Auth**: Required
+- **Request**: empty body
+- **Response shape**:
 
 ```json
 {
   "series_id": 10,
-  "is_favorited": false
+  "is_favorited": false,
+  "favorite_count": 8800
 }
 ```
 
+- **Frontend notes**: safe to call even if already unfavorited.
+- **Errors**: `404` invalid series.
+- **Idempotency**: idempotent target state (`is_favorited=false`).
+
+### 4) GET /api/account/drama-progress/
+
+- **Auth**: Required
+- **Request**: pagination query optional
+- **Response shape**: paginated continue-watching list:
+  - `series_id`, `series_title`, `cover_url`
+  - `episode_id`, `episode_no`, `progress_seconds`, `duration_seconds`, `updated_at`
+- **Frontend notes**: display continue cards ordered by recency.
+- **Errors**: `401` unauthenticated.
+- **Idempotency**: read-only.
+
+### 5) GET /api/account/drama-favorites/
+
+- **Auth**: Required
+- **Request**: pagination query optional
+- **Response shape**: paginated favorite series list:
+  - `id`, `title`, `cover_url`, `total_episodes`, `favorited_at`
+- **Frontend notes**: user-scoped list only.
+- **Errors**: `401` unauthenticated.
+- **Idempotency**: read-only.
+
 ---
 
-### 8) GET /api/account/drama-progress/
+## C. Drama unlock API
 
-**Purpose**: Continue watching list.
+### POST /api/dramas/episodes/{episode_id}/unlock/
 
-**Auth**: Required JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/account/drama-progress/?page=1&page_size=20
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
+- **Auth**: Required
+- **Request**: empty body
+- **Response shape**:
 
 ```json
 {
-  "count": 1,
-  "next": null,
-  "previous": null,
-  "results": [
-    {
-      "series_id": 10,
-      "series_title": "Bangkok Hearts",
-      "cover_url": "https://cdn.example.com/dramas/10/cover.jpg",
-      "episode_id": 107,
-      "episode_no": 7,
-      "progress_seconds": 85,
-      "duration_seconds": 102,
-      "updated_at": "2026-04-27T08:00:00Z"
-    }
-  ]
+  "episode_id": 102,
+  "series_id": 10,
+  "is_unlocked": true,
+  "points_charged": 30
 }
 ```
 
----
-
-### 9) GET /api/account/drama-favorites/
-
-**Purpose**: User favorite drama list.
-
-**Auth**: Required JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/account/drama-favorites/?page=1&page_size=20
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
+- **Frontend notes**:
+  - If already unlocked, `points_charged` returns `0`.
+  - After success, refresh episode list/detail to get `can_watch` + `playback_url`.
+- **Errors**:
+  - `400` with code `insufficient_balance`:
 
 ```json
 {
-  "count": 1,
-  "next": null,
-  "previous": null,
-  "results": [
-    {
-      "id": 10,
-      "title": "Bangkok Hearts",
-      "cover_url": "https://cdn.example.com/dramas/10/cover.jpg",
-      "total_episodes": 24,
-      "favorited_at": "2026-04-20T10:00:00Z"
-    }
-  ]
+  "code": "insufficient_balance",
+  "detail": "Insufficient Meow Points balance."
 }
 ```
 
+  - `401` unauthenticated
+  - `404` episode not available
+- **Idempotency**: idempotent for already-unlocked episode (no double charge).
+
 ---
 
-## B. Meow Points APIs
+## D. Meow Points wallet/package/ledger APIs
 
-### 1) GET /api/meow-points/me/
+### 1) GET /api/meow-points/wallet/
 
-**Purpose**: Get current user Meow Points balance.
-
-**Auth**: Required JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/meow-points/me/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
+- **Auth**: Required
+- **Request**: none
+- **Response shape**:
 
 ```json
 {
-  "balance": 1250,
-  "display_name": "Meow Points",
-  "unit": "points"
+  "balance": 1200,
+  "total_earned": 1400,
+  "total_spent": 200,
+  "total_purchased": 1300,
+  "total_bonus": 100,
+  "created_at": "...",
+  "updated_at": "..."
 }
 ```
 
----
+- **Frontend notes**: wallet is auto-created if missing.
+- **Errors**: `401` unauthenticated.
+- **Idempotency**: read-only.
 
 ### 2) GET /api/meow-points/packages/
 
-**Purpose**: List packages purchasable with THB-LTT.
+- **Auth**: Required
+- **Request**: none
+- **Response shape**: active package array with:
+  - `code`, `name`, `points_amount`, `bonus_points`, `total_points`
+  - `price_amount`, `price_currency`, `status`, `sort_order`, `description`
+- **Frontend notes**: display THB-LTT pricing in purchase context only.
+- **Errors**: `401` unauthenticated.
+- **Idempotency**: read-only.
 
-**Auth**: Required JWT Bearer.
+### 3) GET /api/meow-points/ledger/
 
-**Request example**:
-
-```http
-GET /api/meow-points/packages/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-[
-  {
-    "id": 1,
-    "name": "Starter Pack",
-    "points_amount": 1000,
-    "bonus_points": 0,
-    "total_points": 1000,
-    "payment_amount": "100.00",
-    "payment_currency": "THB-LTT",
-    "blockchain": "LTT",
-    "token_name": "LTT Thai Baht Stablecoin",
-    "exchange_rate": "10.00000000",
-    "exchange_rate_label": "1 THB-LTT = 10 Meow Points",
-    "is_active": true
-  }
-]
-```
-
-**Frontend notes**:
-
-- Purchase UI should show `payment_amount` + `payment_currency`.
-- Rate text should come from `exchange_rate_label`; do not format from hardcoded constants.
+- **Auth**: Required
+- **Request**: pagination query optional
+- **Response shape**: paginated user-scoped ledger entries with:
+  - `entry_type`, signed `amount`, `balance_before`, `balance_after`, targets, note, timestamps
+- **Frontend notes**: use signed `amount` for credit/debit UI.
+- **Errors**: `401` unauthenticated.
+- **Idempotency**: read-only.
 
 ---
 
-### 3) GET /api/meow-points/transactions/
+## E. Meow Points order APIs
 
-**Purpose**: List Meow Points transaction history.
+### 1) POST /api/meow-points/orders/
 
-**Auth**: Required JWT Bearer.
-
-**Supported `tx_type` values**:
-
-- `purchase`
-- `spend_episode_unlock`
-- `spend_live_gift`
-- `spend_membership_exchange`
-- `reward_checkin`
-- `reward_watch`
-- `reward_ad`
-- `admin_adjust`
-- `refund`
-
-**Request example**:
-
-```http
-GET /api/meow-points/transactions/?page=1&page_size=20
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
+- **Auth**: Required
+- **Request**:
 
 ```json
 {
-  "count": 2,
-  "next": null,
-  "previous": null,
-  "results": [
-    {
-      "id": 9002,
-      "tx_type": "spend_episode_unlock",
-      "direction": "debit",
-      "amount": 30,
-      "balance_after": 1220,
-      "remark": "Unlock episode 2",
-      "created_at": "2026-04-27T08:20:00Z"
-    },
-    {
-      "id": 9001,
-      "tx_type": "purchase",
-      "direction": "credit",
-      "amount": 1000,
-      "balance_after": 1250,
-      "remark": "Purchase order MP202604270001",
-      "created_at": "2026-04-27T08:00:00Z"
-    }
-  ]
+  "package_code": "starter_100"
 }
 ```
 
----
+- **Response shape**: created `MeowPointPurchase` snapshot payload:
+  - `order_no`, package snapshots, points snapshots, price snapshots
+  - purchase `status`
+  - `payment_order_status`, `txid`, timestamps
+- **Frontend notes**:
+  - order amount/currency shown from response snapshot.
+  - then proceed to payment UX.
+- **Errors**:
+  - `400` invalid/empty package code
+  - `400` inactive/nonexistent package
+  - `401` unauthenticated
+- **Idempotency**: non-idempotent creation (each call creates a new order).
 
-### 4) POST /api/meow-points/purchase-orders/
+### 2) GET /api/meow-points/orders/
 
-**Purpose**: Create a Meow Points purchase order.
+- **Auth**: Required
+- **Request**: pagination query optional
+- **Response shape**: paginated current-user purchase orders.
+- **Frontend notes**: use for order history and pending payments.
+- **Errors**: `401` unauthenticated.
+- **Idempotency**: read-only.
 
-**Auth**: Required JWT Bearer.
+### 3) GET /api/meow-points/orders/{order_no}/
 
-**Idempotency**: Required (`idempotency_key` must be unique per user+operation intent).
+- **Auth**: Required
+- **Request**: path param `order_no`
+- **Response shape**: one purchase order snapshot payload.
+- **Frontend notes**: poll detail after payment submission.
+- **Errors**: `401`, `404`.
+- **Idempotency**: read-only.
 
-**Request example**:
+### 4) POST /api/meow-points/orders/{order_no}/tx-hint/
 
-```http
-POST /api/meow-points/purchase-orders/
-Authorization: Bearer <access_token>
-Content-Type: application/json
-
-{
-  "package_id": 1,
-  "idempotency_key": "client-generated-key"
-}
-```
-
-**Response example**:
+- **Auth**: Required
+- **Request**:
 
 ```json
 {
-  "order_no": "MP202604270001",
+  "txid": "abc123..."
+}
+```
+
+- **Response shape**:
+
+```json
+{
+  "order_no": "MP20260428ABCD1234",
+  "txid_hint": "abc123...",
   "status": "pending",
-  "total_points": 1000,
-  "payment_amount": "100.00",
-  "payment_currency": "THB-LTT",
-  "blockchain": "LTT",
-  "token_name": "LTT Thai Baht Stablecoin",
-  "pay_to_address": "ltt1qexampleaddress",
-  "exchange_rate_snapshot": "10.00000000",
-  "exchange_rate_label": "1 THB-LTT = 10 Meow Points",
-  "expires_at": "2026-04-27T08:30:00Z"
+  "detail": "txid hint recorded; payment confirmation is still required."
 }
 ```
+
+- **Frontend notes**:
+  - tx-hint only records txid on eligible payment-order states.
+  - it does not guarantee immediate credit.
+- **Errors**: `400` invalid txid, `401`, `404`.
+- **Idempotency**: idempotent-like for repeated same txid hint; no direct double-credit behavior.
 
 ---
 
-### 5) GET /api/meow-points/purchase-orders/{order_no}/
+## F. Gift APIs
 
-**Purpose**: Get purchase order status.
+### 1) GET /api/gifts/
 
-**Auth**: Required JWT Bearer.
+- **Auth**: Optional
+- **Request**: none
+- **Response shape**: active gift array:
+  - `code`, `name`, `icon_url`, `animation_url`, `points_price`, `is_active`, `sort_order`
+- **Frontend notes**: render gifting panel from this list.
+- **Errors**: standard read endpoint errors.
+- **Idempotency**: read-only.
 
-**Request example**:
+### 2) POST /api/live/{live_id}/gifts/send/
 
-```http
-GET /api/meow-points/purchase-orders/MP202604270001/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-{
-  "order_no": "MP202604270001",
-  "status": "paid",
-  "total_points": 1000,
-  "payment_amount": "100.00",
-  "payment_currency": "THB-LTT",
-  "paid_at": "2026-04-27T08:02:10Z"
-}
-```
-
----
-
-## C. Episode unlock API
-
-### 1) POST /api/episodes/{id}/unlock/
-
-**Purpose**: Unlock a locked drama episode using Meow Points.
-
-**Auth**: Required JWT Bearer.
-
-**Idempotency**: Required.
-
-**Request example**:
-
-```http
-POST /api/episodes/101/unlock/
-Authorization: Bearer <access_token>
-Content-Type: application/json
-
-{
-  "idempotency_key": "client-generated-key"
-}
-```
-
-**Response example**:
+- **Auth**: Required
+- **Request**:
 
 ```json
 {
-  "episode_id": 101,
-  "is_unlocked": true,
-  "spent_points": 30,
-  "balance_after": 1220
+  "gift_code": "rose",
+  "quantity": 3
 }
 ```
 
----
-
-## D. Membership exchange APIs
-
-### 1) GET /api/meow-points/membership-exchange-rules/
-
-**Purpose**: List rules for exchanging Meow Points for membership.
-
-**Auth**: Required JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/meow-points/membership-exchange-rules/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-[
-  {
-    "id": 1,
-    "membership_plan": "monthly",
-    "required_points": 300,
-    "duration_days": 30,
-    "is_active": true
-  }
-]
-```
-
-### 2) POST /api/meow-points/exchange-membership/
-
-**Purpose**: Exchange Meow Points for membership.
-
-**Auth**: Required JWT Bearer.
-
-**Idempotency**: Required.
-
-**Request example**:
-
-```http
-POST /api/meow-points/exchange-membership/
-Authorization: Bearer <access_token>
-Content-Type: application/json
-
-{
-  "rule_id": 1,
-  "idempotency_key": "client-generated-key"
-}
-```
-
-**Response example**:
+- **Response shape**:
 
 ```json
 {
-  "ok": true,
-  "membership_plan": "monthly",
-  "spent_points": 300,
-  "balance_after": 920,
-  "membership_expire_at": "2026-05-27T09:00:00Z"
-}
-```
-
----
-
-## E. Live gift APIs
-
-### 1) GET /api/live-gifts/
-
-**Purpose**: List available gifts.
-
-**Auth**: Required JWT Bearer.
-
-**Request example**:
-
-```http
-GET /api/live-gifts/
-Authorization: Bearer <access_token>
-```
-
-**Response example**:
-
-```json
-[
-  {
-    "id": 1,
-    "name": "Meow Rose",
-    "icon_url": "https://cdn.example.com/gifts/rose.png",
-    "meow_points_price": 10,
-    "animation_type": "basic",
-    "is_active": true,
-    "sort_order": 1
-  }
-]
-```
-
-### 2) POST /api/live/{id}/gifts/
-
-**Purpose**: Send gift in live room using Meow Points.
-
-**Auth**: Required JWT Bearer.
-
-**Idempotency**: Required.
-
-**Request example**:
-
-```http
-POST /api/live/88/gifts/
-Authorization: Bearer <access_token>
-Content-Type: application/json
-
-{
-  "gift_id": 1,
+  "id": 1,
+  "gift_name_snapshot": "Rose",
+  "points_price_snapshot": 10,
   "quantity": 3,
-  "idempotency_key": "client-generated-key"
+  "total_points": 30,
+  "created_at": "..."
 }
 ```
 
-**Response example**:
-
-```json
-{
-  "gift_order_id": 70012,
-  "spent_points": 30,
-  "balance_after": 1190,
-  "live_event": {
-    "type": "gift_sent",
-    "placeholder": true
-  }
-}
-```
+- **Frontend notes**:
+  - deduct preview = `points_price * quantity` before submit.
+  - refresh wallet after successful send.
+- **Errors**:
+  - `400` inactive gift
+  - `400` invalid quantity
+  - `400` insufficient balance (code `insufficient_balance`)
+  - `401` unauthenticated
+  - `404` live stream or gift not found
+- **Idempotency**: non-idempotent (each successful call is a new spend/send action).
 
 ---
 
-## F. Common API behavior
+## Episode access field usage (Flutter)
 
-### Authentication
+- `can_watch` controls playback availability.
+- `playback_url` is only usable when `can_watch=true`.
+- `points_price` is Meow Points price for point-based locked episodes.
+- `is_unlocked` means user currently has access.
+- Membership episodes can become watchable via active membership.
+- If locked, show unlock UI instead of starting player.
 
-- Protected endpoints require `Authorization: Bearer <JWT access token>`.
-- Unauthenticated access to protected endpoints returns `401 Unauthorized`.
+---
 
-### Pagination recommendation
+## Current implementation status
 
-Recommended list response shape:
+### Implemented
 
-```json
-{
-  "count": 0,
-  "next": null,
-  "previous": null,
-  "results": []
-}
-```
+- Drama read APIs
+- Progress/favorites APIs
+- Drama unlock spending API
+- Meow Points wallet/packages/ledger APIs
+- Meow Points purchase orders with THB-LTT `PaymentOrder` linkage
+- Gifts and gift spending APIs
 
-### Error format recommendation
+### Deferred / pending (still true)
 
-Recommended error shape:
-
-```json
-{
-  "error": {
-    "code": "insufficient_meow_points",
-    "message": "Insufficient Meow Points balance.",
-    "details": {}
-  }
-}
-```
-
-### Idempotency requirement
-
-These operations should require `idempotency_key`:
-
-- Create Meow Points purchase order
-- Episode unlock spend
-- Membership exchange
-- Live gift send
-
-On duplicate key with same semantic request, backend should return existing successful result (or current operation state), not double-charge.
-
-### Locked episode behavior
-
-- Locked episode response should clearly expose `is_locked=true` and `unlock_type`.
-- Playback endpoints (if separated later) should deny stream for locked/unentitled users.
-
-### Insufficient balance behavior
-
-- For spend endpoints, return `400` or `409` with stable error code such as `insufficient_meow_points`.
-
-### Expired purchase order behavior
-
-- If `expires_at` passed before valid payment confirmation, order transitions to `expired`.
-- Expired order cannot be paid/credited unless explicitly reopened by backend policy.
-
-### Duplicate unlock behavior
-
-- Unlocking an already unlocked episode should be idempotent:
-  - Return `is_unlocked=true`
-  - `spent_points=0` or original spend reference (backend policy consistent)
-  - Must not deduct points twice
-
-### Purchase order status values
-
-Recommended canonical statuses:
-
-- `pending`
-- `paid`
-- `expired`
-- `cancelled`
-- `failed`
-
-### Frontend display notes
-
-- Flutter should display **Meow Points** for balance and spending UI.
-- Flutter should display **THB-LTT** only in purchase/payment UI.
-- Flutter must not hardcode exchange rates.
-- Flutter should rely on backend `exchange_rate_label` for display text.
+- Production-grade payment confirmation automation and ops workflow hardening
+- Real mobile wallet UX polish and end-to-end production settlement UX
+- Video player/CDN production hardening and full playback QoS handling
+- Flutter full integration rollout and UX iteration
