@@ -824,11 +824,13 @@ class PaymentOrder(models.Model):
     TYPE_PRODUCT = 'product'
     TYPE_PAID_PROGRAM = 'paid_program'
     TYPE_MEMBERSHIP = 'membership'
+    TYPE_MEOW_POINTS_RECHARGE = 'meow_points_recharge'
     ORDER_TYPE_CHOICES = [
         (TYPE_TIP, 'Tip'),
         (TYPE_PRODUCT, 'Product'),
         (TYPE_PAID_PROGRAM, 'Paid Program'),
         (TYPE_MEMBERSHIP, 'Membership'),
+        (TYPE_MEOW_POINTS_RECHARGE, 'Meow Points Recharge'),
     ]
 
     STATUS_PENDING = 'pending'
@@ -1274,6 +1276,57 @@ class MeowPointLedger(models.Model):
     )
     note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class MeowPointPurchase(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_EXPIRED, 'Expired'),
+        (STATUS_CANCELLED, 'Cancelled'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_point_purchases',
+    )
+    package = models.ForeignKey(
+        MeowPointPackage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='purchases',
+    )
+    payment_order = models.OneToOneField(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='meow_point_purchase',
+    )
+    order_no = models.CharField(max_length=64, unique=True)
+    package_code_snapshot = models.CharField(max_length=64, blank=True, default='')
+    package_name_snapshot = models.CharField(max_length=255, blank=True, default='')
+    points_amount = models.PositiveIntegerField(default=0)
+    bonus_points = models.PositiveIntegerField(default=0)
+    total_points = models.PositiveIntegerField(default=0)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=16, default=TOKEN_SYMBOL)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    credited_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at', '-id']

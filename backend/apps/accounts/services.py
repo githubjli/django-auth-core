@@ -27,6 +27,8 @@ from apps.accounts.models import (
     LiveStream,
     MembershipPlan,
     MeowPointLedger,
+    MeowPointPackage,
+    MeowPointPurchase,
     MeowPointWallet,
     OrderPayment,
     PaymentOrder,
@@ -2039,3 +2041,102 @@ class MeowPointService:
                 note=note,
             )
         return wallet, ledger
+
+
+class MeowPointPurchaseService:
+    @transaction.atomic
+    def create_order(self, *, user, package_code: str):
+        package = MeowPointPackage.objects.filter(code=package_code, status=MeowPointPackage.STATUS_ACTIVE).first()
+        if package is None:
+            raise ValidationError({'package_code': ['Active Meow Points package not found.']})
+
+        order_no = self._generate_order_no()
+        purchase = MeowPointPurchase.objects.create(
+            user=user,
+            package=package,
+            order_no=order_no,
+            package_code_snapshot=package.code,
+            package_name_snapshot=package.name,
+            points_amount=package.points_amount,
+            bonus_points=package.bonus_points,
+            total_points=package.points_amount + package.bonus_points,
+            price_amount=package.price_amount,
+            price_currency=package.price_currency,
+            status=MeowPointPurchase.STATUS_PENDING,
+        )
+        payment_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEOW_POINTS_RECHARGE,
+            target_type='meow_point_purchase',
+            target_id=purchase.id,
+            order_no=order_no,
+            amount=package.price_amount,
+            currency=package.price_currency,
+            status=PaymentOrder.STATUS_PENDING,
+        )
+        purchase.payment_order = payment_order
+        purchase.save(update_fields=['payment_order', 'updated_at'])
+        return purchase
+
+    @transaction.atomic
+    def credit_paid_purchase(self, purchase: MeowPointPurchase):
+        locked_purchase = MeowPointPurchase.objects.select_for_update().select_related('payment_order').get(pk=purchase.pk)
+        if locked_purchase.credited_at is not None:
+            return locked_purchase
+
+        payment_order = locked_purchase.payment_order
+        if payment_order is None:
+            raise ValidationError('Purchase does not have a linked payment order.')
+        if payment_order.status not in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+            return locked_purchase
+
+        wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=locked_purchase.user)[0]
+        balance_before = wallet.balance
+
+        purchase_points = int(locked_purchase.points_amount)
+        bonus_points = int(locked_purchase.bonus_points)
+        total_points = purchase_points + bonus_points
+
+        wallet.balance = balance_before + total_points
+        wallet.total_earned += total_points
+        wallet.total_purchased += purchase_points
+        wallet.total_bonus += bonus_points
+        wallet.save(update_fields=['balance', 'total_earned', 'total_purchased', 'total_bonus', 'updated_at'])
+
+        MeowPointLedger.objects.create(
+            user=locked_purchase.user,
+            entry_type=MeowPointLedger.TYPE_PURCHASE,
+            amount=purchase_points,
+            balance_before=balance_before,
+            balance_after=balance_before + purchase_points,
+            target_type='meow_point_purchase',
+            target_id=locked_purchase.id,
+            payment_order=payment_order,
+            note=f'Purchase credit for order {locked_purchase.order_no}',
+        )
+        if bonus_points > 0:
+            MeowPointLedger.objects.create(
+                user=locked_purchase.user,
+                entry_type=MeowPointLedger.TYPE_BONUS,
+                amount=bonus_points,
+                balance_before=balance_before + purchase_points,
+                balance_after=balance_before + total_points,
+                target_type='meow_point_purchase',
+                target_id=locked_purchase.id,
+                payment_order=payment_order,
+                note=f'Bonus credit for order {locked_purchase.order_no}',
+            )
+
+        paid_at = payment_order.paid_at or timezone.now()
+        locked_purchase.status = MeowPointPurchase.STATUS_PAID
+        locked_purchase.paid_at = paid_at
+        locked_purchase.credited_at = timezone.now()
+        locked_purchase.save(update_fields=['status', 'paid_at', 'credited_at', 'updated_at'])
+        return locked_purchase
+
+    def _generate_order_no(self):
+        for _ in range(8):
+            candidate = f'MP{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not MeowPointPurchase.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise ValidationError('Unable to generate unique Meow Points order number.')

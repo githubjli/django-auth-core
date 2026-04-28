@@ -19,6 +19,7 @@ from apps.accounts.models import (
     MembershipPlan,
     MeowPointLedger,
     MeowPointPackage,
+    MeowPointPurchase,
     MeowPointWallet,
     OrderPayment,
     PaymentOrder,
@@ -227,6 +228,16 @@ class MeowPointLedgerAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at',)
     autocomplete_fields = ('user', 'payment_order')
+
+
+@admin.register(MeowPointPurchase)
+class MeowPointPurchaseAdmin(admin.ModelAdmin):
+    list_display = ('id', 'order_no', 'user', 'package_code_snapshot', 'total_points', 'price_amount', 'status', 'created_at')
+    list_filter = ('status', 'price_currency', 'created_at')
+    search_fields = ('order_no', 'user__email', 'package_code_snapshot', 'package_name_snapshot')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at', 'updated_at', 'paid_at', 'credited_at')
+    autocomplete_fields = ('user', 'package', 'payment_order')
 
 
 @admin.register(VideoLike)
