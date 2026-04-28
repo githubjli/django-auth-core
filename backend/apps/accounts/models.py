@@ -110,6 +110,12 @@ class Video(models.Model):
         (VISIBILITY_PUBLIC, 'Public'),
         (VISIBILITY_PRIVATE, 'Private'),
     ]
+    ACCESS_FREE = 'free'
+    ACCESS_MEMBERSHIP = 'membership'
+    ACCESS_TYPE_CHOICES = [
+        (ACCESS_FREE, 'Free'),
+        (ACCESS_MEMBERSHIP, 'Membership'),
+    ]
 
     owner = models.ForeignKey(
         User,
@@ -127,6 +133,8 @@ class Video(models.Model):
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default=VISIBILITY_PUBLIC)
+    access_type = models.CharField(max_length=20, choices=ACCESS_TYPE_CHOICES, default=ACCESS_FREE)
+    preview_seconds = models.PositiveIntegerField(default=0)
     like_count = models.PositiveIntegerField(default=0)
     comment_count = models.PositiveIntegerField(default=0)
     file = models.FileField(upload_to='videos/')
