@@ -10,8 +10,11 @@ from apps.accounts.models import (
     CommentLike,
     DramaEpisode,
     DramaFavorite,
+    DramaUnlock,
     DramaSeries,
     DramaWatchProgress,
+    Gift,
+    GiftTransaction,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
@@ -202,6 +205,16 @@ class DramaFavoriteAdmin(admin.ModelAdmin):
     autocomplete_fields = ('user', 'series')
 
 
+@admin.register(DramaUnlock)
+class DramaUnlockAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'series', 'episode', 'source', 'points_amount', 'unlocked_at')
+    list_filter = ('source', 'unlocked_at')
+    search_fields = ('user__email', 'series__title', 'episode__title')
+    ordering = ('-unlocked_at', '-id')
+    readonly_fields = ('unlocked_at',)
+    autocomplete_fields = ('user', 'series', 'episode', 'ledger_entry')
+
+
 @admin.register(MeowPointWallet)
 class MeowPointWalletAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'balance', 'total_earned', 'total_spent', 'updated_at')
@@ -238,6 +251,24 @@ class MeowPointPurchaseAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at', 'paid_at', 'credited_at')
     autocomplete_fields = ('user', 'package', 'payment_order')
+
+
+@admin.register(Gift)
+class GiftAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'points_price', 'is_active', 'sort_order')
+    list_filter = ('is_active',)
+    search_fields = ('code', 'name')
+    ordering = ('sort_order', 'id')
+
+
+@admin.register(GiftTransaction)
+class GiftTransactionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'sender', 'receiver', 'stream', 'gift_name_snapshot', 'quantity', 'total_points', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('sender__email', 'receiver__email', 'gift_name_snapshot')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('sender', 'receiver', 'stream', 'gift', 'ledger_entry')
 
 
 @admin.register(VideoLike)

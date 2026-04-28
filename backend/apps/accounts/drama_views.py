@@ -1,7 +1,9 @@
 from django.db import transaction
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import generics
+from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
@@ -12,11 +14,13 @@ from apps.accounts.drama_serializers import (
     AccountDramaProgressItemSerializer,
     DramaEpisodeSerializer,
     DramaFavoriteStateSerializer,
+    DramaUnlockResponseSerializer,
     DramaProgressSaveSerializer,
     DramaSeriesSerializer,
     DramaWatchProgressSerializer,
 )
-from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress
+from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaUnlock, DramaWatchProgress
+from apps.accounts.services import DramaAccessService
 
 
 class DramaSeriesPagination(PageNumberPagination):
@@ -92,7 +96,22 @@ class DramaEpisodeListAPIView(APIView):
             pk=pk,
         )
         episodes = DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id')
-        serializer = DramaEpisodeSerializer(episodes, many=True, context={'request': request})
+        unlocked_episode_ids: set[int] = set()
+        has_active_membership = False
+        if request.user.is_authenticated:
+            unlocked_episode_ids = set(
+                DramaUnlock.objects.filter(user=request.user, series=series).values_list('episode_id', flat=True)
+            )
+            has_active_membership = DramaAccessService.has_active_membership(request.user)
+        serializer = DramaEpisodeSerializer(
+            episodes,
+            many=True,
+            context={
+                'request': request,
+                'unlocked_episode_ids': unlocked_episode_ids,
+                'has_active_membership': has_active_membership,
+            },
+        )
         return Response({'series_id': series.id, 'episodes': serializer.data})
 
 
@@ -106,7 +125,21 @@ class DramaEpisodeDetailAPIView(APIView):
             DramaEpisode.objects.filter(series=series, is_active=True),
             episode_no=episode_no,
         )
-        serializer = DramaEpisodeSerializer(episode, context={'request': request})
+        unlocked_episode_ids: set[int] = set()
+        has_active_membership = False
+        if request.user.is_authenticated:
+            unlocked_episode_ids = set(
+                DramaUnlock.objects.filter(user=request.user, series=series).values_list('episode_id', flat=True)
+            )
+            has_active_membership = DramaAccessService.has_active_membership(request.user)
+        serializer = DramaEpisodeSerializer(
+            episode,
+            context={
+                'request': request,
+                'unlocked_episode_ids': unlocked_episode_ids,
+                'has_active_membership': has_active_membership,
+            },
+        )
         return Response(serializer.data)
 
 
@@ -196,3 +229,37 @@ class AccountDramaFavoritesListAPIView(generics.ListAPIView):
             .select_related('series')
             .order_by('-created_at', '-id')
         )
+
+
+class DramaEpisodeUnlockAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, episode_id):
+        episode = get_object_or_404(
+            DramaEpisode.objects.select_related('series').filter(
+                is_active=True,
+                series__is_active=True,
+                series__status=DramaSeries.STATUS_PUBLISHED,
+            ),
+            pk=episode_id,
+        )
+        try:
+            unlock, charged = DramaAccessService.unlock_with_meow_points(user=request.user, episode=episode)
+        except DjangoValidationError as exc:
+            if 'Insufficient Meow Points balance.' in str(exc):
+                return Response(
+                    {'code': 'insufficient_balance', 'detail': 'Insufficient Meow Points balance.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            raise
+
+        points_charged = episode.meow_points_price if charged else 0
+        serializer = DramaUnlockResponseSerializer(
+            {
+                'episode_id': episode.id,
+                'series_id': episode.series_id,
+                'is_unlocked': True,
+                'points_charged': points_charged,
+            }
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)

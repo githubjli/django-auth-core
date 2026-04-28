@@ -25,11 +25,16 @@ from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKE
 from apps.accounts.models import (
     ChainReceipt,
     LiveStream,
+    Gift,
+    GiftTransaction,
     MembershipPlan,
     MeowPointLedger,
     MeowPointPackage,
     MeowPointPurchase,
     MeowPointWallet,
+    DramaUnlock,
+    DramaEpisode,
+    UserMembership,
     OrderPayment,
     PaymentOrder,
     Product,
@@ -38,7 +43,6 @@ from apps.accounts.models import (
     ProductRefundRequest,
     SellerPayout,
     SellerPayoutAddress,
-    UserMembership,
     UserShippingAddress,
     WalletAddress,
 )
@@ -2140,3 +2144,95 @@ class MeowPointPurchaseService:
             if not MeowPointPurchase.objects.filter(order_no=candidate).exists():
                 return candidate
         raise ValidationError('Unable to generate unique Meow Points order number.')
+
+
+class DramaAccessService:
+    @staticmethod
+    def has_active_membership(user) -> bool:
+        if not getattr(user, 'is_authenticated', False):
+            return False
+        now = timezone.now()
+        return UserMembership.objects.filter(
+            user=user,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        ).exists()
+
+    @staticmethod
+    def can_watch_episode(*, user, episode: DramaEpisode, unlocked_episode_ids: set[int] | None = None, has_active_membership: bool = False) -> bool:
+        if episode.is_free:
+            return True
+        if unlocked_episode_ids and episode.id in unlocked_episode_ids:
+            return True
+        if episode.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and has_active_membership:
+            return True
+        return False
+
+    @staticmethod
+    @transaction.atomic
+    def unlock_with_meow_points(*, user, episode: DramaEpisode):
+        existing_unlock = DramaUnlock.objects.filter(user=user, episode=episode).select_related('ledger_entry').first()
+        if existing_unlock is not None:
+            return existing_unlock, False
+
+        if episode.is_free:
+            return None, False
+
+        if episode.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and DramaAccessService.has_active_membership(user):
+            return None, False
+
+        unlock = DramaUnlock.objects.create(
+            user=user,
+            series=episode.series,
+            episode=episode,
+            source=DramaUnlock.SOURCE_MEOW_POINTS,
+            points_amount=0,
+        )
+        try:
+            _wallet, ledger_entry = MeowPointService.spend_points(
+                user=user,
+                amount=episode.meow_points_price,
+                entry_type=MeowPointLedger.TYPE_SPEND,
+                target_type='drama_episode',
+                target_id=episode.id,
+                note=f'Drama unlock for episode {episode.id}',
+            )
+        except ValidationError:
+            unlock.delete()
+            raise
+
+        unlock.points_amount = episode.meow_points_price
+        unlock.ledger_entry = ledger_entry
+        unlock.save(update_fields=['points_amount', 'ledger_entry'])
+        return unlock, True
+
+
+class GiftService:
+    @staticmethod
+    @transaction.atomic
+    def send_gift(*, sender, receiver, stream: LiveStream, gift: Gift, quantity: int) -> GiftTransaction:
+        if quantity <= 0:
+            raise ValidationError({'quantity': ['Quantity must be greater than zero.']})
+        if not gift.is_active:
+            raise ValidationError({'gift_code': ['Gift is not active.']})
+        total_points = gift.points_price * quantity
+        _wallet, ledger_entry = MeowPointService.spend_points(
+            user=sender,
+            amount=total_points,
+            entry_type=MeowPointLedger.TYPE_SPEND,
+            target_type='live_gift',
+            target_id=stream.id,
+            note=f'Gift {gift.code} x{quantity} to stream {stream.id}',
+        )
+        return GiftTransaction.objects.create(
+            sender=sender,
+            receiver=receiver,
+            stream=stream,
+            gift=gift,
+            gift_name_snapshot=gift.name,
+            points_price_snapshot=gift.points_price,
+            quantity=quantity,
+            total_points=total_points,
+            ledger_entry=ledger_entry,
+        )

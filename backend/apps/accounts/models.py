@@ -277,6 +277,53 @@ class DramaFavorite(models.Model):
         ]
 
 
+class DramaUnlock(models.Model):
+    SOURCE_MEOW_POINTS = 'meow_points'
+    SOURCE_MEMBERSHIP = 'membership'
+    SOURCE_FREE = 'free'
+    SOURCE_ADMIN = 'admin'
+    SOURCE_AD_REWARD = 'ad_reward'
+    SOURCE_CHOICES = [
+        (SOURCE_MEOW_POINTS, 'Meow Points'),
+        (SOURCE_MEMBERSHIP, 'Membership'),
+        (SOURCE_FREE, 'Free'),
+        (SOURCE_ADMIN, 'Admin'),
+        (SOURCE_AD_REWARD, 'Ad Reward'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_unlocks',
+    )
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='unlocks',
+    )
+    episode = models.ForeignKey(
+        DramaEpisode,
+        on_delete=models.CASCADE,
+        related_name='unlocks',
+    )
+    source = models.CharField(max_length=24, choices=SOURCE_CHOICES, default=SOURCE_MEOW_POINTS)
+    points_amount = models.PositiveIntegerField(default=0)
+    ledger_entry = models.OneToOneField(
+        'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='drama_unlock',
+    )
+    unlocked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-unlocked_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'episode'], name='unique_drama_unlock_per_user_episode'),
+        ]
+
+
 class VideoView(models.Model):
     video = models.ForeignKey(
         Video,
@@ -786,6 +833,61 @@ class LiveChatMessage(models.Model):
 
     class Meta:
         ordering = ['id']
+
+
+class Gift(models.Model):
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255)
+    icon = models.FileField(upload_to='gifts/icons/', blank=True)
+    animation = models.FileField(upload_to='gifts/animations/', blank=True)
+    points_price = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+
+class GiftTransaction(models.Model):
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='gift_transactions_sent',
+    )
+    receiver = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='gift_transactions_received',
+    )
+    stream = models.ForeignKey(
+        LiveStream,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transactions',
+    )
+    gift = models.ForeignKey(
+        Gift,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='transactions',
+    )
+    gift_name_snapshot = models.CharField(max_length=255, blank=True, default='')
+    points_price_snapshot = models.PositiveIntegerField(default=0)
+    quantity = models.PositiveIntegerField(default=1)
+    total_points = models.PositiveIntegerField(default=0)
+    ledger_entry = models.OneToOneField(
+        'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transaction',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
 
 
 class StreamPaymentMethod(models.Model):

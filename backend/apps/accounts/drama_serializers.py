@@ -66,8 +66,11 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
 
 class DramaEpisodeSerializer(serializers.ModelSerializer):
     series_id = serializers.IntegerField(source='series.id', read_only=True)
+    can_watch = serializers.SerializerMethodField()
     is_locked = serializers.SerializerMethodField()
     is_unlocked = serializers.SerializerMethodField()
+    points_price = serializers.IntegerField(source='meow_points_price', read_only=True)
+    playback_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
     hls_url = serializers.SerializerMethodField()
 
@@ -79,20 +82,36 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
             'episode_no',
             'title',
             'duration_seconds',
+            'can_watch',
+            'playback_url',
             'video_url',
             'hls_url',
             'is_free',
             'unlock_type',
             'meow_points_price',
+            'points_price',
             'is_locked',
             'is_unlocked',
         )
 
+    def _can_watch(self, obj):
+        if obj.is_free:
+            return True
+        unlocked_episode_ids = self.context.get('unlocked_episode_ids') or set()
+        if obj.id in unlocked_episode_ids:
+            return True
+        if obj.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and self.context.get('has_active_membership', False):
+            return True
+        return False
+
+    def get_can_watch(self, obj):
+        return self._can_watch(obj)
+
     def get_is_locked(self, obj):
-        return not obj.is_free
+        return not self._can_watch(obj)
 
     def get_is_unlocked(self, obj):
-        return obj.is_free
+        return self._can_watch(obj)
 
     def _build_url(self, value):
         if not value:
@@ -105,7 +124,7 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(value)
 
     def get_video_url(self, obj):
-        if not obj.is_free:
+        if not self._can_watch(obj):
             return None
         if obj.video_url:
             return self._build_url(obj.video_url)
@@ -117,9 +136,16 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
         return None
 
     def get_hls_url(self, obj):
-        if not obj.is_free:
+        if not self._can_watch(obj):
             return None
         return self._build_url(obj.hls_url)
+
+    def get_playback_url(self, obj):
+        if not self._can_watch(obj):
+            return None
+        if obj.hls_url:
+            return self._build_url(obj.hls_url)
+        return self.get_video_url(obj)
 
 
 class DramaProgressSaveSerializer(serializers.Serializer):
@@ -149,6 +175,13 @@ class DramaFavoriteStateSerializer(serializers.Serializer):
     series_id = serializers.IntegerField()
     is_favorited = serializers.BooleanField()
     favorite_count = serializers.IntegerField()
+
+
+class DramaUnlockResponseSerializer(serializers.Serializer):
+    episode_id = serializers.IntegerField()
+    series_id = serializers.IntegerField()
+    is_unlocked = serializers.BooleanField()
+    points_charged = serializers.IntegerField()
 
 
 class AccountDramaProgressItemSerializer(serializers.ModelSerializer):
