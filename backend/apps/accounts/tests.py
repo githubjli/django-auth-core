@@ -315,7 +315,7 @@ class AuthAPITestCase(APITestCase):
 
         self.client.patch(
             reverse('admin-video-detail', args=[second_video['id']]),
-            {'status': 'flagged', 'visibility': 'private'},
+            {'status': 'flagged', 'visibility': 'private', 'access_type': Video.ACCESS_MEMBERSHIP, 'preview_seconds': 20},
             format='json',
         )
 
@@ -323,6 +323,8 @@ class AuthAPITestCase(APITestCase):
         self.assertEqual(inactive_list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(inactive_list_response.data['count'], 1)
         self.assertEqual(inactive_list_response.data['results'][0]['id'], second_video['id'])
+        self.assertEqual(inactive_list_response.data['results'][0]['access_type'], Video.ACCESS_MEMBERSHIP)
+        self.assertEqual(inactive_list_response.data['results'][0]['preview_seconds'], 20)
 
         detail_response = self.client.patch(
             reverse('admin-video-detail', args=[first_video['id']]),
@@ -747,6 +749,11 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.data['description_preview'], 'My video description')
         self.assertEqual(upload_response.data['visibility'], 'private')
         self.assertEqual(upload_response.data['category'], 'technology')
+        self.assertEqual(upload_response.data['access_type'], Video.ACCESS_FREE)
+        self.assertEqual(upload_response.data['preview_seconds'], 0)
+        self.assertTrue(upload_response.data['can_watch'])
+        self.assertFalse(upload_response.data['is_locked'])
+        self.assertIsNone(upload_response.data['lock_reason'])
         self.assertTrue(upload_response.data['thumbnail'])
         self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
 
@@ -939,6 +946,7 @@ class VideoAPITestCase(APITestCase):
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
             'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
+            'access_type', 'preview_seconds', 'can_watch', 'is_locked', 'lock_reason',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }
@@ -1063,6 +1071,7 @@ class VideoAPITestCase(APITestCase):
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
             'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
+            'access_type', 'preview_seconds', 'can_watch', 'is_locked', 'lock_reason',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }
@@ -1077,6 +1086,137 @@ class VideoAPITestCase(APITestCase):
         self.assertIn('results', list_response.data)
         self.assertTrue(expected_keys.issubset(set(list_response.data['results'][0].keys())))
         self.assertTrue(list_response.data['results'][0]['owner_avatar_url'].startswith('http://testserver/media/avatars/'))
+
+    def test_free_video_can_watch_for_anonymous_non_member_and_member(self):
+        owner = self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Free video',
+                'access_type': Video.ACCESS_FREE,
+                'file': SimpleUploadedFile('free-video.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        self.client.force_authenticate(user=None)
+        anonymous_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(anonymous_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(anonymous_response.data['can_watch'])
+        self.assertFalse(anonymous_response.data['is_locked'])
+        self.assertIsNone(anonymous_response.data['lock_reason'])
+        self.assertIsNotNone(anonymous_response.data['file_url'])
+
+        non_member = self.create_user('free-non-member@example.com')
+        self.client.force_authenticate(user=non_member)
+        non_member_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(non_member_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(non_member_response.data['can_watch'])
+        self.assertIsNotNone(non_member_response.data['file_url'])
+
+        member = self.create_user('free-member@example.com')
+        self._create_active_membership(member)
+        self.client.force_authenticate(user=member)
+        member_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(member_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(member_response.data['can_watch'])
+        self.assertIsNotNone(member_response.data['file_url'])
+
+        self.client.force_authenticate(user=owner)
+
+    def test_membership_video_anonymous_user_is_locked_and_file_hidden(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Membership video anonymous lock',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'file': SimpleUploadedFile('member-anon.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        self.client.force_authenticate(user=None)
+        response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['can_watch'])
+        self.assertTrue(response.data['is_locked'])
+        self.assertEqual(response.data['lock_reason'], 'membership_required')
+        self.assertIsNone(response.data['file_url'])
+
+    def test_membership_video_non_member_is_locked_and_file_hidden(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Membership video non-member lock',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'file': SimpleUploadedFile('member-non.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        non_member = self.create_user('plain-user@example.com')
+        self.client.force_authenticate(user=non_member)
+        response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['can_watch'])
+        self.assertTrue(response.data['is_locked'])
+        self.assertEqual(response.data['lock_reason'], 'membership_required')
+        self.assertIsNone(response.data['file_url'])
+
+    def test_membership_video_active_membership_user_can_watch(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Membership video member watch',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'preview_seconds': 15,
+                'file': SimpleUploadedFile('member-active.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        member = self.create_user('active-member@example.com')
+        self._create_active_membership(member)
+        self.client.force_authenticate(user=member)
+
+        response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['access_type'], Video.ACCESS_MEMBERSHIP)
+        self.assertEqual(response.data['preview_seconds'], 15)
+        self.assertTrue(response.data['can_watch'])
+        self.assertFalse(response.data['is_locked'])
+        self.assertIsNone(response.data['lock_reason'])
+        self.assertIsNotNone(response.data['file_url'])
+
+    def _create_active_membership(self, user):
+        plan, _ = MembershipPlan.objects.get_or_create(
+            code=MembershipPlan.CODE_MONTHLY,
+            defaults={
+                'name': 'Monthly Membership',
+                'description': 'Monthly plan',
+                'price_lbc': Decimal('10.00000000'),
+                'duration_days': 30,
+                'is_active': True,
+            },
+        )
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount=Decimal('10.00'),
+            currency='USD',
+            status=PaymentOrder.STATUS_PAID,
+        )
+        return UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=1),
+            ends_at=django_timezone.now() + timedelta(days=29),
+        )
 
     def test_owner_can_patch_video_metadata_and_manual_thumbnail(self):
         self.authenticate()
