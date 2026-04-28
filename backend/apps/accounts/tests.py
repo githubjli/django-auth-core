@@ -1050,6 +1050,44 @@ class VideoAPITestCase(APITestCase):
             status.HTTP_404_NOT_FOUND,
         )
 
+    def test_public_video_list_supports_access_type_filter(self):
+        self.authenticate()
+        free_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public free item',
+                'visibility': 'public',
+                'access_type': Video.ACCESS_FREE,
+                'file': SimpleUploadedFile('public-free.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        membership_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public membership item',
+                'visibility': 'public',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'file': SimpleUploadedFile('public-membership.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        self.client.force_authenticate(user=None)
+
+        free_response = self.client.get(reverse('public-video-list'), {'access_type': Video.ACCESS_FREE})
+        self.assertEqual(free_response.status_code, status.HTTP_200_OK)
+        free_ids = [item['id'] for item in free_response.data['results']]
+        self.assertIn(free_video['id'], free_ids)
+        self.assertNotIn(membership_video['id'], free_ids)
+        self.assertTrue(all(item['access_type'] == Video.ACCESS_FREE for item in free_response.data['results']))
+
+        membership_response = self.client.get(reverse('public-video-list'), {'access_type': Video.ACCESS_MEMBERSHIP})
+        self.assertEqual(membership_response.status_code, status.HTTP_200_OK)
+        membership_ids = [item['id'] for item in membership_response.data['results']]
+        self.assertIn(membership_video['id'], membership_ids)
+        self.assertNotIn(free_video['id'], membership_ids)
+        self.assertTrue(all(item['access_type'] == Video.ACCESS_MEMBERSHIP for item in membership_response.data['results']))
+
     def test_public_video_contract_fields_are_stable_for_frontend(self):
         owner = self.authenticate()
         owner.avatar = SimpleUploadedFile('owner-avatar.png', b'avatar-bytes', content_type='image/png')
