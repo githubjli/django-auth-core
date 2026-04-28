@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from apps.accounts.models import DramaEpisode, DramaSeries
+from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress
 
 
 class DramaSeriesSerializer(serializers.ModelSerializer):
@@ -40,13 +40,28 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(obj.cover.url)
 
     def get_is_favorited(self, _obj):
-        return False
+        favorite_series_ids = self.context.get('favorite_series_ids')
+        if favorite_series_ids is None:
+            return False
+        return _obj.id in favorite_series_ids
 
     def get_continue_episode_no(self, _obj):
-        return None
+        progress_by_series_id = self.context.get('progress_by_series_id')
+        if not progress_by_series_id:
+            return None
+        progress = progress_by_series_id.get(_obj.id)
+        if progress is None or progress.episode_id is None:
+            return None
+        return progress.episode.episode_no
 
     def get_continue_progress_seconds(self, _obj):
-        return None
+        progress_by_series_id = self.context.get('progress_by_series_id')
+        if not progress_by_series_id:
+            return None
+        progress = progress_by_series_id.get(_obj.id)
+        if progress is None:
+            return None
+        return progress.progress_seconds
 
 
 class DramaEpisodeSerializer(serializers.ModelSerializer):
@@ -105,3 +120,88 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
         if not obj.is_free:
             return None
         return self._build_url(obj.hls_url)
+
+
+class DramaProgressSaveSerializer(serializers.Serializer):
+    episode_id = serializers.IntegerField(min_value=1)
+    progress_seconds = serializers.IntegerField(min_value=0)
+    completed = serializers.BooleanField()
+
+
+class DramaWatchProgressSerializer(serializers.ModelSerializer):
+    series_id = serializers.IntegerField(source='series.id', read_only=True)
+    episode_id = serializers.IntegerField(source='episode.id', read_only=True)
+    episode_no = serializers.IntegerField(source='episode.episode_no', read_only=True)
+
+    class Meta:
+        model = DramaWatchProgress
+        fields = (
+            'series_id',
+            'episode_id',
+            'episode_no',
+            'progress_seconds',
+            'completed',
+            'updated_at',
+        )
+
+
+class DramaFavoriteStateSerializer(serializers.Serializer):
+    series_id = serializers.IntegerField()
+    is_favorited = serializers.BooleanField()
+    favorite_count = serializers.IntegerField()
+
+
+class AccountDramaProgressItemSerializer(serializers.ModelSerializer):
+    series_id = serializers.IntegerField(source='series.id', read_only=True)
+    series_title = serializers.CharField(source='series.title', read_only=True)
+    cover_url = serializers.SerializerMethodField()
+    episode_id = serializers.IntegerField(source='episode.id', read_only=True)
+    episode_no = serializers.IntegerField(source='episode.episode_no', read_only=True)
+    duration_seconds = serializers.IntegerField(source='episode.duration_seconds', read_only=True)
+
+    class Meta:
+        model = DramaWatchProgress
+        fields = (
+            'series_id',
+            'series_title',
+            'cover_url',
+            'episode_id',
+            'episode_no',
+            'progress_seconds',
+            'duration_seconds',
+            'updated_at',
+        )
+
+    def get_cover_url(self, obj):
+        request = self.context.get('request')
+        if not getattr(obj.series, 'cover', None):
+            return None
+        if request is None:
+            return obj.series.cover.url
+        return request.build_absolute_uri(obj.series.cover.url)
+
+
+class AccountDramaFavoriteItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source='series.id', read_only=True)
+    title = serializers.CharField(source='series.title', read_only=True)
+    cover_url = serializers.SerializerMethodField()
+    total_episodes = serializers.IntegerField(source='series.total_episodes', read_only=True)
+    favorited_at = serializers.DateTimeField(source='created_at', read_only=True)
+
+    class Meta:
+        model = DramaFavorite
+        fields = (
+            'id',
+            'title',
+            'cover_url',
+            'total_episodes',
+            'favorited_at',
+        )
+
+    def get_cover_url(self, obj):
+        request = self.context.get('request')
+        if not getattr(obj.series, 'cover', None):
+            return None
+        if request is None:
+            return obj.series.cover.url
+        return request.build_absolute_uri(obj.series.cover.url)
