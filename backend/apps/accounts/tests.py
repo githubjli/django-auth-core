@@ -3455,6 +3455,167 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(active_response.data['status'], UserMembership.STATUS_ACTIVE)
         self.assertEqual(active_response.data['plan']['code'], self.plan.code)
 
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_active_member_cannot_create_order_for_same_plan(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNotUsedAddress001'}
+        user = self.create_user('active-same@example.com')
+        self.client.force_authenticate(user=user)
+        source_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOACTIVE001',
+        )
+        UserMembership.objects.create(
+            user=user,
+            source_order=source_order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=1),
+            ends_at=django_timezone.now() + timedelta(days=30),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['code'], 'active_membership_exists')
+        self.assertEqual(response.data['current_membership']['plan']['code'], self.plan.code)
+        mock_address_unused.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_active_member_cannot_create_order_for_different_plan(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNotUsedAddress002'}
+        quarterly_plan = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_QUARTERLY,
+            name='Quarterly',
+            description='Quarterly plan',
+            price_lbc='30.00000000',
+            duration_days=90,
+            is_active=True,
+            sort_order=2,
+        )
+        user = self.create_user('active-diff@example.com')
+        self.client.force_authenticate(user=user)
+        source_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOACTIVE002',
+        )
+        UserMembership.objects.create(
+            user=user,
+            source_order=source_order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=1),
+            ends_at=django_timezone.now() + timedelta(days=30),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': quarterly_plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['code'], 'active_membership_exists')
+        self.assertEqual(response.data['current_membership']['plan']['code'], self.plan.code)
+        mock_address_unused.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_pending_membership_order_is_reused(self, mock_address_unused):
+        user = self.create_user('reuse-pending@example.com')
+        self.client.force_authenticate(user=user)
+        existing_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOREUSE001',
+            pay_to_address='bReuseAddress001',
+            expires_at=django_timezone.now() + timedelta(minutes=30),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['order_no'], existing_order.order_no)
+        self.assertTrue(response.data['reused'])
+        self.assertEqual(PaymentOrder.objects.filter(user=user, order_type=PaymentOrder.TYPE_MEMBERSHIP).count(), 1)
+        mock_address_unused.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_expired_pending_order_does_not_block_new_order(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNewAfterExpired001'}
+        user = self.create_user('expired-pending@example.com')
+        self.client.force_authenticate(user=user)
+        PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOEXPIREDP001',
+            pay_to_address='bExpiredPending001',
+            expires_at=django_timezone.now() - timedelta(minutes=1),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['reused'])
+        self.assertEqual(PaymentOrder.objects.filter(user=user, order_type=PaymentOrder.TYPE_MEMBERSHIP).count(), 2)
+        mock_address_unused.assert_called_once()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_cancelled_or_failed_order_does_not_block_new_order(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNewAfterCancelled001'}
+        user = self.create_user('cancelled-failed@example.com')
+        self.client.force_authenticate(user=user)
+        PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_CANCELLED,
+            order_no='MOCANCEL001',
+            pay_to_address='bCancelledOrder001',
+            expires_at=django_timezone.now() + timedelta(minutes=10),
+        )
+        PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_FAILED,
+            order_no='MOFAILED001',
+            pay_to_address='bFailedOrder001',
+            expires_at=django_timezone.now() + timedelta(minutes=10),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['reused'])
+        self.assertEqual(PaymentOrder.objects.filter(user=user, order_type=PaymentOrder.TYPE_MEMBERSHIP).count(), 3)
+        mock_address_unused.assert_called_once()
+
 
 @override_settings(
     LBRY_DAEMON_URL='http://127.0.0.1:5279',

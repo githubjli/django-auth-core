@@ -94,6 +94,7 @@ from apps.accounts.serializers import (
     VideoSerializer,
 )
 from apps.accounts.services import (
+    ActiveMembershipExistsError,
     AntMediaLiveAdapter,
     LbryDaemonConnectionError,
     LbryDaemonError,
@@ -1865,7 +1866,23 @@ class MembershipOrderCreateAPIView(APIView):
         plan = serializer.validated_data['plan']
         service = MembershipOrderService()
         try:
-            order = service.create_order(user=request.user, plan=plan)
+            order, reused = service.create_order(user=request.user, plan=plan)
+        except ActiveMembershipExistsError as exc:
+            membership = exc.membership
+            payload = {
+                'code': 'active_membership_exists',
+                'detail': 'You already have an active membership. Additional membership purchases are not available yet.',
+            }
+            if membership is not None and membership.plan_id:
+                payload['current_membership'] = {
+                    'plan': {
+                        'id': membership.plan_id,
+                        'code': membership.plan.code,
+                        'name': membership.plan.name,
+                    },
+                    'valid_until': membership.ends_at,
+                }
+            return Response(payload, status=status.HTTP_409_CONFLICT)
         except LbryDaemonConnectionError as exc:
             logger.exception('membership_order_create daemon_connection_error user_id=%s', request.user.id)
             return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -1885,7 +1902,12 @@ class MembershipOrderCreateAPIView(APIView):
             logger.exception('membership_order_create daemon_error user_id=%s', request.user.id)
             return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         response_serializer = MembershipOrderSerializer(order)
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        response_payload = dict(response_serializer.data)
+        if reused:
+            response_payload['reused'] = True
+            return Response(response_payload, status=status.HTTP_200_OK)
+        response_payload['reused'] = False
+        return Response(response_payload, status=status.HTTP_201_CREATED)
 
 
 class MembershipOrderDetailAPIView(APIView):
