@@ -130,12 +130,14 @@ class VideoAdmin(admin.ModelAdmin):
         'category',
         'status',
         'visibility',
+        'access_type',
+        'preview_seconds',
         'like_count',
         'comment_count',
         'created_at',
         'updated_at',
     )
-    list_filter = ('status', 'visibility', 'category', 'created_at')
+    list_filter = ('status', 'visibility', 'access_type', 'category', 'created_at')
     search_fields = ('title', 'description', 'owner__email', 'owner__first_name', 'owner__last_name')
     ordering = ('-created_at', '-id')
     readonly_fields = ('like_count', 'comment_count', 'created_at', 'updated_at')

@@ -353,8 +353,16 @@ class VideoSerializer(serializers.ModelSerializer):
     category_slug = serializers.CharField(source='category.slug', read_only=True)
     like_count = serializers.IntegerField(read_only=True)
     comment_count = serializers.IntegerField(read_only=True)
+    access_type = serializers.ChoiceField(
+        choices=[Video.ACCESS_FREE, Video.ACCESS_MEMBERSHIP],
+        required=False,
+    )
+    preview_seconds = serializers.IntegerField(min_value=0, required=False)
     view_count = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
+    can_watch = serializers.SerializerMethodField()
+    is_locked = serializers.SerializerMethodField()
+    lock_reason = serializers.SerializerMethodField()
     category = OptionalSlugRelatedField(
         slug_field='slug',
         queryset=Category.objects.filter(is_active=True),
@@ -380,6 +388,11 @@ class VideoSerializer(serializers.ModelSerializer):
             'category',
             'category_name',
             'category_slug',
+            'access_type',
+            'preview_seconds',
+            'can_watch',
+            'is_locked',
+            'lock_reason',
             'like_count',
             'comment_count',
             'view_count',
@@ -403,6 +416,9 @@ class VideoSerializer(serializers.ModelSerializer):
             'is_liked',
             'file_url',
             'thumbnail_url',
+            'can_watch',
+            'is_locked',
+            'lock_reason',
             'created_at',
         )
 
@@ -415,6 +431,8 @@ class VideoSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(obj.owner.avatar.url)
 
     def get_file_url(self, obj):
+        if not self._can_watch(obj):
+            return None
         return self._build_absolute_file_url(obj.file)
 
     def get_thumbnail_url(self, obj):
@@ -443,6 +461,26 @@ class VideoSerializer(serializers.ModelSerializer):
             return preview
         return f'{preview[:137].rstrip()}...'
 
+    def get_can_watch(self, obj):
+        return self._can_watch(obj)
+
+    def get_is_locked(self, obj):
+        return not self._can_watch(obj)
+
+    def get_lock_reason(self, obj):
+        if self._can_watch(obj):
+            return None
+        if obj.access_type == Video.ACCESS_MEMBERSHIP:
+            return 'membership_required'
+        return None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if self.context.get('mask_locked_file_fields', False) and not self._can_watch(instance):
+            data['file'] = None
+            data['file_url'] = None
+        return data
+
     def _build_absolute_file_url(self, field_file):
         request = self.context.get('request')
         if not field_file:
@@ -450,6 +488,30 @@ class VideoSerializer(serializers.ModelSerializer):
         if request is None:
             return field_file.url
         return request.build_absolute_uri(field_file.url)
+
+    def _can_watch(self, obj):
+        if obj.access_type == Video.ACCESS_FREE:
+            return True
+        return self._viewer_has_active_membership()
+
+    def _viewer_has_active_membership(self):
+        cached = getattr(self, '_has_active_membership_cache', None)
+        if cached is not None:
+            return cached
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request is not None else None
+        if user is None or not user.is_authenticated:
+            self._has_active_membership_cache = False
+            return False
+        now = timezone.now()
+        has_membership = UserMembership.objects.filter(
+            user=user,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        ).exists()
+        self._has_active_membership_cache = has_membership
+        return has_membership
 
 
 
@@ -1540,6 +1602,11 @@ class AdminVideoSerializer(VideoSerializer):
             'category',
             'status',
             'visibility',
+            'access_type',
+            'preview_seconds',
+            'can_watch',
+            'is_locked',
+            'lock_reason',
             'like_count',
             'comment_count',
             'created_at',
@@ -1553,6 +1620,9 @@ class AdminVideoSerializer(VideoSerializer):
             'owner_email',
             'like_count',
             'comment_count',
+            'can_watch',
+            'is_locked',
+            'lock_reason',
             'created_at',
             'updated_at',
         )
