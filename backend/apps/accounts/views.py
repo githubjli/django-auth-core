@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth import authenticate
 from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -113,6 +114,7 @@ from apps.accounts.services import (
     get_product_wallet_send_amount,
     WalletAddressConflictError,
     generate_video_thumbnail,
+    MeowPointService,
 )
 
 User = get_user_model()
@@ -182,6 +184,21 @@ class RegisterAPIView(generics.CreateAPIView):
 class LoginAPIView(TokenObtainPairView):
     serializer_class = EmailTokenObtainPairSerializer
     permission_classes = [permissions.AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code != status.HTTP_200_OK:
+            return response
+
+        user = authenticate(request=request, email=request.data.get('email'), password=request.data.get('password'))
+        if user is None:
+            return response
+        try:
+            reward_result = MeowPointService.grant_daily_login_reward(user=user)
+            response.data['daily_login_reward'] = reward_result
+        except Exception:
+            logger.exception('Failed to grant daily login reward', extra={'user_id': user.id})
+        return response
 
 
 class RefreshAPIView(TokenRefreshView):
