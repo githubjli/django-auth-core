@@ -32,6 +32,7 @@ from apps.accounts.models import (
     MeowPointPackage,
     MeowPointPurchase,
     MeowPointWallet,
+    DailyLoginReward,
     DramaUnlock,
     DramaEpisode,
     UserMembership,
@@ -1988,6 +1989,7 @@ def _extract_thumbnail_with_ffmpeg(video, time_offset: float):
 
 
 class MeowPointService:
+    DAILY_LOGIN_REWARD_AMOUNT = 10
     @staticmethod
     def get_or_create_wallet(user):
         wallet, _created = MeowPointWallet.objects.get_or_create(user=user)
@@ -2069,6 +2071,30 @@ class MeowPointService:
                 note=note,
             )
         return wallet, ledger
+
+    @staticmethod
+    def grant_daily_login_reward(*, user, reward_date=None):
+        target_date = reward_date or timezone.localdate()
+        with transaction.atomic():
+            reward, created = DailyLoginReward.objects.select_for_update().get_or_create(
+                user=user,
+                reward_date=target_date,
+                defaults={'points_amount': MeowPointService.DAILY_LOGIN_REWARD_AMOUNT},
+            )
+            if not created:
+                return {'granted': False, 'points_amount': reward.points_amount, 'reward_date': str(target_date)}
+
+            _wallet, ledger = MeowPointService.add_points(
+                user=user,
+                amount=reward.points_amount,
+                entry_type=MeowPointLedger.TYPE_REWARD,
+                target_type='daily_login_reward',
+                target_id=reward.id,
+                note='Daily login reward',
+            )
+            reward.ledger_entry = ledger
+            reward.save(update_fields=['ledger_entry'])
+            return {'granted': True, 'points_amount': reward.points_amount, 'reward_date': str(target_date)}
 
 
 class MeowPointPurchaseService:

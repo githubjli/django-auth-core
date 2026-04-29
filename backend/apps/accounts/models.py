@@ -1430,6 +1430,30 @@ class MeowPointLedger(models.Model):
         ordering = ['-created_at', '-id']
 
 
+class DailyLoginReward(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='daily_login_rewards',
+    )
+    reward_date = models.DateField()
+    points_amount = models.PositiveIntegerField(default=10)
+    ledger_entry = models.OneToOneField(
+        MeowPointLedger,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='daily_login_reward',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-reward_date', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'reward_date'], name='unique_daily_login_reward_per_user_date'),
+        ]
+
+
 class MeowPointPurchase(models.Model):
     STATUS_PENDING = 'pending'
     STATUS_PAID = 'paid'
