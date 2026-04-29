@@ -1598,6 +1598,11 @@ class PublicVideoListAPIView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
     pagination_class = VideoPagination
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['mask_locked_file_fields'] = True
+        return context
+
     def get_queryset(self):
         queryset = annotate_videos_for_request(
             Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
@@ -1626,6 +1631,11 @@ class PublicVideoDetailAPIView(generics.RetrieveAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.AllowAny]
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['mask_locked_file_fields'] = True
+        return context
+
     def get_queryset(self):
         return annotate_videos_for_request(
             Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
@@ -1637,6 +1647,11 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
     serializer_class = VideoSerializer
     permission_classes = [permissions.AllowAny]
     pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['mask_locked_file_fields'] = True
+        return context
 
     def get_queryset(self):
         current_video = generics.get_object_or_404(

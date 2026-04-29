@@ -474,6 +474,13 @@ class VideoSerializer(serializers.ModelSerializer):
             return 'membership_required'
         return None
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if self.context.get('mask_locked_file_fields', False) and not self._can_watch(instance):
+            data['file'] = None
+            data['file_url'] = None
+        return data
+
     def _build_absolute_file_url(self, field_file):
         request = self.context.get('request')
         if not field_file:

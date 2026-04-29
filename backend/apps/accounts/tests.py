@@ -1143,6 +1143,7 @@ class VideoAPITestCase(APITestCase):
         self.assertTrue(anonymous_response.data['can_watch'])
         self.assertFalse(anonymous_response.data['is_locked'])
         self.assertIsNone(anonymous_response.data['lock_reason'])
+        self.assertIsNotNone(anonymous_response.data['file'])
         self.assertIsNotNone(anonymous_response.data['file_url'])
 
         non_member = self.create_user('free-non-member@example.com')
@@ -1150,6 +1151,7 @@ class VideoAPITestCase(APITestCase):
         non_member_response = self.client.get(reverse('public-video-detail', args=[video_id]))
         self.assertEqual(non_member_response.status_code, status.HTTP_200_OK)
         self.assertTrue(non_member_response.data['can_watch'])
+        self.assertIsNotNone(non_member_response.data['file'])
         self.assertIsNotNone(non_member_response.data['file_url'])
 
         member = self.create_user('free-member@example.com')
@@ -1158,6 +1160,7 @@ class VideoAPITestCase(APITestCase):
         member_response = self.client.get(reverse('public-video-detail', args=[video_id]))
         self.assertEqual(member_response.status_code, status.HTTP_200_OK)
         self.assertTrue(member_response.data['can_watch'])
+        self.assertIsNotNone(member_response.data['file'])
         self.assertIsNotNone(member_response.data['file_url'])
 
         self.client.force_authenticate(user=owner)
@@ -1180,6 +1183,7 @@ class VideoAPITestCase(APITestCase):
         self.assertFalse(response.data['can_watch'])
         self.assertTrue(response.data['is_locked'])
         self.assertEqual(response.data['lock_reason'], 'membership_required')
+        self.assertIsNone(response.data['file'])
         self.assertIsNone(response.data['file_url'])
 
     def test_membership_video_non_member_is_locked_and_file_hidden(self):
@@ -1201,6 +1205,7 @@ class VideoAPITestCase(APITestCase):
         self.assertFalse(response.data['can_watch'])
         self.assertTrue(response.data['is_locked'])
         self.assertEqual(response.data['lock_reason'], 'membership_required')
+        self.assertIsNone(response.data['file'])
         self.assertIsNone(response.data['file_url'])
 
     def test_membership_video_active_membership_user_can_watch(self):
@@ -1227,6 +1232,7 @@ class VideoAPITestCase(APITestCase):
         self.assertTrue(response.data['can_watch'])
         self.assertFalse(response.data['is_locked'])
         self.assertIsNone(response.data['lock_reason'])
+        self.assertIsNotNone(response.data['file'])
         self.assertIsNotNone(response.data['file_url'])
 
     def _create_active_membership(self, user):
