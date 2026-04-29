@@ -171,6 +171,13 @@ class DramaSeries(models.Model):
         (STATUS_ARCHIVED, 'Archived'),
     ]
 
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_series',
+        null=True,
+        blank=True,
+    )
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     cover = models.FileField(upload_to='dramas/covers/', blank=True)
@@ -198,6 +205,14 @@ class DramaSeries(models.Model):
 
 
 class DramaEpisode(models.Model):
+    STATUS_DRAFT = 'draft'
+    STATUS_PUBLISHED = 'published'
+    STATUS_ARCHIVED = 'archived'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_PUBLISHED, 'Published'),
+        (STATUS_ARCHIVED, 'Archived'),
+    ]
     UNLOCK_FREE = 'free'
     UNLOCK_MEOW_POINTS = 'meow_points'
     UNLOCK_MEMBERSHIP = 'membership'
@@ -216,14 +231,17 @@ class DramaEpisode(models.Model):
     )
     episode_no = models.PositiveIntegerField()
     title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
     video_file = models.FileField(upload_to='dramas/videos/', blank=True)
     video_url = models.URLField(blank=True)
     hls_url = models.URLField(blank=True)
+    thumbnail = models.FileField(upload_to='dramas/thumbnails/', blank=True)
     duration_seconds = models.PositiveIntegerField(default=0)
     is_free = models.BooleanField(default=False)
     unlock_type = models.CharField(max_length=20, choices=UNLOCK_TYPE_CHOICES, default=UNLOCK_MEOW_POINTS)
     meow_points_price = models.PositiveIntegerField(default=0)
     sort_order = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PUBLISHED)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
