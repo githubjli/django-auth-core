@@ -13,6 +13,7 @@ from apps.accounts.models import (
     DramaUnlock,
     DramaSeries,
     DramaWatchProgress,
+    DailyLoginReward,
     Gift,
     GiftTransaction,
     LiveStream,
@@ -243,6 +244,16 @@ class MeowPointLedgerAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at',)
     autocomplete_fields = ('user', 'payment_order')
+
+
+@admin.register(DailyLoginReward)
+class DailyLoginRewardAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'reward_date', 'points_amount', 'created_at')
+    list_filter = ('reward_date', 'created_at')
+    search_fields = ('user__email',)
+    ordering = ('-reward_date', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('user', 'ledger_entry')
 
 
 @admin.register(MeowPointPurchase)

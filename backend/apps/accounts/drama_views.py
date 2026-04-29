@@ -2,9 +2,12 @@ from django.db import transaction
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
+from datetime import timedelta
 from rest_framework import generics
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,13 +16,15 @@ from apps.accounts.drama_serializers import (
     AccountDramaFavoriteItemSerializer,
     AccountDramaProgressItemSerializer,
     DramaEpisodeSerializer,
+    CreatorDramaEpisodeSerializer,
+    CreatorDramaSeriesSerializer,
     DramaFavoriteStateSerializer,
     DramaUnlockResponseSerializer,
     DramaProgressSaveSerializer,
     DramaSeriesSerializer,
     DramaWatchProgressSerializer,
 )
-from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaUnlock, DramaWatchProgress
+from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaSeriesView, DramaUnlock, DramaWatchProgress
 from apps.accounts.services import DramaAccessService
 
 
@@ -263,3 +268,137 @@ class DramaEpisodeUnlockAPIView(APIView):
             }
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class IsCreatorOrAdmin(BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and (user.is_creator or user.is_staff or user.is_superuser))
+
+
+def _recount_total_episodes(series: DramaSeries):
+    total = DramaEpisode.objects.filter(series=series, is_active=True).count()
+    DramaSeries.objects.filter(pk=series.pk).update(total_episodes=total)
+
+
+class CreatorDramaSeriesListCreateAPIView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated, IsCreatorOrAdmin]
+    serializer_class = CreatorDramaSeriesSerializer
+
+    def get_queryset(self):
+        qs = DramaSeries.objects.all().order_by('-created_at', '-id')
+        if self.request.user.is_staff or self.request.user.is_superuser:
+            return qs
+        return qs.filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class CreatorDramaSeriesDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated, IsCreatorOrAdmin]
+    serializer_class = CreatorDramaSeriesSerializer
+
+    def get_queryset(self):
+        qs = DramaSeries.objects.all()
+        if self.request.user.is_staff or self.request.user.is_superuser:
+            return qs
+        return qs.filter(owner=self.request.user)
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.save(update_fields=['is_active', 'updated_at'])
+
+
+class CreatorDramaEpisodeListCreateAPIView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated, IsCreatorOrAdmin]
+    serializer_class = CreatorDramaEpisodeSerializer
+
+    def _get_series(self):
+        qs = DramaSeries.objects.all()
+        if not (self.request.user.is_staff or self.request.user.is_superuser):
+            qs = qs.filter(owner=self.request.user)
+        return get_object_or_404(qs, pk=self.kwargs['pk'])
+
+    def get_queryset(self):
+        series = self._get_series()
+        return DramaEpisode.objects.filter(series=series).order_by('sort_order', 'episode_no', 'id')
+
+    def perform_create(self, serializer):
+        series = self._get_series()
+        episode_no = serializer.validated_data.get('episode_no')
+        if episode_no is not None and DramaEpisode.objects.filter(series=series, episode_no=episode_no).exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'episode_no': ['Episode number already exists in this series.']})
+        serializer.save(series=series)
+        _recount_total_episodes(series)
+
+
+class CreatorDramaEpisodeDetailAPIView(generics.UpdateAPIView, generics.DestroyAPIView):
+    permission_classes = [IsAuthenticated, IsCreatorOrAdmin]
+    serializer_class = CreatorDramaEpisodeSerializer
+    lookup_url_kwarg = 'episode_id'
+
+    def get_queryset(self):
+        series_qs = DramaSeries.objects.all()
+        if not (self.request.user.is_staff or self.request.user.is_superuser):
+            series_qs = series_qs.filter(owner=self.request.user)
+        series = get_object_or_404(series_qs, pk=self.kwargs['pk'])
+        return DramaEpisode.objects.filter(series=series)
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.save(update_fields=['is_active', 'updated_at'])
+        _recount_total_episodes(instance.series)
+
+
+class DramaEpisodeProgressUpsertAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, episode_id):
+        episode = get_object_or_404(DramaEpisode.objects.filter(is_active=True, series__is_active=True), pk=episode_id)
+        serializer = DramaProgressSaveSerializer(data={**request.data, 'episode_id': episode.id})
+        serializer.is_valid(raise_exception=True)
+        progress, _created = DramaWatchProgress.objects.update_or_create(
+            user=request.user,
+            series=episode.series,
+            defaults={
+                'episode': episode,
+                'progress_seconds': serializer.validated_data['progress_seconds'],
+                'completed': serializer.validated_data['completed'],
+            },
+        )
+        return Response(DramaWatchProgressSerializer(progress).data)
+
+
+class DramaSeriesViewTrackAPIView(APIView):
+    def post(self, request, pk):
+        series = get_object_or_404(
+            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            pk=pk,
+        )
+        now = timezone.now()
+        since = now - timedelta(hours=24)
+        counted = False
+        with transaction.atomic():
+            if request.user.is_authenticated:
+                duplicate = DramaSeriesView.objects.filter(series=series, viewer=request.user, created_at__gte=since).exists()
+                if not duplicate:
+                    DramaSeriesView.objects.create(series=series, viewer=request.user)
+                    DramaSeries.objects.filter(pk=series.pk).update(view_count=F('view_count') + 1)
+                    counted = True
+            else:
+                if not request.session.session_key:
+                    request.session.save()
+                session_key = request.session.session_key or ''
+                ip_address = request.META.get('REMOTE_ADDR')
+                duplicate = DramaSeriesView.objects.filter(series=series, created_at__gte=since).filter(
+                    Q(session_key=session_key) | Q(ip_address=ip_address)
+                ).exists()
+                if not duplicate:
+                    DramaSeriesView.objects.create(series=series, session_key=session_key, ip_address=ip_address)
+                    DramaSeries.objects.filter(pk=series.pk).update(view_count=F('view_count') + 1)
+                    counted = True
+
+        series.refresh_from_db(fields=['view_count'])
+        return Response({'series_id': series.id, 'view_count': series.view_count, 'counted': counted})

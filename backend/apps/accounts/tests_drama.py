@@ -269,3 +269,42 @@ class DramaPhase2APITestCase(APITestCase):
         self.assertFalse(item['is_favorited'])
         self.assertIsNone(item['continue_episode_no'])
         self.assertIsNone(item['continue_progress_seconds'])
+
+
+class DramaViewTrackingAPITestCase(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email='viewer@example.com', password='pass1234')
+        self.series = DramaSeries.objects.create(title='Tracked', status=DramaSeries.STATUS_PUBLISHED, is_active=True)
+        self.inactive_series = DramaSeries.objects.create(title='Inactive', status=DramaSeries.STATUS_DRAFT, is_active=False)
+
+    def test_first_view_increments_count(self):
+        response = self.client.post(reverse('drama-series-view-track', args=[self.series.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['counted'])
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.view_count, 1)
+
+    def test_duplicate_authenticated_view_within_24h_not_incremented(self):
+        self.client.force_authenticate(self.user)
+        first = self.client.post(reverse('drama-series-view-track', args=[self.series.id]), format='json')
+        second = self.client.post(reverse('drama-series-view-track', args=[self.series.id]), format='json')
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertFalse(second.data['counted'])
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.view_count, 1)
+
+    def test_anonymous_view_works(self):
+        response = self.client.post(reverse('drama-series-view-track', args=[self.series.id]), format='json', REMOTE_ADDR='1.2.3.4')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['counted'])
+
+    def test_inactive_or_draft_not_counted(self):
+        response = self.client.post(reverse('drama-series-view-track', args=[self.inactive_series.id]), format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_list_and_detail_unchanged(self):
+        list_response = self.client.get(reverse('drama-series-list'))
+        detail_response = self.client.get(reverse('drama-series-detail', args=[self.series.id]))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)

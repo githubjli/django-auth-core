@@ -7,6 +7,7 @@ from apps.accounts.meow_points_views import (
     MeowPointOrderTxHintAPIView,
     MeowPointPackageListAPIView,
     MeowPointWalletAPIView,
+    DailyLoginRewardClaimAPIView,
 )
 
 urlpatterns = [
@@ -16,4 +17,5 @@ urlpatterns = [
     path('orders/', MeowPointOrderListCreateAPIView.as_view(), name='meow-point-order-list-create'),
     path('orders/<str:order_no>/', MeowPointOrderDetailAPIView.as_view(), name='meow-point-order-detail'),
     path('orders/<str:order_no>/tx-hint/', MeowPointOrderTxHintAPIView.as_view(), name='meow-point-order-tx-hint'),
+    path('daily-login-reward/', DailyLoginRewardClaimAPIView.as_view(), name='meow-point-daily-login-reward-claim'),
 ]

@@ -21,6 +21,7 @@ urlpatterns = [
     path('api/', include('apps.accounts.product_order_urls')),
     path('api/live/', include('apps.accounts.live_urls')),
     path('api/dramas/', include('apps.accounts.drama_urls')),
+    path('api/creator/dramas/', include('apps.accounts.creator_drama_urls')),
     path('api/public/categories/', include('apps.accounts.public_category_urls')),
     path('api/public/videos/', include('apps.accounts.public_video_urls')),
 ]
