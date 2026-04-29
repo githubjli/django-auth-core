@@ -303,6 +303,12 @@ class MembershipOrderPersistenceError(LbryDaemonError):
     pass
 
 
+class ActiveMembershipExistsError(LbryDaemonError):
+    def __init__(self, membership: UserMembership):
+        self.membership = membership
+        super().__init__('Active membership already exists.')
+
+
 class WalletPrototypeError(LbryDaemonError):
     pass
 
@@ -522,7 +528,25 @@ class MembershipOrderService:
         self.daemon_client = daemon_client or self.daemon_client_class()
 
     @transaction.atomic
-    def create_order(self, *, user, plan: MembershipPlan) -> PaymentOrder:
+    def create_order(self, *, user, plan: MembershipPlan) -> tuple[PaymentOrder, bool]:
+        now = timezone.now()
+        active_membership = UserMembership.objects.filter(
+            user=user,
+            status=UserMembership.STATUS_ACTIVE,
+            ends_at__gt=now,
+        ).select_related('plan').order_by('-ends_at', '-id').first()
+        if active_membership is not None:
+            raise ActiveMembershipExistsError(active_membership)
+
+        existing_pending = PaymentOrder.objects.filter(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            status=PaymentOrder.STATUS_PENDING,
+            expires_at__gt=now,
+        ).order_by('-created_at', '-id').first()
+        if existing_pending is not None:
+            return existing_pending, True
+
         order = None
         daemon_wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip() or None
         daemon_account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
@@ -592,7 +616,7 @@ class MembershipOrderService:
             order.wallet_address = wallet_address
             order.pay_to_address = address
             order.save(update_fields=['wallet_address', 'pay_to_address', 'updated_at'])
-            return order
+            return order, False
         except (LbryDaemonConnectionError, LbryDaemonRpcError, LbryDaemonInvalidParamsError, WalletAddressConflictError) as exc:
             logger.exception(
                 'membership_order_create failed category=%s order_no=%s rollback_expected=%s',

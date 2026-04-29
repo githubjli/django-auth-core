@@ -315,7 +315,7 @@ class AuthAPITestCase(APITestCase):
 
         self.client.patch(
             reverse('admin-video-detail', args=[second_video['id']]),
-            {'status': 'flagged', 'visibility': 'private'},
+            {'status': 'flagged', 'visibility': 'private', 'access_type': Video.ACCESS_MEMBERSHIP, 'preview_seconds': 20},
             format='json',
         )
 
@@ -323,6 +323,8 @@ class AuthAPITestCase(APITestCase):
         self.assertEqual(inactive_list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(inactive_list_response.data['count'], 1)
         self.assertEqual(inactive_list_response.data['results'][0]['id'], second_video['id'])
+        self.assertEqual(inactive_list_response.data['results'][0]['access_type'], Video.ACCESS_MEMBERSHIP)
+        self.assertEqual(inactive_list_response.data['results'][0]['preview_seconds'], 20)
 
         detail_response = self.client.patch(
             reverse('admin-video-detail', args=[first_video['id']]),
@@ -747,6 +749,11 @@ class VideoAPITestCase(APITestCase):
         self.assertEqual(upload_response.data['description_preview'], 'My video description')
         self.assertEqual(upload_response.data['visibility'], 'private')
         self.assertEqual(upload_response.data['category'], 'technology')
+        self.assertEqual(upload_response.data['access_type'], Video.ACCESS_FREE)
+        self.assertEqual(upload_response.data['preview_seconds'], 0)
+        self.assertTrue(upload_response.data['can_watch'])
+        self.assertFalse(upload_response.data['is_locked'])
+        self.assertIsNone(upload_response.data['lock_reason'])
         self.assertTrue(upload_response.data['thumbnail'])
         self.assertIn('/media/thumbnails/', upload_response.data['thumbnail_url'])
 
@@ -939,6 +946,7 @@ class VideoAPITestCase(APITestCase):
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
             'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
+            'access_type', 'preview_seconds', 'can_watch', 'is_locked', 'lock_reason',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }
@@ -1042,6 +1050,44 @@ class VideoAPITestCase(APITestCase):
             status.HTTP_404_NOT_FOUND,
         )
 
+    def test_public_video_list_supports_access_type_filter(self):
+        self.authenticate()
+        free_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public free item',
+                'visibility': 'public',
+                'access_type': Video.ACCESS_FREE,
+                'file': SimpleUploadedFile('public-free.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        membership_video = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Public membership item',
+                'visibility': 'public',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'file': SimpleUploadedFile('public-membership.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data
+        self.client.force_authenticate(user=None)
+
+        free_response = self.client.get(reverse('public-video-list'), {'access_type': Video.ACCESS_FREE})
+        self.assertEqual(free_response.status_code, status.HTTP_200_OK)
+        free_ids = [item['id'] for item in free_response.data['results']]
+        self.assertIn(free_video['id'], free_ids)
+        self.assertNotIn(membership_video['id'], free_ids)
+        self.assertTrue(all(item['access_type'] == Video.ACCESS_FREE for item in free_response.data['results']))
+
+        membership_response = self.client.get(reverse('public-video-list'), {'access_type': Video.ACCESS_MEMBERSHIP})
+        self.assertEqual(membership_response.status_code, status.HTTP_200_OK)
+        membership_ids = [item['id'] for item in membership_response.data['results']]
+        self.assertIn(membership_video['id'], membership_ids)
+        self.assertNotIn(free_video['id'], membership_ids)
+        self.assertTrue(all(item['access_type'] == Video.ACCESS_MEMBERSHIP for item in membership_response.data['results']))
+
     def test_public_video_contract_fields_are_stable_for_frontend(self):
         owner = self.authenticate()
         owner.avatar = SimpleUploadedFile('owner-avatar.png', b'avatar-bytes', content_type='image/png')
@@ -1063,6 +1109,7 @@ class VideoAPITestCase(APITestCase):
         expected_keys = {
             'id', 'owner_id', 'owner_name', 'owner_avatar_url', 'title', 'description',
             'description_preview', 'visibility', 'category', 'category_name', 'category_slug', 'like_count',
+            'access_type', 'preview_seconds', 'can_watch', 'is_locked', 'lock_reason',
             'comment_count', 'view_count', 'is_liked', 'file', 'file_url', 'thumbnail',
             'thumbnail_url', 'created_at',
         }
@@ -1077,6 +1124,143 @@ class VideoAPITestCase(APITestCase):
         self.assertIn('results', list_response.data)
         self.assertTrue(expected_keys.issubset(set(list_response.data['results'][0].keys())))
         self.assertTrue(list_response.data['results'][0]['owner_avatar_url'].startswith('http://testserver/media/avatars/'))
+
+    def test_free_video_can_watch_for_anonymous_non_member_and_member(self):
+        owner = self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Free video',
+                'access_type': Video.ACCESS_FREE,
+                'file': SimpleUploadedFile('free-video.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        self.client.force_authenticate(user=None)
+        anonymous_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(anonymous_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(anonymous_response.data['can_watch'])
+        self.assertFalse(anonymous_response.data['is_locked'])
+        self.assertIsNone(anonymous_response.data['lock_reason'])
+        self.assertIsNotNone(anonymous_response.data['file'])
+        self.assertIsNotNone(anonymous_response.data['file_url'])
+
+        non_member = self.create_user('free-non-member@example.com')
+        self.client.force_authenticate(user=non_member)
+        non_member_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(non_member_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(non_member_response.data['can_watch'])
+        self.assertIsNotNone(non_member_response.data['file'])
+        self.assertIsNotNone(non_member_response.data['file_url'])
+
+        member = self.create_user('free-member@example.com')
+        self._create_active_membership(member)
+        self.client.force_authenticate(user=member)
+        member_response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(member_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(member_response.data['can_watch'])
+        self.assertIsNotNone(member_response.data['file'])
+        self.assertIsNotNone(member_response.data['file_url'])
+
+        self.client.force_authenticate(user=owner)
+
+    def test_membership_video_anonymous_user_is_locked_and_file_hidden(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Membership video anonymous lock',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'file': SimpleUploadedFile('member-anon.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        self.client.force_authenticate(user=None)
+        response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['can_watch'])
+        self.assertTrue(response.data['is_locked'])
+        self.assertEqual(response.data['lock_reason'], 'membership_required')
+        self.assertIsNone(response.data['file'])
+        self.assertIsNone(response.data['file_url'])
+
+    def test_membership_video_non_member_is_locked_and_file_hidden(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Membership video non-member lock',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'file': SimpleUploadedFile('member-non.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        non_member = self.create_user('plain-user@example.com')
+        self.client.force_authenticate(user=non_member)
+        response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['can_watch'])
+        self.assertTrue(response.data['is_locked'])
+        self.assertEqual(response.data['lock_reason'], 'membership_required')
+        self.assertIsNone(response.data['file'])
+        self.assertIsNone(response.data['file_url'])
+
+    def test_membership_video_active_membership_user_can_watch(self):
+        self.authenticate()
+        video_id = self.client.post(
+            reverse('video-list-create'),
+            {
+                'title': 'Membership video member watch',
+                'access_type': Video.ACCESS_MEMBERSHIP,
+                'preview_seconds': 15,
+                'file': SimpleUploadedFile('member-active.mp4', b'video-bytes', content_type='video/mp4'),
+            },
+            format='multipart',
+        ).data['id']
+
+        member = self.create_user('active-member@example.com')
+        self._create_active_membership(member)
+        self.client.force_authenticate(user=member)
+
+        response = self.client.get(reverse('public-video-detail', args=[video_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['access_type'], Video.ACCESS_MEMBERSHIP)
+        self.assertEqual(response.data['preview_seconds'], 15)
+        self.assertTrue(response.data['can_watch'])
+        self.assertFalse(response.data['is_locked'])
+        self.assertIsNone(response.data['lock_reason'])
+        self.assertIsNotNone(response.data['file'])
+        self.assertIsNotNone(response.data['file_url'])
+
+    def _create_active_membership(self, user):
+        plan, _ = MembershipPlan.objects.get_or_create(
+            code=MembershipPlan.CODE_MONTHLY,
+            defaults={
+                'name': 'Monthly Membership',
+                'description': 'Monthly plan',
+                'price_lbc': Decimal('10.00000000'),
+                'duration_days': 30,
+                'is_active': True,
+            },
+        )
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount=Decimal('10.00'),
+            currency='USD',
+            status=PaymentOrder.STATUS_PAID,
+        )
+        return UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=1),
+            ends_at=django_timezone.now() + timedelta(days=29),
+        )
 
     def test_owner_can_patch_video_metadata_and_manual_thumbnail(self):
         self.authenticate()
@@ -3270,6 +3454,167 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(active_response.status_code, status.HTTP_200_OK)
         self.assertEqual(active_response.data['status'], UserMembership.STATUS_ACTIVE)
         self.assertEqual(active_response.data['plan']['code'], self.plan.code)
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_active_member_cannot_create_order_for_same_plan(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNotUsedAddress001'}
+        user = self.create_user('active-same@example.com')
+        self.client.force_authenticate(user=user)
+        source_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOACTIVE001',
+        )
+        UserMembership.objects.create(
+            user=user,
+            source_order=source_order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=1),
+            ends_at=django_timezone.now() + timedelta(days=30),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['code'], 'active_membership_exists')
+        self.assertEqual(response.data['current_membership']['plan']['code'], self.plan.code)
+        mock_address_unused.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_active_member_cannot_create_order_for_different_plan(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNotUsedAddress002'}
+        quarterly_plan = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_QUARTERLY,
+            name='Quarterly',
+            description='Quarterly plan',
+            price_lbc='30.00000000',
+            duration_days=90,
+            is_active=True,
+            sort_order=2,
+        )
+        user = self.create_user('active-diff@example.com')
+        self.client.force_authenticate(user=user)
+        source_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOACTIVE002',
+        )
+        UserMembership.objects.create(
+            user=user,
+            source_order=source_order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=1),
+            ends_at=django_timezone.now() + timedelta(days=30),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': quarterly_plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['code'], 'active_membership_exists')
+        self.assertEqual(response.data['current_membership']['plan']['code'], self.plan.code)
+        mock_address_unused.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_pending_membership_order_is_reused(self, mock_address_unused):
+        user = self.create_user('reuse-pending@example.com')
+        self.client.force_authenticate(user=user)
+        existing_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOREUSE001',
+            pay_to_address='bReuseAddress001',
+            expires_at=django_timezone.now() + timedelta(minutes=30),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['order_no'], existing_order.order_no)
+        self.assertTrue(response.data['reused'])
+        self.assertEqual(PaymentOrder.objects.filter(user=user, order_type=PaymentOrder.TYPE_MEMBERSHIP).count(), 1)
+        mock_address_unused.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_expired_pending_order_does_not_block_new_order(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNewAfterExpired001'}
+        user = self.create_user('expired-pending@example.com')
+        self.client.force_authenticate(user=user)
+        PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOEXPIREDP001',
+            pay_to_address='bExpiredPending001',
+            expires_at=django_timezone.now() - timedelta(minutes=1),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['reused'])
+        self.assertEqual(PaymentOrder.objects.filter(user=user, order_type=PaymentOrder.TYPE_MEMBERSHIP).count(), 2)
+        mock_address_unused.assert_called_once()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_cancelled_or_failed_order_does_not_block_new_order(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNewAfterCancelled001'}
+        user = self.create_user('cancelled-failed@example.com')
+        self.client.force_authenticate(user=user)
+        PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_CANCELLED,
+            order_no='MOCANCEL001',
+            pay_to_address='bCancelledOrder001',
+            expires_at=django_timezone.now() + timedelta(minutes=10),
+        )
+        PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_FAILED,
+            order_no='MOFAILED001',
+            pay_to_address='bFailedOrder001',
+            expires_at=django_timezone.now() + timedelta(minutes=10),
+        )
+
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['reused'])
+        self.assertEqual(PaymentOrder.objects.filter(user=user, order_type=PaymentOrder.TYPE_MEMBERSHIP).count(), 3)
+        mock_address_unused.assert_called_once()
 
 
 @override_settings(
