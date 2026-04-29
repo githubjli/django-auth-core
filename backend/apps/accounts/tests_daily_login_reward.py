@@ -54,3 +54,45 @@ class DailyLoginRewardLoginFlowTestCase(APITestCase):
         self.assertEqual(wallet.balance, 10)
         self.assertEqual(MeowPointLedger.objects.filter(user=self.user, target_type='daily_login_reward').count(), 1)
         self.assertEqual(DailyLoginReward.objects.filter(user=self.user, reward_date=timezone.localdate()).count(), 1)
+
+
+class DailyLoginRewardClaimEndpointTestCase(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email='claim@example.com', password='pass1234')
+        self.url = reverse('meow-point-daily-login-reward-claim')
+
+    def test_authenticated_user_can_claim_daily_reward(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.post(self.url, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['granted'])
+        self.assertEqual(response.data['points_amount'], 10)
+
+    def test_second_claim_same_day_is_idempotent(self):
+        self.client.force_authenticate(self.user)
+        first = self.client.post(self.url, format='json')
+        second = self.client.post(self.url, format='json')
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertFalse(second.data['granted'])
+
+        wallet = MeowPointWallet.objects.get(user=self.user)
+        self.assertEqual(wallet.balance, 10)
+        self.assertEqual(MeowPointLedger.objects.filter(user=self.user, target_type='daily_login_reward').count(), 1)
+
+    def test_unauthenticated_cannot_claim(self):
+        response = self.client.post(self.url, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_login_and_claim_do_not_double_grant_same_day(self):
+        login_response = self.client.post(reverse('auth-login'), {'email': self.user.email, 'password': 'pass1234'}, format='json')
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(self.user)
+        claim_response = self.client.post(self.url, format='json')
+        self.assertEqual(claim_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(claim_response.data['granted'])
+
+        wallet = MeowPointWallet.objects.get(user=self.user)
+        self.assertEqual(wallet.balance, 10)
+        self.assertEqual(DailyLoginReward.objects.filter(user=self.user, reward_date=timezone.localdate()).count(), 1)

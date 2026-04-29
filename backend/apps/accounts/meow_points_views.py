@@ -112,3 +112,11 @@ class MeowPointOrderTxHintAPIView(generics.GenericAPIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class DailyLoginRewardClaimAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        result = MeowPointService.grant_daily_login_reward(user=request.user)
+        return Response(result, status=status.HTTP_200_OK)
