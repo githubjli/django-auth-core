@@ -2,6 +2,8 @@ from django.db import transaction
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
+from datetime import timedelta
 from rest_framework import generics
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -22,7 +24,7 @@ from apps.accounts.drama_serializers import (
     DramaSeriesSerializer,
     DramaWatchProgressSerializer,
 )
-from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaUnlock, DramaWatchProgress
+from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaSeriesView, DramaUnlock, DramaWatchProgress
 from apps.accounts.services import DramaAccessService
 
 
@@ -367,3 +369,36 @@ class DramaEpisodeProgressUpsertAPIView(APIView):
             },
         )
         return Response(DramaWatchProgressSerializer(progress).data)
+
+
+class DramaSeriesViewTrackAPIView(APIView):
+    def post(self, request, pk):
+        series = get_object_or_404(
+            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            pk=pk,
+        )
+        now = timezone.now()
+        since = now - timedelta(hours=24)
+        counted = False
+        with transaction.atomic():
+            if request.user.is_authenticated:
+                duplicate = DramaSeriesView.objects.filter(series=series, viewer=request.user, created_at__gte=since).exists()
+                if not duplicate:
+                    DramaSeriesView.objects.create(series=series, viewer=request.user)
+                    DramaSeries.objects.filter(pk=series.pk).update(view_count=F('view_count') + 1)
+                    counted = True
+            else:
+                if not request.session.session_key:
+                    request.session.save()
+                session_key = request.session.session_key or ''
+                ip_address = request.META.get('REMOTE_ADDR')
+                duplicate = DramaSeriesView.objects.filter(series=series, created_at__gte=since).filter(
+                    Q(session_key=session_key) | Q(ip_address=ip_address)
+                ).exists()
+                if not duplicate:
+                    DramaSeriesView.objects.create(series=series, session_key=session_key, ip_address=ip_address)
+                    DramaSeries.objects.filter(pk=series.pk).update(view_count=F('view_count') + 1)
+                    counted = True
+
+        series.refresh_from_db(fields=['view_count'])
+        return Response({'series_id': series.id, 'view_count': series.view_count, 'counted': counted})

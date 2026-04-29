@@ -303,6 +303,27 @@ class DramaFavorite(models.Model):
         ]
 
 
+class DramaSeriesView(models.Model):
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='views',
+    )
+    viewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='drama_series_views',
+    )
+    session_key = models.CharField(max_length=64, blank=True, default='')
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
 class DramaUnlock(models.Model):
     SOURCE_MEOW_POINTS = 'meow_points'
     SOURCE_MEMBERSHIP = 'membership'
