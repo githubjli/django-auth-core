@@ -182,10 +182,9 @@ Status legend used throughout:
   - gating: `access_type`, `preview_seconds`, `can_watch`, `is_locked`, `lock_reason`
 - **Additional mobile-required fields**:
   - `id`, `title`, `description`, `created_at`
-  - `duration` (**Current but unconfirmed**)
 - **Mobile review needed**:
   - Confirm absolute URL guarantees for `file_url`, `thumbnail_url`, `owner_avatar_url`.
-  - Confirm `duration` exact semantics/units and nullability.
+  - Confirm `duration` field existence, semantics/units, and nullability before adding to Current mobile DTO.
 
 ### GET `/api/public/videos/{id}/`
 - **Status**: Current but needs mobile review
@@ -353,12 +352,16 @@ Based on current short-drama contract:
 
 1. Confirm all media URLs are absolute HTTPS in mobile-consumed responses.
 2. Confirm pagination shape consistency (`count/next/previous/results`) across all list endpoints.
-3. Confirm and document normalized error shape strategy.
-4. Confirm canonical video URL + duration field names for public/mobile feed.
-5. Confirm live playback URL field for Flutter player.
-6. Confirm CORS remains web concern, while mobile still requires correct HTTPS domains and allowed hosts config.
-7. Confirm token refresh behavior (timing, invalid refresh handling, concurrent refresh race strategy).
-8. Confirm whether app home feed should reuse `/api/public/videos/` or introduce dedicated feed endpoint.
-9. Confirm whether to create dedicated `/api/mobile/*` or `/api/app/*` namespace.
-10. Confirm mobile-safe live publish contract separate from browser WebRTC adaptor assumptions.
+3. Standardize mobile error format rules for common APIs (`detail` / `message` / `code`) and document exact fallback order.
+4. Add a stable public-video mobile DTO so Flutter does not guess between `file_url` / `video_url` / `playback_url`.
+5. Confirm `duration` field existence; if unavailable, do not keep it in Current mobile target DTO.
+6. Write and freeze membership order create request serializer contract (`plan_code`, `plan_id`, or both; required/optional rules).
+7. Publish official mobile live chat routes for REST and WebSocket (path params, auth token placement, and examples).
+8. Confirm live playback URL field for Flutter player.
+9. Confirm CORS remains web concern, while mobile still requires correct HTTPS domains and allowed hosts config.
+10. Confirm token refresh behavior (timing, invalid refresh handling, concurrent refresh race strategy).
+11. Confirm whether app home feed should reuse `/api/public/videos/` or introduce dedicated feed endpoint.
+12. If Shorts is a vertical-first experience, evaluate dedicated feed endpoint such as `/api/app/shorts/` or `/api/mobile/feed/`.
+13. Confirm whether to create broader dedicated `/api/mobile/*` or `/api/app/*` namespace.
+14. Confirm mobile-safe live publish contract separate from browser WebRTC adaptor assumptions.
 
