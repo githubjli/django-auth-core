@@ -174,14 +174,21 @@ Status legend used throughout:
 - **Current assumptions**:
   - Paginated list endpoint.
   - Supports ordering/filter patterns documented in backend contracts (verify exact query params for public route in integration test).
-- **Required mobile fields (target)**:
-  - `id`, `title`, `description`, `thumbnail_url`, `file_url`/`video_url`/`playback_url`, `duration`, `owner`/`creator`, `category`, `created_at`
+- **Current canonical public fields (as currently documented/expected for app feed)**:
+  - playback: `file_url`
+  - thumbnail: `thumbnail_url`
+  - owner: `owner_id`, `owner_name`, `owner_avatar_url`
+  - category: `category`, `category_name`, `category_slug`
+  - gating: `access_type`, `preview_seconds`, `can_watch`, `is_locked`, `lock_reason`
+- **Additional mobile-required fields**:
+  - `id`, `title`, `description`, `created_at`
+  - `duration` (**Current but unconfirmed**)
 - **Mobile review needed**:
-  - Confirm final field names and which video URL field is canonical.
-  - Confirm absolute URL guarantees.
+  - Confirm absolute URL guarantees for `file_url`, `thumbnail_url`, `owner_avatar_url`.
+  - Confirm `duration` exact semantics/units and nullability.
 
 ### GET `/api/public/videos/{id}/`
-- **Status**: Proposed
+- **Status**: Current but needs mobile review
 - **Reason**:
   - Public video detail route should be confirmed/standardized for Flutter detail page deep-linking.
 - **Proposed response**:
@@ -243,6 +250,7 @@ Based on current short-drama contract:
 }
 ```
 - **Mobile notes**:
+  - Verify whether backend currently accepts `plan_code`, `plan_id`, or both; treat this as required integration check before Flutter release.
   - Use returned order snapshot as source of truth for amount/address/expiry.
 
 ### GET `/api/membership/orders/{order_no}/`
@@ -285,8 +293,8 @@ Based on current short-drama contract:
 - Confirm exact endpoint/shape used to expose creator payment methods in live room context.
 
 ### Live chat REST/WebSocket
-- **REST**: `/api/live/<id>/chat/messages/` — **Status**: Current
-- **WebSocket**: `/ws/live/<id>/chat/?token=<jwt_access_token>` — **Status**: Current
+- **REST**: `/api/live/{live_id}/chat/messages/` — **Status**: Current but needs mobile review (exact route placeholder verification required)
+- **WebSocket**: `/ws/live/{live_id}/chat/?token=<jwt_access_token>` — **Status**: Current but needs mobile review (exact route placeholder verification required)
 - **Mobile notes**:
   - Use JWT query token for websocket auth.
   - Implement reconnect/backoff and dedupe by message id.
@@ -301,8 +309,9 @@ Based on current short-drama contract:
 ## 9) Upload / creator endpoints
 
 ### Video upload/create
-- **POST `/api/videos`** — **Status**: Current but needs mobile review
-- **GET `/api/videos`**, `GET /api/videos/{id}/`, `PATCH /api/videos/{id}/` — **Status**: Current (owner scope)
+- **POST `/api/videos/`** — **Status**: Current but needs mobile review
+- **GET `/api/videos/`** — **Status**: Current (owner scope)
+- **GET/PATCH/DELETE `/api/videos/{id}/`** — **Status**: Current (owner scope)
 
 ### Mobile notes
 - Multipart upload is currently supported.
