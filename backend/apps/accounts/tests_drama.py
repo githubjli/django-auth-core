@@ -125,6 +125,30 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertIsNone(response.data['video_url'])
         self.assertIsNone(response.data['hls_url'])
 
+    def test_https_forwarded_proto_generates_https_media_urls(self):
+        self.free_episode.video_url = ''
+        self.free_episode.hls_url = ''
+        self.free_episode.video_file = SimpleUploadedFile('e01.mp4', b'video-bytes', content_type='video/mp4')
+        self.free_episode.save(update_fields=['video_url', 'hls_url', 'video_file'])
+
+        list_response = self.client.get(
+            reverse('drama-series-list'),
+            HTTP_HOST='stream.meownews.online',
+            HTTP_X_FORWARDED_PROTO='https',
+        )
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(list_response.data['results'][0]['cover_url'].startswith('https://stream.meownews.online/media/'))
+
+        episodes_response = self.client.get(
+            reverse('drama-episode-list', args=[self.active_series.id]),
+            HTTP_HOST='stream.meownews.online',
+            HTTP_X_FORWARDED_PROTO='https',
+        )
+        self.assertEqual(episodes_response.status_code, status.HTTP_200_OK)
+        first_episode = episodes_response.data['episodes'][0]
+        self.assertTrue(first_episode['video_url'].startswith('https://stream.meownews.online/media/'))
+        self.assertTrue(first_episode['playback_url'].startswith('https://stream.meownews.online/media/'))
+
 
 class DramaPhase2APITestCase(APITestCase):
     def setUp(self):

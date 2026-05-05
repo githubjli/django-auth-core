@@ -48,6 +48,10 @@ CSRF_TRUSTED_ORIGINS = [
     "https://stream.meownews.online",
 ]
 
+# Trust HTTPS scheme forwarded by reverse proxy (e.g., NGINX) so
+# request.is_secure()/build_absolute_uri() emit https:// media links.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 
 # Application definition
 
