@@ -1289,6 +1289,69 @@ class UserMembership(models.Model):
         ]
 
 
+class ManualMembershipPayment(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_DRY_RUN_VERIFIED = 'dry_run_verified'
+    STATUS_PENDING_CONFIRMATION = 'pending_confirmation'
+    STATUS_VERIFIED = 'verified'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_SUBMITTED, 'Submitted'),
+        (STATUS_DRY_RUN_VERIFIED, 'Dry Run Verified'),
+        (STATUS_PENDING_CONFIRMATION, 'Pending Confirmation'),
+        (STATUS_VERIFIED, 'Verified'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='manual_membership_payments',
+    )
+    plan = models.ForeignKey(
+        MembershipPlan,
+        on_delete=models.PROTECT,
+        related_name='manual_membership_payments',
+    )
+    txid = models.CharField(max_length=128, unique=True)
+    expected_amount_lbc = models.DecimalField(max_digits=18, decimal_places=8)
+    actual_amount_lbc = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
+    pay_to_address = models.CharField(max_length=128)
+    confirmations = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    reject_reason = models.TextField(blank=True, default='')
+    raw_tx = models.JSONField(null=True, blank=True)
+    payment_order = models.OneToOneField(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='manual_membership_payment',
+    )
+    membership = models.OneToOneField(
+        'UserMembership',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='manual_payment',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['user', 'status', 'created_at'], name='manual_member_user_status_idx'),
+            models.Index(fields=['status', 'created_at'], name='manual_member_status_idx'),
+        ]
+
+    def __str__(self) -> str:
+        return self.txid
+
+
 class BillingPlan(models.Model):
     INTERVAL_MONTH = 'month'
     INTERVAL_YEAR = 'year'
