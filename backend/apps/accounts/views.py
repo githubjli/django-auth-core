@@ -176,6 +176,46 @@ class CommentPagination(PageNumberPagination):
     max_page_size = 100
 
 
+def build_membership_purchase_preview(user, plan: MembershipPlan) -> dict:
+    now = timezone.now()
+    current = (
+        UserMembership.objects.filter(
+            user=user,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        )
+        .select_related('plan')
+        .order_by('-ends_at', '-id')
+        .first()
+    )
+
+    if current is None:
+        starts_at = now
+        purchase_mode = 'new'
+        current_membership = None
+    else:
+        starts_at = current.ends_at
+        purchase_mode = 'renewal' if current.plan_id == plan.id else 'plan_change'
+        current_membership = {
+            'plan_code': current.plan.code,
+            'plan_name': current.plan.name,
+            'starts_at': current.starts_at,
+            'ends_at': current.ends_at,
+        }
+
+    ends_at = starts_at + timedelta(days=plan.duration_days)
+    return {
+        'has_active_membership': current is not None,
+        'current_membership': current_membership,
+        'purchase_mode': purchase_mode,
+        'is_renewal': purchase_mode == 'renewal',
+        'is_plan_change': purchase_mode == 'plan_change',
+        'estimated_new_starts_at': starts_at,
+        'estimated_new_ends_at': ends_at,
+    }
+
+
 class PaymentOrderPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
@@ -1895,6 +1935,7 @@ class ManualMembershipPaymentInfoAPIView(APIView):
         if not pay_to_address:
             return Response({'detail': 'Manual membership payment address is not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+        purchase_preview = build_membership_purchase_preview(request.user, plan)
         return Response(
             {
                 'plan_code': plan.code,
@@ -1904,6 +1945,7 @@ class ManualMembershipPaymentInfoAPIView(APIView):
                 'pay_to_address': pay_to_address,
                 'required_confirmations': int(settings.LBC_MIN_CONFIRMATIONS),
                 'notice': 'Send the exact LBC amount to the platform address, then wait for staff verification. This endpoint does not create an order or accept txid submission.',
+                **purchase_preview,
             },
             status=status.HTTP_200_OK,
         )
@@ -1930,16 +1972,38 @@ class ManualMembershipTxHintListAPIView(APIView):
             code=serializer.validated_data['plan_code'],
         )
         txid = serializer.validated_data['txid']
-        if ManualMembershipPayment.objects.filter(txid=txid).exists():
+        existing_txid_payment = ManualMembershipPayment.objects.select_related('payment_order').filter(txid=txid).first()
+        if existing_txid_payment is not None:
+            return Response(
+                self._duplicate_txid_payload(existing_txid_payment),
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        blocking_payment = (
+            ManualMembershipPayment.objects.filter(
+                user=request.user,
+                plan=plan,
+                status__in=[
+                    ManualMembershipPayment.STATUS_PENDING,
+                    ManualMembershipPayment.STATUS_SUBMITTED,
+                    ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+                    ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED,
+                ],
+            )
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        if blocking_payment is not None:
             return Response(
                 {
-                    'detail': 'Manual membership payment txid already exists.',
-                    'reason': 'txid_already_exists',
-                    'txid': txid,
+                    'detail': 'A pending manual membership payment already exists.',
+                    'manual_payment_id': blocking_payment.id,
+                    'status': blocking_payment.status,
                 },
                 status=status.HTTP_409_CONFLICT,
             )
 
+        purchase_preview = build_membership_purchase_preview(request.user, plan)
         verification = ManualMembershipChainVerifier().verify(txid=txid, plan=plan)
         payment_status = self._status_from_verification(verification)
         reject_reason = verification['reason'] if payment_status == ManualMembershipPayment.STATUS_REJECTED else ''
@@ -1971,17 +2035,20 @@ class ManualMembershipTxHintListAPIView(APIView):
                     payment.verified_at = timezone.now()
                     payment.save(update_fields=['payment_order', 'membership', 'status', 'verified_at', 'updated_at'])
         except IntegrityError:
-            return Response(
-                {
-                    'detail': 'Manual membership payment txid already exists.',
-                    'reason': 'txid_already_exists',
-                    'txid': txid,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+            existing_payment = ManualMembershipPayment.objects.select_related('payment_order').filter(txid=txid).first()
+            if existing_payment is not None:
+                return Response(
+                    self._duplicate_txid_payload(existing_payment),
+                    status=status.HTTP_409_CONFLICT,
+                )
+            raise
 
         return Response(
-            self._manual_payment_response_payload(payment=payment, verification=verification),
+            self._manual_payment_response_payload(
+                payment=payment,
+                verification=verification,
+                purchase_preview=purchase_preview,
+            ),
             status=status.HTTP_201_CREATED,
         )
 
@@ -2002,15 +2069,40 @@ class ManualMembershipTxHintListAPIView(APIView):
         payload['actual_amount_lbc'] = f"{verification['actual_amount_lbc']:.8f}"
         return payload
 
-    def _manual_payment_response_payload(self, *, payment: ManualMembershipPayment, verification: dict | None = None) -> dict:
+    def _manual_payment_response_payload(
+        self,
+        *,
+        payment: ManualMembershipPayment,
+        verification: dict | None = None,
+        purchase_preview: dict | None = None,
+    ) -> dict:
+        payment_order = payment.payment_order if payment.payment_order_id else None
         payload = {
+            'verified': payment.status == ManualMembershipPayment.STATUS_VERIFIED
+            or payment.status == ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED,
+            'manual_payment_id': payment.id,
+            'status': payment.status,
+            'order_no': payment_order.order_no if payment_order is not None else '',
             'payment': ManualMembershipPaymentHintSerializer(payment).data,
-            'payment_order': MembershipOrderSerializer(payment.payment_order).data if payment.payment_order_id else None,
+            'payment_order': MembershipOrderSerializer(payment_order).data if payment_order is not None else None,
             'membership': MyMembershipSerializer.from_membership(payment.membership).data if payment.membership_id else None,
         }
+        if purchase_preview is not None:
+            payload.update(purchase_preview)
         if verification is not None:
             payload['verification'] = self._serialize_verification(verification)
         return payload
+
+    def _duplicate_txid_payload(self, payment: ManualMembershipPayment) -> dict:
+        payment_order = payment.payment_order if payment.payment_order_id else None
+        return {
+            'detail': 'txid already submitted.',
+            'manual_payment_id': payment.id,
+            'status': payment.status,
+            'order_no': payment_order.order_no if payment_order is not None else '',
+            'created_at': payment.created_at,
+            'verified_at': payment.verified_at,
+        }
 
     def _activate_verified_manual_payment(self, *, payment: ManualMembershipPayment, user, plan: MembershipPlan, verification: dict):
         actual_amount = verification['actual_amount_lbc']

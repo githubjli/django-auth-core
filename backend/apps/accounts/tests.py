@@ -11,6 +11,7 @@ from django.core import management
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from django.test import override_settings
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone as django_timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -3458,8 +3459,20 @@ class MembershipAPITestCase(APITestCase):
                 'pay_to_address',
                 'required_confirmations',
                 'notice',
+                'has_active_membership',
+                'current_membership',
+                'purchase_mode',
+                'is_renewal',
+                'is_plan_change',
+                'estimated_new_starts_at',
+                'estimated_new_ends_at',
             },
         )
+        self.assertEqual(response.data['purchase_mode'], 'new')
+        self.assertFalse(response.data['has_active_membership'])
+        self.assertIsNone(response.data['current_membership'])
+        self.assertFalse(response.data['is_renewal'])
+        self.assertFalse(response.data['is_plan_change'])
         self.assertEqual(response.data['plan_code'], MembershipPlan.CODE_MONTHLY)
         self.assertEqual(response.data['plan_name'], self.plan.name)
         self.assertEqual(response.data['expected_amount_lbc'], '12.50000000')
@@ -3467,6 +3480,98 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(response.data['pay_to_address'], 'bManualPaymentAddress001')
         self.assertEqual(response.data['required_confirmations'], 3)
         self.assertEqual(PaymentOrder.objects.count(), 0)
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPaymentAddress001')
+    def test_manual_payment_info_with_same_plan_membership_is_renewal(self):
+        user = self.create_user('manual-info-renewal@example.com')
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MORENEWALINFO',
+        )
+        starts_at = django_timezone.now().replace(microsecond=0) - timedelta(days=5)
+        ends_at = django_timezone.now().replace(microsecond=0) + timedelta(days=25)
+        UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=starts_at,
+            ends_at=ends_at,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('manual-membership-payment-info'), {'plan_code': self.plan.code})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['has_active_membership'])
+        self.assertEqual(response.data['purchase_mode'], 'renewal')
+        self.assertTrue(response.data['is_renewal'])
+        self.assertFalse(response.data['is_plan_change'])
+        self.assertEqual(response.data['current_membership']['plan_code'], self.plan.code)
+        estimated_starts_value = response.data['estimated_new_starts_at']
+        estimated_ends_value = response.data['estimated_new_ends_at']
+        estimated_starts = parse_datetime(estimated_starts_value) if isinstance(estimated_starts_value, str) else estimated_starts_value
+        estimated_ends = parse_datetime(estimated_ends_value) if isinstance(estimated_ends_value, str) else estimated_ends_value
+        self.assertEqual(estimated_starts, ends_at)
+        self.assertEqual(estimated_ends, ends_at + timedelta(days=self.plan.duration_days))
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPaymentAddress001')
+    def test_manual_payment_info_with_different_plan_membership_is_plan_change(self):
+        user = self.create_user('manual-info-plan-change@example.com')
+        yearly = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_YEARLY,
+            name='Yearly',
+            description='Yearly plan',
+            price_lbc='120.00000000',
+            duration_days=365,
+            is_active=True,
+            sort_order=2,
+        )
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOPLANCHANGEINFO',
+        )
+        ends_at = django_timezone.now().replace(microsecond=0) + timedelta(days=20)
+        UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=10),
+            ends_at=ends_at,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('manual-membership-payment-info'), {'plan_code': yearly.code})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['purchase_mode'], 'plan_change')
+        self.assertFalse(response.data['is_renewal'])
+        self.assertTrue(response.data['is_plan_change'])
+        estimated_starts_value = response.data['estimated_new_starts_at']
+        estimated_ends_value = response.data['estimated_new_ends_at']
+        estimated_starts = parse_datetime(estimated_starts_value) if isinstance(estimated_starts_value, str) else estimated_starts_value
+        estimated_ends = parse_datetime(estimated_ends_value) if isinstance(estimated_ends_value, str) else estimated_ends_value
+        self.assertEqual(estimated_starts, ends_at)
+        self.assertEqual(estimated_ends, ends_at + timedelta(days=yearly.duration_days))
 
     def test_manual_tx_hints_requires_authentication(self):
         response = self.client.get(reverse('manual-membership-tx-hints'))
@@ -3603,6 +3708,11 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(membership.source_order_id, payment_order.id)
         self.assertEqual(membership.plan_id, self.plan.id)
         self.assertEqual(response.data['payment']['status'], ManualMembershipPayment.STATUS_VERIFIED)
+        self.assertTrue(response.data['verified'])
+        self.assertEqual(response.data['manual_payment_id'], payment.id)
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_VERIFIED)
+        self.assertEqual(response.data['purchase_mode'], 'new')
+        self.assertEqual(response.data['order_no'], payment_order.order_no)
 
     @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
     @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
@@ -3699,6 +3809,8 @@ class MembershipAPITestCase(APITestCase):
         self.assertIsNone(payment.payment_order_id)
         self.assertIsNone(payment.membership_id)
         self.assertEqual(response.data['verification']['reason'], 'pending_confirmation')
+        self.assertFalse(response.data['verified'])
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
 
     @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
     def test_manual_tx_hint_verify_now_rejects_when_recheck_fails(self, mock_verify):
@@ -3929,6 +4041,33 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(ManualMembershipPayment.objects.filter(txid='manual-race-tx').count(), 1)
 
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_blocks_same_user_plan_pending_payment(self, mock_verify):
+        user = self.create_user('manual-pending-block@example.com')
+        ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-existing-pending-plan',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=1,
+            status=ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-new-pending-blocked'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['detail'], 'A pending manual membership payment already exists.')
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+        self.assertIn('manual_payment_id', response.data)
+        mock_verify.assert_not_called()
+
     @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
     @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
     def test_manual_tx_hint_submit_active_membership_extends_current_end(self, mock_verify):
@@ -4012,6 +4151,11 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(payment.status, ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
         self.assertEqual(payment.reject_reason, '')
         self.assertEqual(response.data['verification']['reason'], 'pending_confirmation')
+        self.assertFalse(response.data['verified'])
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+        self.assertEqual(response.data['purchase_mode'], 'new')
+        self.assertIn('estimated_new_starts_at', response.data)
+        self.assertIn('estimated_new_ends_at', response.data)
 
     @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
     def test_manual_tx_hint_submit_rejects_address_or_amount_failures(self, mock_verify):
@@ -4063,7 +4207,12 @@ class MembershipAPITestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data['reason'], 'txid_already_exists')
+        existing = ManualMembershipPayment.objects.get(txid='manual-submit-duplicate')
+        self.assertEqual(response.data['detail'], 'txid already submitted.')
+        self.assertEqual(response.data['manual_payment_id'], existing.id)
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED)
+        self.assertIn('created_at', response.data)
+        self.assertIn('verified_at', response.data)
         mock_verify.assert_not_called()
 
     @override_settings(
