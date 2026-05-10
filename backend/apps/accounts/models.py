@@ -1291,10 +1291,16 @@ class UserMembership(models.Model):
 
 class ManualMembershipPayment(models.Model):
     STATUS_PENDING = 'pending'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_DRY_RUN_VERIFIED = 'dry_run_verified'
+    STATUS_PENDING_CONFIRMATION = 'pending_confirmation'
     STATUS_VERIFIED = 'verified'
     STATUS_REJECTED = 'rejected'
     STATUS_CHOICES = [
         (STATUS_PENDING, 'Pending'),
+        (STATUS_SUBMITTED, 'Submitted'),
+        (STATUS_DRY_RUN_VERIFIED, 'Dry Run Verified'),
+        (STATUS_PENDING_CONFIRMATION, 'Pending Confirmation'),
         (STATUS_VERIFIED, 'Verified'),
         (STATUS_REJECTED, 'Rejected'),
     ]

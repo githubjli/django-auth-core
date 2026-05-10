@@ -1485,6 +1485,23 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
         }
 
 
+class ManualMembershipTxHintSubmitSerializer(serializers.Serializer):
+    plan_code = serializers.CharField(max_length=32)
+    txid = serializers.CharField(max_length=128)
+
+    def validate_plan_code(self, value):
+        plan_code = value.strip()
+        if not plan_code:
+            raise serializers.ValidationError('plan_code is required.')
+        return plan_code
+
+    def validate_txid(self, value):
+        txid = value.strip()
+        if not txid:
+            raise serializers.ValidationError('txid is required.')
+        return txid
+
+
 class ManualMembershipPaymentHintSerializer(serializers.ModelSerializer):
     plan_code = serializers.CharField(source='plan.code', read_only=True)
     plan_name = serializers.CharField(source='plan.name', read_only=True)

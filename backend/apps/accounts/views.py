@@ -56,6 +56,7 @@ from apps.accounts.serializers import (
     BillingSubscriptionCreateSerializer,
     BillingSubscriptionSerializer,
     ManualMembershipPaymentHintSerializer,
+    ManualMembershipTxHintSubmitSerializer,
     MembershipOrderCreateSerializer,
     MembershipOrderTxHintSerializer,
     MembershipOrderSerializer,
@@ -103,6 +104,7 @@ from apps.accounts.services import (
     LbryDaemonError,
     LbryDaemonInvalidParamsError,
     LbryDaemonRpcError,
+    ManualMembershipChainVerifier,
     MembershipOrderService,
     ProductOrderService,
     ProductPaymentDetectionService,
@@ -1907,6 +1909,7 @@ class ManualMembershipPaymentInfoAPIView(APIView):
 
 class ManualMembershipTxHintListAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
 
     def get(self, request):
         payments = list(
@@ -1916,6 +1919,74 @@ class ManualMembershipTxHintListAPIView(APIView):
         )
         serializer = ManualMembershipPaymentHintSerializer(payments, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = ManualMembershipTxHintSubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        plan = generics.get_object_or_404(
+            MembershipPlan.objects.filter(is_active=True),
+            code=serializer.validated_data['plan_code'],
+        )
+        txid = serializer.validated_data['txid']
+        if ManualMembershipPayment.objects.filter(txid=txid).exists():
+            return Response(
+                {
+                    'detail': 'Manual membership payment txid already exists.',
+                    'reason': 'txid_already_exists',
+                    'txid': txid,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        verification = ManualMembershipChainVerifier().verify(txid=txid, plan=plan)
+        payment_status = self._status_from_verification(verification)
+        reject_reason = verification['reason'] if payment_status == ManualMembershipPayment.STATUS_REJECTED else ''
+        try:
+            payment = ManualMembershipPayment.objects.create(
+                user=request.user,
+                plan=plan,
+                txid=txid,
+                expected_amount_lbc=verification['expected_amount_lbc'],
+                actual_amount_lbc=verification['actual_amount_lbc'],
+                pay_to_address=verification['pay_to_address'],
+                confirmations=verification['confirmations'],
+                status=payment_status,
+                reject_reason=reject_reason,
+                raw_tx=verification['raw_tx'],
+                verified_at=timezone.now() if verification['ok'] else None,
+            )
+        except IntegrityError:
+            return Response(
+                {
+                    'detail': 'Manual membership payment txid already exists.',
+                    'reason': 'txid_already_exists',
+                    'txid': txid,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(
+            {
+                'payment': ManualMembershipPaymentHintSerializer(payment).data,
+                'verification': self._serialize_verification(verification),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    def _status_from_verification(self, verification: dict) -> str:
+        if verification['ok']:
+            if bool(getattr(settings, 'MANUAL_MEMBERSHIP_AUTO_ACTIVATE', False)):
+                return ManualMembershipPayment.STATUS_SUBMITTED
+            return ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED
+        if verification['reason'] == 'pending_confirmation':
+            return ManualMembershipPayment.STATUS_PENDING_CONFIRMATION
+        return ManualMembershipPayment.STATUS_REJECTED
+
+    def _serialize_verification(self, verification: dict) -> dict:
+        payload = dict(verification)
+        payload['expected_amount_lbc'] = f"{verification['expected_amount_lbc']:.8f}"
+        payload['actual_amount_lbc'] = f"{verification['actual_amount_lbc']:.8f}"
+        return payload
 
 
 class MembershipOrderCreateAPIView(APIView):

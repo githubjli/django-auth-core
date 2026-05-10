@@ -3508,6 +3508,132 @@ class MembershipAPITestCase(APITestCase):
         self.assertNotIn('raw_tx', response.data[0])
         self.assertNotIn('other-user-manual-tx', [item['txid'] for item in response.data])
 
+    def test_manual_tx_hint_submit_requires_authentication(self):
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-auth'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_creates_dry_run_verified_payment_only(self, mock_verify):
+        user = self.create_user('manual-submit@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-submit-ok',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-ok', 'outputs': []},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-ok'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mock_verify.assert_called_once_with(txid='manual-submit-ok', plan=self.plan)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-ok')
+        self.assertEqual(payment.user_id, user.id)
+        self.assertEqual(payment.plan_id, self.plan.id)
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED)
+        self.assertIsNone(payment.payment_order_id)
+        self.assertIsNone(payment.membership_id)
+        self.assertEqual(PaymentOrder.objects.count(), 0)
+        self.assertEqual(UserMembership.objects.count(), 0)
+        self.assertEqual(response.data['payment']['status'], ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED)
+        self.assertEqual(response.data['verification']['reason'], 'ok')
+        self.assertEqual(response.data['verification']['expected_amount_lbc'], '12.50000000')
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_pending_confirmation_status(self, mock_verify):
+        user = self.create_user('manual-pending@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'pending_confirmation',
+            'txid': 'manual-submit-pending',
+            'confirmations': 1,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-pending'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-pending'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-pending')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+        self.assertEqual(payment.reject_reason, '')
+        self.assertEqual(response.data['verification']['reason'], 'pending_confirmation')
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_rejects_address_or_amount_failures(self, mock_verify):
+        user = self.create_user('manual-rejected@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'insufficient_amount',
+            'txid': 'manual-submit-rejected',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('1.00000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-rejected'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-rejected'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-rejected')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_REJECTED)
+        self.assertEqual(payment.reject_reason, 'insufficient_amount')
+        self.assertFalse(UserMembership.objects.exists())
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_rejects_duplicate_txid_before_verification(self, mock_verify):
+        user = self.create_user('manual-duplicate@example.com')
+        self.client.force_authenticate(user=user)
+        ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-submit-duplicate',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=3,
+            status=ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED,
+        )
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-duplicate'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['reason'], 'txid_already_exists')
+        mock_verify.assert_not_called()
+
     @override_settings(
         LBRY_PLATFORM_RECEIVE_ADDRESS='bStablePlatformAddress001',
         LBRY_PLATFORM_WALLET_ID='wallet-main',
