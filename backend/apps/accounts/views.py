@@ -27,6 +27,7 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    ManualMembershipPayment,
     MembershipPlan,
     PaymentOrder,
     Product,
@@ -54,6 +55,7 @@ from apps.accounts.serializers import (
     BillingPlanSerializer,
     BillingSubscriptionCreateSerializer,
     BillingSubscriptionSerializer,
+    ManualMembershipPaymentHintSerializer,
     MembershipOrderCreateSerializer,
     MembershipOrderTxHintSerializer,
     MembershipOrderSerializer,
@@ -1871,6 +1873,49 @@ class MembershipPlanListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         return MembershipPlan.objects.filter(is_active=True).order_by('sort_order', 'id')
+
+
+class ManualMembershipPaymentInfoAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        plan_code = (request.query_params.get('plan_code') or '').strip()
+        if not plan_code:
+            return Response({'plan_code': ['This query parameter is required.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        plan = generics.get_object_or_404(
+            MembershipPlan.objects.filter(is_active=True),
+            code=plan_code,
+        )
+        pay_to_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        if not pay_to_address:
+            return Response({'detail': 'Manual membership payment address is not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        return Response(
+            {
+                'plan_code': plan.code,
+                'plan_name': plan.name,
+                'expected_amount_lbc': f'{plan.price_lbc:.8f}',
+                'currency': 'LBC',
+                'pay_to_address': pay_to_address,
+                'required_confirmations': int(settings.LBC_MIN_CONFIRMATIONS),
+                'notice': 'Send the exact LBC amount to the platform address, then wait for staff verification. This endpoint does not create an order or accept txid submission.',
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ManualMembershipTxHintListAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        payments = list(
+            ManualMembershipPayment.objects.filter(user=request.user)
+            .select_related('plan')
+            .order_by('-created_at', '-id')[:50]
+        )
+        serializer = ManualMembershipPaymentHintSerializer(payments, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class MembershipOrderCreateAPIView(APIView):

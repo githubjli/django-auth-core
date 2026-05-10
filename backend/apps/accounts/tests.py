@@ -30,6 +30,7 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    ManualMembershipPayment,
     MembershipPlan,
     OrderPayment,
     PaymentOrder,
@@ -3424,6 +3425,88 @@ class MembershipAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('plan_code', response.data)
+
+    def test_manual_payment_info_requires_authentication(self):
+        response = self.client.get(
+            reverse('manual-membership-payment-info'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(
+        LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPaymentAddress001',
+        LBC_MIN_CONFIRMATIONS=3,
+    )
+    def test_manual_payment_info_returns_read_only_plan_payment_details_without_order(self):
+        user = self.create_user('manual-info@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get(
+            reverse('manual-membership-payment-info'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            set(response.data.keys()),
+            {
+                'plan_code',
+                'plan_name',
+                'expected_amount_lbc',
+                'currency',
+                'pay_to_address',
+                'required_confirmations',
+                'notice',
+            },
+        )
+        self.assertEqual(response.data['plan_code'], MembershipPlan.CODE_MONTHLY)
+        self.assertEqual(response.data['plan_name'], self.plan.name)
+        self.assertEqual(response.data['expected_amount_lbc'], '12.50000000')
+        self.assertEqual(response.data['currency'], 'LBC')
+        self.assertEqual(response.data['pay_to_address'], 'bManualPaymentAddress001')
+        self.assertEqual(response.data['required_confirmations'], 3)
+        self.assertEqual(PaymentOrder.objects.count(), 0)
+
+    def test_manual_tx_hints_requires_authentication(self):
+        response = self.client.get(reverse('manual-membership-tx-hints'))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_manual_tx_hints_returns_current_user_recent_50(self):
+        user = self.create_user('manual-hints@example.com')
+        other_user = self.create_user('manual-hints-other@example.com')
+        for index in range(55):
+            ManualMembershipPayment.objects.create(
+                user=user,
+                plan=self.plan,
+                txid=f'user-manual-tx-{index:02d}',
+                expected_amount_lbc=self.plan.price_lbc,
+                actual_amount_lbc='12.50000000',
+                pay_to_address='bManualPaymentAddress001',
+                confirmations=index,
+                status=ManualMembershipPayment.STATUS_PENDING,
+            )
+        ManualMembershipPayment.objects.create(
+            user=other_user,
+            plan=self.plan,
+            txid='other-user-manual-tx',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=99,
+            status=ManualMembershipPayment.STATUS_VERIFIED,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('manual-membership-tx-hints'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 50)
+        self.assertEqual(response.data[0]['txid'], 'user-manual-tx-54')
+        self.assertEqual(response.data[-1]['txid'], 'user-manual-tx-05')
+        self.assertNotIn('raw_tx', response.data[0])
+        self.assertNotIn('other-user-manual-tx', [item['txid'] for item in response.data])
 
     @override_settings(
         LBRY_PLATFORM_RECEIVE_ADDRESS='bStablePlatformAddress001',

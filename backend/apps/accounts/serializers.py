@@ -10,6 +10,7 @@ from apps.accounts.constants import BLOCKCHAIN_NAME, LEGACY_CHAIN_CURRENCY_CODE,
 from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
+    ManualMembershipPayment,
     MembershipPlan,
     Category,
     ChannelSubscription,
@@ -1482,6 +1483,30 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'token_symbol': TOKEN_SYMBOL,
             'token_peg': TOKEN_PEG,
         }
+
+
+class ManualMembershipPaymentHintSerializer(serializers.ModelSerializer):
+    plan_code = serializers.CharField(source='plan.code', read_only=True)
+    plan_name = serializers.CharField(source='plan.name', read_only=True)
+
+    class Meta:
+        model = ManualMembershipPayment
+        fields = (
+            'id',
+            'txid',
+            'plan_code',
+            'plan_name',
+            'expected_amount_lbc',
+            'actual_amount_lbc',
+            'pay_to_address',
+            'confirmations',
+            'status',
+            'reject_reason',
+            'created_at',
+            'updated_at',
+            'verified_at',
+        )
+        read_only_fields = fields
 
 
 class MembershipOrderCreateSerializer(serializers.Serializer):
