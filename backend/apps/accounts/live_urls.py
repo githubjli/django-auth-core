@@ -13,6 +13,7 @@ from apps.accounts.views import (
     LiveStreamProductManageListCreateAPIView,
     LiveStreamProductPublicListAPIView,
     LiveStreamPrepareAPIView,
+    LiveStreamQuickStartAPIView,
     LiveStreamCreateAPIView,
     LiveStreamDetailAPIView,
     LiveStreamListAPIView,
@@ -25,6 +26,7 @@ from apps.accounts.gift_views import LiveGiftSendAPIView
 urlpatterns = [
     path('', LiveStreamListAPIView.as_view(), name='live-stream-list'),
     path('create/', LiveStreamCreateAPIView.as_view(), name='live-stream-create'),
+    path('quick-start/', LiveStreamQuickStartAPIView.as_view(), name='live-stream-quick-start'),
     path('<int:pk>/', LiveStreamDetailAPIView.as_view(), name='live-stream-detail'),
     path('<int:pk>/status/', LiveStreamStatusDetailAPIView.as_view(), name='live-stream-status'),
     path('<int:pk>/products/', LiveStreamProductPublicListAPIView.as_view(), name='live-stream-products-public'),

@@ -1429,6 +1429,101 @@ class LiveStreamCreateAPIView(generics.CreateAPIView):
         serializer.save(owner=self.request.user)
 
 
+class LiveStreamQuickStartAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsCreator]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        category = None
+        category_slug = (request.data.get('category') or '').strip()
+        if category_slug:
+            category = Category.objects.filter(slug=category_slug, is_active=True).first()
+            if category is None:
+                return Response({'category': ['Active category not found.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        visibility = (request.data.get('visibility') or LiveStream.VISIBILITY_PUBLIC).strip()
+        valid_visibilities = {choice[0] for choice in LiveStream.VISIBILITY_CHOICES}
+        if visibility not in valid_visibilities:
+            return Response({'visibility': ['Invalid visibility.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        stream = (
+            LiveStream.objects.filter(
+                owner=request.user,
+                status__in=[LiveStream.STATUS_IDLE, LiveStream.STATUS_LIVE],
+            )
+            .select_related('category', 'owner')
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        reused = stream is not None
+        if stream is None:
+            title = (request.data.get('title') or '').strip() or f"{request.user.display_name}'s Live"
+            description = request.data.get('description') or ''
+            stream = LiveStream.objects.create(
+                owner=request.user,
+                title=title,
+                description=description,
+                visibility=visibility,
+                status=LiveStream.STATUS_IDLE,
+                category=category,
+            )
+
+        adapter = AntMediaLiveAdapter()
+        ensure_result = adapter.ensure_broadcast(stream)
+        if not ensure_result.get('ok'):
+            return Response(
+                {
+                    'detail': ensure_result.get('message') or 'Unable to prepare live stream broadcast.',
+                    'live_stream_id': stream.id,
+                    'error': ensure_result.get('error'),
+                    'live': self._live_payload(stream, request),
+                    'publish_config': {
+                        'ok': False,
+                        'error': ensure_result.get('error'),
+                        'message': ensure_result.get('message'),
+                    },
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        ant_stream_id = ensure_result.get('stream_id') or stream.stream_key
+        if ant_stream_id != stream.stream_key:
+            stream.stream_key = ant_stream_id
+            stream.save(update_fields=['stream_key'])
+
+        publish_config = adapter.get_browser_publish_config(stream)
+        if not publish_config.get('ok'):
+            return Response(
+                {
+                    'detail': publish_config.get('message') or 'Live stream publish config is unavailable.',
+                    'live': self._live_payload(stream, request),
+                    'publish_config': {
+                        'ok': False,
+                        'error': publish_config.get('error'),
+                        'message': publish_config.get('message'),
+                    },
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                'reused': reused,
+                'live': self._live_payload(stream, request),
+                'publish_config': publish_config,
+                'next_action': 'start_stream',
+            },
+            status=status.HTTP_200_OK if reused else status.HTTP_201_CREATED,
+        )
+
+    def _live_payload(self, stream: LiveStream, request) -> dict:
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = dict(serializer.data)
+        payload['stream_key'] = stream.stream_key
+        payload['status'] = stream.status
+        return payload
+
+
 class LiveStreamDetailAPIView(generics.RetrieveAPIView):
     serializer_class = LiveStreamSerializer
     permission_classes = [permissions.AllowAny]

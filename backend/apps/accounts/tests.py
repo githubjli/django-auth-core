@@ -1851,6 +1851,147 @@ class LiveStreamAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_quick_start_requires_authentication(self):
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_non_creator_cannot_quick_start_live_stream(self):
+        non_creator = self.create_user('quick-viewer@example.com', is_creator=False)
+        self.client.force_authenticate(user=non_creator)
+
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_creator_quick_start_creates_live_stream_with_defaults(self, mock_ensure, mock_publish_config):
+        user = self.authenticate(email='quick-creator@example.com')
+        mock_ensure.return_value = {'ok': True, 'stream_id': 'quick-stream-id'}
+        mock_publish_config.return_value = {
+            'ok': True,
+            'config': {
+                'websocket_url': 'wss://media.example/live/websocket',
+                'adaptor_script_url': 'https://media.example/live/js/webrtc_adaptor.js',
+                'stream_id': 'quick-stream-id',
+                'app_name': 'live',
+                'publish_mode': 'webrtc',
+            },
+        }
+
+        response = self.client.post(reverse('live-stream-quick-start'), {'title': '   '}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['reused'])
+        self.assertEqual(response.data['next_action'], 'start_stream')
+        self.assertTrue(response.data['publish_config']['ok'])
+        self.assertEqual(response.data['publish_config']['config']['stream_id'], 'quick-stream-id')
+        self.assertEqual(response.data['live']['title'], f"{user.display_name}'s Live")
+        self.assertEqual(response.data['live']['status'], LiveStream.STATUS_IDLE)
+        self.assertEqual(response.data['live']['visibility'], LiveStream.VISIBILITY_PUBLIC)
+        self.assertEqual(response.data['live']['stream_key'], 'quick-stream-id')
+        self.assertTrue(response.data['live']['can_start'])
+        self.assertEqual(LiveStream.objects.filter(owner=user).count(), 1)
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_accepts_optional_fields_and_category(self, mock_ensure, mock_publish_config):
+        user = self.authenticate(email='quick-category@example.com')
+        Category.objects.update_or_create(
+            slug='entertainment',
+            defaults={
+                'name': 'Entertainment',
+                'description': 'Entertainment streams',
+                'sort_order': 5,
+                'is_active': True,
+            },
+        )
+        mock_ensure.return_value = {'ok': True}
+        mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': 'category-stream'}}
+
+        response = self.client.post(
+            reverse('live-stream-quick-start'),
+            {
+                'title': 'Jenny Live',
+                'description': 'Mobile stream',
+                'visibility': LiveStream.VISIBILITY_PUBLIC,
+                'category': 'entertainment',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        stream = LiveStream.objects.get(owner=user)
+        self.assertEqual(stream.title, 'Jenny Live')
+        self.assertEqual(stream.description, 'Mobile stream')
+        self.assertEqual(stream.category.slug, 'entertainment')
+        self.assertEqual(response.data['live']['category'], 'entertainment')
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_reuses_existing_idle_or_live_stream(self, mock_ensure, mock_publish_config):
+        user = self.authenticate(email='quick-reuse@example.com')
+        existing = LiveStream.objects.create(owner=user, title='Existing idle stream', status=LiveStream.STATUS_IDLE)
+        mock_ensure.return_value = {'ok': True}
+        mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': existing.stream_key}}
+
+        response = self.client.post(reverse('live-stream-quick-start'), {'title': 'New ignored'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['reused'])
+        self.assertEqual(response.data['live']['id'], existing.id)
+        self.assertEqual(response.data['live']['title'], existing.title)
+        self.assertEqual(LiveStream.objects.filter(owner=user).count(), 1)
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_ensure_broadcast_failure_keeps_live_stream(self, mock_ensure):
+        user = self.authenticate(email='quick-ensure-fail@example.com')
+        mock_ensure.return_value = {
+            'ok': False,
+            'error': 'ant_media_create_failed',
+            'message': 'Unable to create broadcast on Ant Media.',
+        }
+
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['error'], 'ant_media_create_failed')
+        self.assertFalse(response.data['publish_config']['ok'])
+        self.assertIn('live_stream_id', response.data)
+        self.assertTrue(LiveStream.objects.filter(id=response.data['live_stream_id'], owner=user).exists())
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_publish_config_failure_returns_live_and_config_error(self, mock_ensure, mock_publish_config):
+        self.authenticate(email='quick-config-fail@example.com')
+        mock_ensure.return_value = {'ok': True}
+        mock_publish_config.return_value = {
+            'ok': False,
+            'error': 'ant_media_publish_config_unavailable',
+            'message': 'Ant Media publish config is unavailable.',
+        }
+
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('live', response.data)
+        self.assertEqual(response.data['publish_config']['error'], 'ant_media_publish_config_unavailable')
+        self.assertFalse(response.data['publish_config']['ok'])
+
+    def test_quick_start_rejects_unknown_category(self):
+        self.authenticate(email='quick-bad-category@example.com')
+
+        response = self.client.post(
+            reverse('live-stream-quick-start'),
+            {'category': 'missing-category'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('category', response.data)
+        self.assertEqual(LiveStream.objects.count(), 0)
+
     def test_non_creator_cannot_prepare_start_or_end_even_as_owner(self):
         owner = self.create_user('noncreator-owner@example.com', is_creator=False)
         stream = LiveStream.objects.create(owner=owner, title='Owner stream')
