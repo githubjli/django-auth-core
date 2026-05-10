@@ -50,6 +50,7 @@ from apps.accounts.serializers import LiveStreamSerializer
 from apps.accounts.services import (
     LbryDaemonClient,
     LbryDaemonError,
+    ManualMembershipChainVerifier,
     MembershipActivationService,
     PaymentDetectionService,
     ProductOrderService,
@@ -3234,6 +3235,146 @@ class LbryDaemonClientTestCase(APITestCase):
 
         with self.assertRaises(LbryDaemonError):
             client.address_unused(wallet_id='wallet-main')
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPlatformAddress001',
+    LBC_MIN_CONFIRMATIONS=2,
+)
+class ManualMembershipChainVerifierTestCase(APITestCase):
+    class FakeDaemonClient:
+        def __init__(self, tx_payload=None, error=None):
+            self.tx_payload = tx_payload or {}
+            self.error = error
+            self.seen_txids = []
+
+        def transaction_show(self, txid):
+            self.seen_txids.append(txid)
+            if self.error is not None:
+                raise self.error
+            return self.tx_payload
+
+    def create_plan(self, price='10.00000000'):
+        return MembershipPlan.objects.create(
+            code=f'manual-{MembershipPlan.objects.count() + 1}',
+            name='Manual plan',
+            description='Manual verifier plan',
+            price_lbc=price,
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def verify(self, *, plan=None, tx_payload=None, error=None, txid='manual-tx-001'):
+        daemon = self.FakeDaemonClient(tx_payload=tx_payload, error=error)
+        service = ManualMembershipChainVerifier(daemon_client=daemon)
+        result = service.verify(txid=txid, plan=plan or self.create_plan())
+        return result, daemon
+
+    def test_verified_payment_uses_only_chain_output_amount_and_address(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-ok',
+            'confirmations': 3,
+            'outputs': [
+                {'nout': 0, 'address': 'bOtherAddress001', 'amount': '99.00000000'},
+                {'nout': 1, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'},
+            ],
+        }
+
+        result, daemon = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-ok')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['reason'], 'ok')
+        self.assertEqual(result['txid'], 'manual-tx-ok')
+        self.assertEqual(result['confirmations'], 3)
+        self.assertEqual(result['required_confirmations'], 2)
+        self.assertEqual(result['expected_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+        self.assertEqual(result['raw_tx'], tx_payload)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-ok'])
+
+    def test_multiple_matching_outputs_are_summed(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-split',
+            'confirmations': 2,
+            'outputs': [
+                {'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '4.00000000'},
+                {'nout': 1, 'addresses': ['bManualPlatformAddress001'], 'amount_lbc': '6.00000000'},
+            ],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-split')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+
+    def test_pending_confirmation_is_not_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-pending',
+            'confirmations': 1,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-pending')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'pending_confirmation')
+        self.assertEqual(result['confirmations'], 1)
+
+    def test_insufficient_amount_returns_chain_amount(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-under',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '9.99000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-under')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'insufficient_amount')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('9.99000000'))
+
+    def test_no_matching_platform_output_is_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-wrong-address',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bAttackerAddress001', 'amount': '100.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-wrong-address')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'no_matching_output')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('0'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='')
+    def test_receive_address_must_be_configured(self):
+        plan = self.create_plan(price='10.00000000')
+        result, daemon = self.verify(plan=plan, tx_payload={'outputs': []}, txid='manual-tx-config')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'receive_address_not_configured')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, [])
+
+    def test_chain_lookup_failure_returns_reason_without_raising(self):
+        plan = self.create_plan(price='10.00000000')
+
+        result, daemon = self.verify(plan=plan, error=LbryDaemonError('daemon down'), txid='manual-tx-error')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'chain_lookup_failed')
+        self.assertEqual(result['txid'], 'manual-tx-error')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-error'])
 
 
 @override_settings(
