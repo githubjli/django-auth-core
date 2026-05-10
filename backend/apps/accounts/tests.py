@@ -30,6 +30,7 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    ManualMembershipPayment,
     MembershipPlan,
     OrderPayment,
     PaymentOrder,
@@ -50,6 +51,7 @@ from apps.accounts.serializers import LiveStreamSerializer
 from apps.accounts.services import (
     LbryDaemonClient,
     LbryDaemonError,
+    ManualMembershipChainVerifier,
     MembershipActivationService,
     PaymentDetectionService,
     ProductOrderService,
@@ -3238,6 +3240,146 @@ class LbryDaemonClientTestCase(APITestCase):
 
 @override_settings(
     LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPlatformAddress001',
+    LBC_MIN_CONFIRMATIONS=2,
+)
+class ManualMembershipChainVerifierTestCase(APITestCase):
+    class FakeDaemonClient:
+        def __init__(self, tx_payload=None, error=None):
+            self.tx_payload = tx_payload or {}
+            self.error = error
+            self.seen_txids = []
+
+        def transaction_show(self, txid):
+            self.seen_txids.append(txid)
+            if self.error is not None:
+                raise self.error
+            return self.tx_payload
+
+    def create_plan(self, price='10.00000000'):
+        return MembershipPlan.objects.create(
+            code=f'manual-{MembershipPlan.objects.count() + 1}',
+            name='Manual plan',
+            description='Manual verifier plan',
+            price_lbc=price,
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def verify(self, *, plan=None, tx_payload=None, error=None, txid='manual-tx-001'):
+        daemon = self.FakeDaemonClient(tx_payload=tx_payload, error=error)
+        service = ManualMembershipChainVerifier(daemon_client=daemon)
+        result = service.verify(txid=txid, plan=plan or self.create_plan())
+        return result, daemon
+
+    def test_verified_payment_uses_only_chain_output_amount_and_address(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-ok',
+            'confirmations': 3,
+            'outputs': [
+                {'nout': 0, 'address': 'bOtherAddress001', 'amount': '99.00000000'},
+                {'nout': 1, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'},
+            ],
+        }
+
+        result, daemon = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-ok')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['reason'], 'ok')
+        self.assertEqual(result['txid'], 'manual-tx-ok')
+        self.assertEqual(result['confirmations'], 3)
+        self.assertEqual(result['required_confirmations'], 2)
+        self.assertEqual(result['expected_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+        self.assertEqual(result['raw_tx'], tx_payload)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-ok'])
+
+    def test_multiple_matching_outputs_are_summed(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-split',
+            'confirmations': 2,
+            'outputs': [
+                {'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '4.00000000'},
+                {'nout': 1, 'addresses': ['bManualPlatformAddress001'], 'amount_lbc': '6.00000000'},
+            ],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-split')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+
+    def test_pending_confirmation_is_not_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-pending',
+            'confirmations': 1,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-pending')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'pending_confirmation')
+        self.assertEqual(result['confirmations'], 1)
+
+    def test_insufficient_amount_returns_chain_amount(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-under',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '9.99000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-under')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'insufficient_amount')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('9.99000000'))
+
+    def test_no_matching_platform_output_is_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-wrong-address',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bAttackerAddress001', 'amount': '100.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-wrong-address')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'no_matching_output')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('0'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='')
+    def test_receive_address_must_be_configured(self):
+        plan = self.create_plan(price='10.00000000')
+        result, daemon = self.verify(plan=plan, tx_payload={'outputs': []}, txid='manual-tx-config')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'receive_address_not_configured')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, [])
+
+    def test_chain_lookup_failure_returns_reason_without_raising(self):
+        plan = self.create_plan(price='10.00000000')
+
+        result, daemon = self.verify(plan=plan, error=LbryDaemonError('daemon down'), txid='manual-tx-error')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'chain_lookup_failed')
+        self.assertEqual(result['txid'], 'manual-tx-error')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-error'])
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
     MEMBERSHIP_ORDER_EXPIRE_MINUTES=45,
 )
 class MembershipAPITestCase(APITestCase):
@@ -3283,6 +3425,88 @@ class MembershipAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('plan_code', response.data)
+
+    def test_manual_payment_info_requires_authentication(self):
+        response = self.client.get(
+            reverse('manual-membership-payment-info'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(
+        LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPaymentAddress001',
+        LBC_MIN_CONFIRMATIONS=3,
+    )
+    def test_manual_payment_info_returns_read_only_plan_payment_details_without_order(self):
+        user = self.create_user('manual-info@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get(
+            reverse('manual-membership-payment-info'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            set(response.data.keys()),
+            {
+                'plan_code',
+                'plan_name',
+                'expected_amount_lbc',
+                'currency',
+                'pay_to_address',
+                'required_confirmations',
+                'notice',
+            },
+        )
+        self.assertEqual(response.data['plan_code'], MembershipPlan.CODE_MONTHLY)
+        self.assertEqual(response.data['plan_name'], self.plan.name)
+        self.assertEqual(response.data['expected_amount_lbc'], '12.50000000')
+        self.assertEqual(response.data['currency'], 'LBC')
+        self.assertEqual(response.data['pay_to_address'], 'bManualPaymentAddress001')
+        self.assertEqual(response.data['required_confirmations'], 3)
+        self.assertEqual(PaymentOrder.objects.count(), 0)
+
+    def test_manual_tx_hints_requires_authentication(self):
+        response = self.client.get(reverse('manual-membership-tx-hints'))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_manual_tx_hints_returns_current_user_recent_50(self):
+        user = self.create_user('manual-hints@example.com')
+        other_user = self.create_user('manual-hints-other@example.com')
+        for index in range(55):
+            ManualMembershipPayment.objects.create(
+                user=user,
+                plan=self.plan,
+                txid=f'user-manual-tx-{index:02d}',
+                expected_amount_lbc=self.plan.price_lbc,
+                actual_amount_lbc='12.50000000',
+                pay_to_address='bManualPaymentAddress001',
+                confirmations=index,
+                status=ManualMembershipPayment.STATUS_PENDING,
+            )
+        ManualMembershipPayment.objects.create(
+            user=other_user,
+            plan=self.plan,
+            txid='other-user-manual-tx',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=99,
+            status=ManualMembershipPayment.STATUS_VERIFIED,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('manual-membership-tx-hints'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 50)
+        self.assertEqual(response.data[0]['txid'], 'user-manual-tx-54')
+        self.assertEqual(response.data[-1]['txid'], 'user-manual-tx-05')
+        self.assertNotIn('raw_tx', response.data[0])
+        self.assertNotIn('other-user-manual-tx', [item['txid'] for item in response.data])
 
     @override_settings(
         LBRY_PLATFORM_RECEIVE_ADDRESS='bStablePlatformAddress001',
