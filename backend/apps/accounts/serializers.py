@@ -10,6 +10,7 @@ from apps.accounts.constants import BLOCKCHAIN_NAME, LEGACY_CHAIN_CURRENCY_CODE,
 from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
+    ManualMembershipPayment,
     MembershipPlan,
     Category,
     ChannelSubscription,
@@ -346,6 +347,9 @@ class VideoSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source='owner.id', read_only=True)
     owner_name = serializers.CharField(source='owner.display_name', read_only=True)
     owner_avatar_url = serializers.SerializerMethodField()
+    owner_subscriber_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
+    is_following_owner = serializers.SerializerMethodField()
+    creator = serializers.SerializerMethodField()
     file_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     description_preview = serializers.SerializerMethodField()
@@ -381,6 +385,9 @@ class VideoSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_subscriber_count',
+            'is_following_owner',
+            'creator',
             'title',
             'description',
             'description_preview',
@@ -408,6 +415,9 @@ class VideoSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_subscriber_count',
+            'is_following_owner',
+            'creator',
             'category_name',
             'category_slug',
             'like_count',
@@ -429,6 +439,25 @@ class VideoSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.owner.avatar.url
         return request.build_absolute_uri(obj.owner.avatar.url)
+
+    def get_is_following_owner(self, obj):
+        request = self.context.get('request')
+        if request is None or not getattr(request, 'user', None) or not request.user.is_authenticated:
+            return False
+        prefetched = getattr(obj, 'is_subscribed_value', None)
+        if prefetched is not None:
+            return bool(prefetched)
+        return ChannelSubscription.objects.filter(channel=obj.owner, subscriber=request.user).exists()
+
+    def get_creator(self, obj):
+        return {
+            'id': obj.owner_id,
+            'name': obj.owner.display_name,
+            'avatar_url': self.get_owner_avatar_url(obj),
+            'is_creator': obj.owner.is_creator,
+            'is_following': self.get_is_following_owner(obj),
+            'subscriber_count': obj.owner.subscriber_count,
+        }
 
     def get_file_url(self, obj):
         if not self._can_watch(obj):
@@ -1482,6 +1511,47 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'token_symbol': TOKEN_SYMBOL,
             'token_peg': TOKEN_PEG,
         }
+
+
+class ManualMembershipTxHintSubmitSerializer(serializers.Serializer):
+    plan_code = serializers.CharField(max_length=32)
+    txid = serializers.CharField(max_length=128)
+
+    def validate_plan_code(self, value):
+        plan_code = value.strip()
+        if not plan_code:
+            raise serializers.ValidationError('plan_code is required.')
+        return plan_code
+
+    def validate_txid(self, value):
+        txid = value.strip()
+        if not txid:
+            raise serializers.ValidationError('txid is required.')
+        return txid
+
+
+class ManualMembershipPaymentHintSerializer(serializers.ModelSerializer):
+    plan_code = serializers.CharField(source='plan.code', read_only=True)
+    plan_name = serializers.CharField(source='plan.name', read_only=True)
+
+    class Meta:
+        model = ManualMembershipPayment
+        fields = (
+            'id',
+            'txid',
+            'plan_code',
+            'plan_name',
+            'expected_amount_lbc',
+            'actual_amount_lbc',
+            'pay_to_address',
+            'confirmations',
+            'status',
+            'reject_reason',
+            'created_at',
+            'updated_at',
+            'verified_at',
+        )
+        read_only_fields = fields
 
 
 class MembershipOrderCreateSerializer(serializers.Serializer):
