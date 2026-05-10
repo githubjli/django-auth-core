@@ -3,12 +3,13 @@ from django.contrib.auth import authenticate
 from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Exists, F, OuterRef, Q
 from datetime import timedelta
 import json
 import hmac
 import logging
+import secrets
 from asgiref.sync import async_to_sync
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
@@ -105,6 +106,7 @@ from apps.accounts.services import (
     LbryDaemonInvalidParamsError,
     LbryDaemonRpcError,
     ManualMembershipChainVerifier,
+    MembershipActivationService,
     MembershipOrderService,
     ProductOrderService,
     ProductPaymentDetectionService,
@@ -1942,19 +1944,31 @@ class ManualMembershipTxHintListAPIView(APIView):
         payment_status = self._status_from_verification(verification)
         reject_reason = verification['reason'] if payment_status == ManualMembershipPayment.STATUS_REJECTED else ''
         try:
-            payment = ManualMembershipPayment.objects.create(
-                user=request.user,
-                plan=plan,
-                txid=txid,
-                expected_amount_lbc=verification['expected_amount_lbc'],
-                actual_amount_lbc=verification['actual_amount_lbc'],
-                pay_to_address=verification['pay_to_address'],
-                confirmations=verification['confirmations'],
-                status=payment_status,
-                reject_reason=reject_reason,
-                raw_tx=verification['raw_tx'],
-                verified_at=timezone.now() if verification['ok'] else None,
-            )
+            with transaction.atomic():
+                payment = ManualMembershipPayment.objects.create(
+                    user=request.user,
+                    plan=plan,
+                    txid=txid,
+                    expected_amount_lbc=verification['expected_amount_lbc'],
+                    actual_amount_lbc=verification['actual_amount_lbc'],
+                    pay_to_address=verification['pay_to_address'],
+                    confirmations=verification['confirmations'],
+                    status=payment_status,
+                    reject_reason=reject_reason,
+                    raw_tx=verification['raw_tx'],
+                    verified_at=timezone.now() if verification['ok'] else None,
+                )
+                if verification['ok'] and bool(getattr(settings, 'MANUAL_MEMBERSHIP_AUTO_ACTIVATE', False)):
+                    payment_order, membership = self._activate_verified_manual_payment(
+                        payment=payment,
+                        user=request.user,
+                        plan=plan,
+                        verification=verification,
+                    )
+                    payment.payment_order = payment_order
+                    payment.membership = membership
+                    payment.verified_at = timezone.now()
+                    payment.save(update_fields=['payment_order', 'membership', 'verified_at', 'updated_at'])
         except IntegrityError:
             return Response(
                 {
@@ -1987,6 +2001,40 @@ class ManualMembershipTxHintListAPIView(APIView):
         payload['expected_amount_lbc'] = f"{verification['expected_amount_lbc']:.8f}"
         payload['actual_amount_lbc'] = f"{verification['actual_amount_lbc']:.8f}"
         return payload
+
+    def _activate_verified_manual_payment(self, *, payment: ManualMembershipPayment, user, plan: MembershipPlan, verification: dict):
+        actual_amount = verification['actual_amount_lbc']
+        expected_amount = verification['expected_amount_lbc']
+        order_status = PaymentOrder.STATUS_OVERPAID if actual_amount > expected_amount else PaymentOrder.STATUS_PAID
+        now = timezone.now()
+        payment_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=expected_amount,
+            actual_amount_lbc=actual_amount,
+            txid=verification['txid'],
+            confirmations=verification['confirmations'],
+            pay_to_address=verification['pay_to_address'],
+            status=order_status,
+            paid_at=now,
+            order_no=self._generate_manual_order_no(),
+            amount='0.00',
+            currency='LBC',
+        )
+        membership = MembershipActivationService().activate_for_order(order=payment_order)
+        return payment_order, membership
+
+    def _generate_manual_order_no(self) -> str:
+        for _ in range(8):
+            candidate = f'MO{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not PaymentOrder.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise LbryDaemonError('Unable to generate unique membership order number.')
+
 
 
 class MembershipOrderCreateAPIView(APIView):

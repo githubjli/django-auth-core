@@ -3553,6 +3553,57 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(response.data['verification']['reason'], 'ok')
         self.assertEqual(response.data['verification']['expected_amount_lbc'], '12.50000000')
 
+    @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_auto_activates_when_enabled(self, mock_verify):
+        user = self.create_user('manual-auto@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-submit-auto',
+            'confirmations': 4,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('13.00000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-auto', 'outputs': []},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-auto'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-auto')
+        payment_order = payment.payment_order
+        membership = payment.membership
+        self.assertIsNotNone(payment_order)
+        self.assertIsNotNone(membership)
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_SUBMITTED)
+        self.assertIsNotNone(payment.verified_at)
+        self.assertEqual(payment_order.user_id, user.id)
+        self.assertEqual(payment_order.order_type, PaymentOrder.TYPE_MEMBERSHIP)
+        self.assertEqual(payment_order.target_type, 'membership_plan')
+        self.assertEqual(payment_order.target_id, self.plan.id)
+        self.assertEqual(payment_order.plan_code_snapshot, self.plan.code)
+        self.assertEqual(payment_order.plan_name_snapshot, self.plan.name)
+        self.assertEqual(payment_order.expected_amount_lbc, Decimal('12.50000000'))
+        self.assertEqual(payment_order.actual_amount_lbc, Decimal('13.00000000'))
+        self.assertEqual(payment_order.txid, 'manual-submit-auto')
+        self.assertEqual(payment_order.confirmations, 4)
+        self.assertEqual(payment_order.pay_to_address, 'bManualPaymentAddress001')
+        self.assertEqual(payment_order.status, PaymentOrder.STATUS_OVERPAID)
+        self.assertEqual(payment_order.currency, 'LBC')
+        self.assertTrue(payment_order.order_no)
+        self.assertIsNotNone(payment_order.paid_at)
+        self.assertEqual(membership.user_id, user.id)
+        self.assertEqual(membership.source_order_id, payment_order.id)
+        self.assertEqual(membership.plan_id, self.plan.id)
+        self.assertEqual(response.data['payment']['status'], ManualMembershipPayment.STATUS_SUBMITTED)
+
     @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
     def test_manual_tx_hint_submit_pending_confirmation_status(self, mock_verify):
         user = self.create_user('manual-pending@example.com')
