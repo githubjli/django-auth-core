@@ -642,6 +642,113 @@ class MembershipOrderService:
         raise LbryDaemonError('Unable to generate unique membership order number.')
 
 
+class ManualMembershipChainVerifier:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client
+
+    def verify(self, *, txid: str, plan: MembershipPlan) -> dict:
+        txid_value = (txid or '').strip()
+        platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        required_confirmations = int(settings.LBC_MIN_CONFIRMATIONS)
+        expected_amount = Decimal(str(plan.price_lbc))
+
+        base_result = {
+            'ok': False,
+            'reason': '',
+            'txid': txid_value,
+            'confirmations': 0,
+            'required_confirmations': required_confirmations,
+            'expected_amount_lbc': expected_amount,
+            'actual_amount_lbc': Decimal('0'),
+            'pay_to_address': platform_receive_address,
+            'raw_tx': None,
+        }
+
+        if not txid_value:
+            return {**base_result, 'reason': 'txid_required'}
+        if not platform_receive_address:
+            return {**base_result, 'reason': 'receive_address_not_configured'}
+
+        try:
+            daemon_client = self.daemon_client or self.daemon_client_class()
+            tx_detail = daemon_client.transaction_show(txid_value)
+            if not isinstance(tx_detail, dict):
+                raise LbryDaemonError('Unexpected transaction_show response from LBRY daemon.')
+        except Exception as exc:
+            logger.warning('manual_membership_chain_lookup_failed txid=%s error=%s', txid_value, exc)
+            return {**base_result, 'reason': 'chain_lookup_failed'}
+
+        confirmations = self._extract_confirmations(tx_detail)
+        matching_amount = Decimal('0')
+        matched_address = ''
+        for output in self._extract_outputs(tx_detail):
+            address = (output.get('address') or '').strip()
+            if address != platform_receive_address:
+                continue
+            amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+            if amount is None:
+                continue
+            matching_amount += amount
+            matched_address = address
+
+        result = {
+            **base_result,
+            'confirmations': confirmations,
+            'actual_amount_lbc': matching_amount,
+            'pay_to_address': matched_address or platform_receive_address,
+            'raw_tx': tx_detail,
+        }
+
+        if matching_amount <= 0:
+            return {**result, 'reason': 'no_matching_output'}
+        if matching_amount < expected_amount:
+            return {**result, 'reason': 'insufficient_amount'}
+        if confirmations < required_confirmations:
+            return {**result, 'reason': 'pending_confirmation'}
+        return {**result, 'ok': True, 'reason': 'ok'}
+
+    def _extract_outputs(self, tx_detail: dict) -> list[dict]:
+        outputs = tx_detail.get('outputs')
+        if not isinstance(outputs, list):
+            return []
+        parsed_outputs = []
+        for index, output in enumerate(outputs):
+            if not isinstance(output, dict):
+                continue
+            address = output.get('address')
+            if not address:
+                addresses = output.get('addresses')
+                if isinstance(addresses, list) and addresses:
+                    address = addresses[0]
+            parsed_outputs.append(
+                {
+                    'address': address,
+                    'amount': output.get('amount'),
+                    'amount_lbc': output.get('amount_lbc'),
+                    'vout': output.get('vout'),
+                    'nout': output.get('nout', index),
+                }
+            )
+        return parsed_outputs
+
+    def _extract_confirmations(self, tx_detail: dict) -> int:
+        value = tx_detail.get('confirmations')
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+
+
 class MembershipActivationService:
     @transaction.atomic
     def activate_for_order(self, *, order: PaymentOrder) -> UserMembership | None:
