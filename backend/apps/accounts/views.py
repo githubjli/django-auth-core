@@ -1967,8 +1967,9 @@ class ManualMembershipTxHintListAPIView(APIView):
                     )
                     payment.payment_order = payment_order
                     payment.membership = membership
+                    payment.status = ManualMembershipPayment.STATUS_VERIFIED
                     payment.verified_at = timezone.now()
-                    payment.save(update_fields=['payment_order', 'membership', 'verified_at', 'updated_at'])
+                    payment.save(update_fields=['payment_order', 'membership', 'status', 'verified_at', 'updated_at'])
         except IntegrityError:
             return Response(
                 {
@@ -1980,10 +1981,7 @@ class ManualMembershipTxHintListAPIView(APIView):
             )
 
         return Response(
-            {
-                'payment': ManualMembershipPaymentHintSerializer(payment).data,
-                'verification': self._serialize_verification(verification),
-            },
+            self._manual_payment_response_payload(payment=payment, verification=verification),
             status=status.HTTP_201_CREATED,
         )
 
@@ -2000,6 +1998,16 @@ class ManualMembershipTxHintListAPIView(APIView):
         payload = dict(verification)
         payload['expected_amount_lbc'] = f"{verification['expected_amount_lbc']:.8f}"
         payload['actual_amount_lbc'] = f"{verification['actual_amount_lbc']:.8f}"
+        return payload
+
+    def _manual_payment_response_payload(self, *, payment: ManualMembershipPayment, verification: dict | None = None) -> dict:
+        payload = {
+            'payment': ManualMembershipPaymentHintSerializer(payment).data,
+            'payment_order': MembershipOrderSerializer(payment.payment_order).data if payment.payment_order_id else None,
+            'membership': MyMembershipSerializer.from_membership(payment.membership).data if payment.membership_id else None,
+        }
+        if verification is not None:
+            payload['verification'] = self._serialize_verification(verification)
         return payload
 
     def _activate_verified_manual_payment(self, *, payment: ManualMembershipPayment, user, plan: MembershipPlan, verification: dict):
@@ -2035,6 +2043,121 @@ class ManualMembershipTxHintListAPIView(APIView):
                 return candidate
         raise LbryDaemonError('Unable to generate unique membership order number.')
 
+
+
+class ManualMembershipTxHintVerifyNowAPIView(ManualMembershipTxHintListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        with transaction.atomic():
+            payment = generics.get_object_or_404(
+                ManualMembershipPayment.objects.select_for_update().select_related('plan', 'payment_order', 'membership'),
+                pk=pk,
+                user=request.user,
+            )
+            if payment.status == ManualMembershipPayment.STATUS_VERIFIED:
+                return Response(
+                    self._manual_payment_response_payload(payment=payment),
+                    status=status.HTTP_200_OK,
+                )
+            if payment.status != ManualMembershipPayment.STATUS_PENDING_CONFIRMATION:
+                return Response(
+                    {
+                        **self._manual_payment_response_payload(payment=payment),
+                        'detail': 'Manual membership payment is not pending confirmation.',
+                        'reason': 'not_pending_confirmation',
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            verification = ManualMembershipChainVerifier().verify(txid=payment.txid, plan=payment.plan)
+            payment.expected_amount_lbc = verification['expected_amount_lbc']
+            payment.actual_amount_lbc = verification['actual_amount_lbc']
+            payment.pay_to_address = verification['pay_to_address']
+            payment.confirmations = verification['confirmations']
+            payment.raw_tx = verification['raw_tx']
+
+            if verification['ok']:
+                if bool(getattr(settings, 'MANUAL_MEMBERSHIP_AUTO_ACTIVATE', False)):
+                    payment_order, membership = self._activate_verified_manual_payment(
+                        payment=payment,
+                        user=request.user,
+                        plan=payment.plan,
+                        verification=verification,
+                    )
+                    payment.payment_order = payment_order
+                    payment.membership = membership
+                    payment.status = ManualMembershipPayment.STATUS_VERIFIED
+                    payment.reject_reason = ''
+                    payment.verified_at = timezone.now()
+                    payment.save(
+                        update_fields=[
+                            'expected_amount_lbc',
+                            'actual_amount_lbc',
+                            'pay_to_address',
+                            'confirmations',
+                            'raw_tx',
+                            'payment_order',
+                            'membership',
+                            'status',
+                            'reject_reason',
+                            'verified_at',
+                            'updated_at',
+                        ]
+                    )
+                else:
+                    payment.status = ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED
+                    payment.reject_reason = ''
+                    payment.verified_at = timezone.now()
+                    payment.save(
+                        update_fields=[
+                            'expected_amount_lbc',
+                            'actual_amount_lbc',
+                            'pay_to_address',
+                            'confirmations',
+                            'raw_tx',
+                            'status',
+                            'reject_reason',
+                            'verified_at',
+                            'updated_at',
+                        ]
+                    )
+            elif verification['reason'] == 'pending_confirmation':
+                payment.status = ManualMembershipPayment.STATUS_PENDING_CONFIRMATION
+                payment.reject_reason = ''
+                payment.save(
+                    update_fields=[
+                        'expected_amount_lbc',
+                        'actual_amount_lbc',
+                        'pay_to_address',
+                        'confirmations',
+                        'raw_tx',
+                        'status',
+                        'reject_reason',
+                        'updated_at',
+                    ]
+                )
+            else:
+                payment.status = ManualMembershipPayment.STATUS_REJECTED
+                payment.reject_reason = verification['reason']
+                payment.save(
+                    update_fields=[
+                        'expected_amount_lbc',
+                        'actual_amount_lbc',
+                        'pay_to_address',
+                        'confirmations',
+                        'raw_tx',
+                        'status',
+                        'reject_reason',
+                        'updated_at',
+                    ]
+                )
+
+            payment.refresh_from_db()
+            return Response(
+                self._manual_payment_response_payload(payment=payment, verification=verification),
+                status=status.HTTP_200_OK,
+            )
 
 
 class MembershipOrderCreateAPIView(APIView):
