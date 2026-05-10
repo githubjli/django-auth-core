@@ -1817,38 +1817,54 @@ class ChannelSubscriptionAPIView(APIView):
 class CreatorFollowAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request, pk):
-        creator = generics.get_object_or_404(User, pk=pk)
+    def post(self, request, creator_id):
+        creator = generics.get_object_or_404(User, pk=creator_id)
+        validation_response = self._validate_creator_target(request, creator)
+        if validation_response is not None:
+            return validation_response
+
+        ChannelSubscription.objects.get_or_create(channel=creator, subscriber=request.user)
+        subscriber_count = self._sync_subscriber_count(creator)
+        return Response(
+            self._response_payload(creator=creator, is_following=True, subscriber_count=subscriber_count),
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, creator_id):
+        creator = generics.get_object_or_404(User, pk=creator_id)
+        validation_response = self._validate_creator_target(request, creator)
+        if validation_response is not None:
+            return validation_response
+
+        ChannelSubscription.objects.filter(channel=creator, subscriber=request.user).delete()
+        subscriber_count = self._sync_subscriber_count(creator)
+        return Response(
+            self._response_payload(creator=creator, is_following=False, subscriber_count=subscriber_count),
+            status=status.HTTP_200_OK,
+        )
+
+    def _validate_creator_target(self, request, creator):
         if creator.pk == request.user.pk:
             return Response({'detail': 'You cannot follow yourself.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not creator.is_creator:
+            return Response({'detail': 'Target user is not a creator.'}, status=status.HTTP_400_BAD_REQUEST)
+        return None
 
-        _, created = ChannelSubscription.objects.get_or_create(channel=creator, subscriber=request.user)
-        if created:
-            User.objects.filter(pk=creator.pk).update(subscriber_count=F('subscriber_count') + 1)
-        creator.refresh_from_db(fields=['subscriber_count'])
-        return Response(
-            {
-                'creator_id': creator.pk,
-                'follower_count': creator.subscriber_count,
-                'viewer_is_following': True,
-            },
-            status=status.HTTP_200_OK,
-        )
+    def _sync_subscriber_count(self, creator) -> int:
+        subscriber_count = ChannelSubscription.objects.filter(channel=creator).count()
+        creator.subscriber_count = subscriber_count
+        creator.save(update_fields=['subscriber_count'])
+        return subscriber_count
 
-    def delete(self, request, pk):
-        creator = generics.get_object_or_404(User, pk=pk)
-        deleted_count, _ = ChannelSubscription.objects.filter(channel=creator, subscriber=request.user).delete()
-        if deleted_count:
-            User.objects.filter(pk=creator.pk, subscriber_count__gt=0).update(subscriber_count=F('subscriber_count') - 1)
-        creator.refresh_from_db(fields=['subscriber_count'])
-        return Response(
-            {
-                'creator_id': creator.pk,
-                'follower_count': creator.subscriber_count,
-                'viewer_is_following': False,
-            },
-            status=status.HTTP_200_OK,
-        )
+    def _response_payload(self, *, creator, is_following: bool, subscriber_count: int) -> dict:
+        return {
+            'creator_id': creator.pk,
+            'is_following': is_following,
+            'subscriber_count': subscriber_count,
+            # Backward-compatible aliases for existing clients.
+            'viewer_is_following': is_following,
+            'follower_count': subscriber_count,
+        }
 
 
 class BillingPlanListAPIView(generics.ListAPIView):

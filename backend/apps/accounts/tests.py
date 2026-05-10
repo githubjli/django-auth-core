@@ -1538,21 +1538,90 @@ class VideoAPITestCase(APITestCase):
         )
 
     def test_creator_follow_endpoints(self):
-        creator = self.authenticate(email='creator-follow@example.com')
+        creator = self.create_user(email='creator-follow@example.com', is_creator=True)
         follower = self.create_user(email='follower@example.com')
         self.client.force_authenticate(user=follower)
 
         follow_response = self.client.post(reverse('creator-follow', args=[creator.id]))
         self.assertEqual(follow_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(follow_response.data['is_following'])
         self.assertTrue(follow_response.data['viewer_is_following'])
+        self.assertEqual(follow_response.data['subscriber_count'], 1)
         self.assertEqual(follow_response.data['follower_count'], 1)
         self.assertEqual(follow_response.data['creator_id'], creator.id)
 
+        second_follow_response = self.client.post(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(second_follow_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(second_follow_response.data['is_following'])
+        self.assertEqual(second_follow_response.data['subscriber_count'], 1)
+        self.assertEqual(ChannelSubscription.objects.filter(channel=creator, subscriber=follower).count(), 1)
+
         unfollow_response = self.client.delete(reverse('creator-follow', args=[creator.id]))
         self.assertEqual(unfollow_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(unfollow_response.data['is_following'])
         self.assertFalse(unfollow_response.data['viewer_is_following'])
+        self.assertEqual(unfollow_response.data['subscriber_count'], 0)
         self.assertEqual(unfollow_response.data['follower_count'], 0)
         self.assertEqual(unfollow_response.data['creator_id'], creator.id)
+
+        second_unfollow_response = self.client.delete(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(second_unfollow_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(second_unfollow_response.data['is_following'])
+        self.assertEqual(second_unfollow_response.data['subscriber_count'], 0)
+        creator.refresh_from_db()
+        self.assertEqual(creator.subscriber_count, ChannelSubscription.objects.filter(channel=creator).count())
+
+    def test_creator_follow_requires_authentication(self):
+        creator = self.create_user(email='creator-follow-auth@example.com', is_creator=True)
+
+        response = self.client.post(reverse('creator-follow', args=[creator.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_creator_follow_rejects_self_and_non_creator(self):
+        creator = self.create_user(email='creator-self@example.com', is_creator=True)
+        self.client.force_authenticate(user=creator)
+
+        self_response = self.client.post(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(self_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self_response.data['detail'], 'You cannot follow yourself.')
+
+        follower = self.create_user(email='creator-non-target-follower@example.com')
+        non_creator = self.create_user(email='creator-non-target@example.com', is_creator=False)
+        self.client.force_authenticate(user=follower)
+        non_creator_response = self.client.post(reverse('creator-follow', args=[non_creator.id]))
+        self.assertEqual(non_creator_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(non_creator_response.data['detail'], 'Target user is not a creator.')
+
+    def test_public_video_detail_includes_creator_follow_state(self):
+        creator = self.create_user(
+            email='creator-video-detail@example.com',
+            first_name='Creator',
+            last_name='Detail',
+            is_creator=True,
+        )
+        viewer = self.create_user(email='creator-video-viewer@example.com')
+        ChannelSubscription.objects.create(channel=creator, subscriber=viewer)
+        creator.subscriber_count = ChannelSubscription.objects.filter(channel=creator).count()
+        creator.save(update_fields=['subscriber_count'])
+        video = Video.objects.create(
+            owner=creator,
+            title='Creator video detail',
+            file=SimpleUploadedFile('creator-detail.mp4', b'video-bytes', content_type='video/mp4'),
+            visibility=Video.VISIBILITY_PUBLIC,
+        )
+
+        self.client.force_authenticate(user=viewer)
+        response = self.client.get(reverse('public-video-detail', args=[video.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_following_owner'])
+        self.assertEqual(response.data['owner_subscriber_count'], 1)
+        self.assertEqual(response.data['creator']['id'], creator.id)
+        self.assertEqual(response.data['creator']['name'], 'Creator Detail')
+        self.assertTrue(response.data['creator']['is_creator'])
+        self.assertTrue(response.data['creator']['is_following'])
+        self.assertEqual(response.data['creator']['subscriber_count'], 1)
 
     def test_public_comments_contract_fields(self):
         self.authenticate()
