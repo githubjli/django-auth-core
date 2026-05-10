@@ -1930,9 +1930,10 @@ class LiveStreamAPITestCase(APITestCase):
 
     @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
     @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
-    def test_quick_start_reuses_existing_idle_or_live_stream(self, mock_ensure, mock_publish_config):
+    def test_quick_start_reuses_existing_idle_live_or_ready_stream(self, mock_ensure, mock_publish_config):
         user = self.authenticate(email='quick-reuse@example.com')
-        existing = LiveStream.objects.create(owner=user, title='Existing idle stream', status=LiveStream.STATUS_IDLE)
+        LiveStream.objects.create(owner=user, title='Older idle stream', status=LiveStream.STATUS_IDLE)
+        existing = LiveStream.objects.create(owner=user, title='Existing ready stream', status=LiveStream.STATUS_READY)
         mock_ensure.return_value = {'ok': True}
         mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': existing.stream_key}}
 
@@ -1942,7 +1943,9 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertTrue(response.data['reused'])
         self.assertEqual(response.data['live']['id'], existing.id)
         self.assertEqual(response.data['live']['title'], existing.title)
-        self.assertEqual(LiveStream.objects.filter(owner=user).count(), 1)
+        self.assertEqual(response.data['live']['status'], LiveStream.STATUS_READY)
+        self.assertEqual(response.data['next_action'], 'start_stream')
+        self.assertEqual(LiveStream.objects.filter(owner=user).count(), 2)
 
     @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
     def test_quick_start_ensure_broadcast_failure_keeps_live_stream(self, mock_ensure):
@@ -2054,6 +2057,13 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['status_source'], 'django_control')
         self.assertEqual(detail_response.data['status'], 'ready')
         self.assertEqual(detail_response.data['stream_key'], LiveStream.objects.get(pk=stream_id).stream_key)
+        self.assertIn('publish_config', detail_response.data)
+        self.assertTrue(detail_response.data['publish_config']['ok'])
+        self.assertEqual(
+            detail_response.data['publish_config']['config']['stream_id'],
+            detail_response.data['stream_key'],
+        )
+        self.assertIn('adaptor_script_url', detail_response.data['publish_config']['config'])
         self.assertTrue(detail_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertNotEqual(detail_response.data['watch_url'], detail_response.data['playback_url'])
 
@@ -2150,7 +2160,17 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['owner_id'], owner.id)
         self.assertIn('owner_avatar_url', detail_response.data)
         self.assertEqual(detail_response.data['creator']['id'], owner.id)
-        self.assertEqual(detail_response.data['stream_key'], public_stream.stream_key)
+        self.assertNotIn('stream_key', detail_response.data)
+        self.assertNotIn('publish_config', detail_response.data)
+        self.assertNotIn('adaptor_script_url', detail_response.data)
+
+        self.client.force_authenticate(user=owner)
+        owner_response = self.client.get(reverse('live-stream-detail', args=[public_stream.id]))
+        self.assertEqual(owner_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(owner_response.data['stream_key'], public_stream.stream_key)
+        self.assertIn('publish_config', owner_response.data)
+        self.assertTrue(owner_response.data['publish_config']['ok'])
+        self.assertIn('adaptor_script_url', owner_response.data['publish_config']['config'])
 
     def test_live_list_and_detail_expose_creator_avatar_when_owner_has_avatar(self):
         owner = self.create_user('avatar-streamer@example.com')
@@ -2279,12 +2299,21 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
         self.assertEqual(stream.stream_key, response.data['stream_key'])
 
-    def test_non_owner_cannot_prepare_live_stream(self):
+    def test_non_owner_cannot_prepare_start_or_end_live_stream(self):
         owner = self.create_user('prepare-owner@example.com', is_creator=True)
-        stream = LiveStream.objects.create(owner=owner, title='Owner stream')
+        stream = LiveStream.objects.create(owner=owner, title='Owner stream', status=LiveStream.STATUS_IDLE)
         self.authenticate(email='prepare-other@example.com')
-        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        prepare_response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+        self.assertEqual(prepare_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        start_response = self.client.post(reverse('live-stream-start', args=[stream.id]), format='json')
+        self.assertEqual(start_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        stream.status = LiveStream.STATUS_LIVE
+        stream.save(update_fields=['status'])
+        end_response = self.client.post(reverse('live-stream-end', args=[stream.id]), format='json')
+        self.assertEqual(end_response.status_code, status.HTTP_403_FORBIDDEN)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',

@@ -1449,7 +1449,7 @@ class LiveStreamQuickStartAPIView(APIView):
         stream = (
             LiveStream.objects.filter(
                 owner=request.user,
-                status__in=[LiveStream.STATUS_IDLE, LiveStream.STATUS_LIVE],
+                status__in=[LiveStream.STATUS_IDLE, LiveStream.STATUS_READY, LiveStream.STATUS_LIVE],
             )
             .select_related('category', 'owner')
             .order_by('-created_at', '-id')
@@ -1541,8 +1541,15 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
         stream = self.get_object()
         serializer = self.get_serializer(stream)
         payload = dict(serializer.data)
-        payload['stream_key'] = stream.stream_key
+        if self._is_owner(request, stream):
+            payload['stream_key'] = stream.stream_key
+            publish_config = AntMediaLiveAdapter().get_browser_publish_config(stream)
+            payload['publish_config'] = publish_config
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _is_owner(self, request, stream: LiveStream) -> bool:
+        user = getattr(request, 'user', None)
+        return bool(user and user.is_authenticated and stream.owner_id == user.id)
 
 
 class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
@@ -1574,13 +1581,18 @@ class LiveStreamStatusAPIView(APIView):
     new_status = LiveStream.STATUS_IDLE
 
     def post(self, request, pk):
-        stream = generics.get_object_or_404(LiveStream.objects.select_related('category'), pk=pk, owner=request.user)
+        stream = generics.get_object_or_404(LiveStream.objects.select_related('category', 'owner'), pk=pk)
+        if stream.owner_id != request.user.id:
+            return Response(
+                {'detail': 'You do not have permission to manage this live stream.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         now = timezone.now()
 
         if self.new_status == LiveStream.STATUS_LIVE:
-            if stream.status != LiveStream.STATUS_IDLE:
+            if stream.status not in [LiveStream.STATUS_IDLE, LiveStream.STATUS_READY]:
                 return Response(
-                    {'detail': 'Only idle streams can be started.'},
+                    {'detail': 'Only idle or ready streams can be started.'},
                     status=status.HTTP_409_CONFLICT,
                 )
             stream.status = LiveStream.STATUS_LIVE
@@ -1611,10 +1623,14 @@ class LiveStreamPrepareAPIView(APIView):
 
     def post(self, request, pk):
         stream = generics.get_object_or_404(
-            LiveStream.objects.select_related('category'),
+            LiveStream.objects.select_related('category', 'owner'),
             pk=pk,
-            owner=request.user,
         )
+        if stream.owner_id != request.user.id:
+            return Response(
+                {'detail': 'You do not have permission to manage this live stream.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if stream.status != LiveStream.STATUS_IDLE:
             return Response(
                 {'detail': 'Only idle streams can be prepared.'},

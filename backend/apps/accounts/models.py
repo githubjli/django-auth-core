@@ -744,10 +744,12 @@ class ProductRefundRequest(models.Model):
 
 class LiveStream(models.Model):
     STATUS_IDLE = 'idle'
+    STATUS_READY = 'ready'
     STATUS_LIVE = 'live'
     STATUS_ENDED = 'ended'
     STATUS_CHOICES = [
         (STATUS_IDLE, 'Idle'),
+        (STATUS_READY, 'Ready'),
         (STATUS_LIVE, 'Live'),
         (STATUS_ENDED, 'Ended'),
     ]
