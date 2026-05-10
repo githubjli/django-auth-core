@@ -1296,6 +1296,7 @@ class ManualMembershipPayment(models.Model):
     STATUS_PENDING_CONFIRMATION = 'pending_confirmation'
     STATUS_VERIFIED = 'verified'
     STATUS_REJECTED = 'rejected'
+    STATUS_FAILED = 'failed'
     STATUS_CHOICES = [
         (STATUS_PENDING, 'Pending'),
         (STATUS_SUBMITTED, 'Submitted'),
@@ -1303,6 +1304,7 @@ class ManualMembershipPayment(models.Model):
         (STATUS_PENDING_CONFIRMATION, 'Pending Confirmation'),
         (STATUS_VERIFIED, 'Verified'),
         (STATUS_REJECTED, 'Rejected'),
+        (STATUS_FAILED, 'Failed'),
     ]
 
     user = models.ForeignKey(

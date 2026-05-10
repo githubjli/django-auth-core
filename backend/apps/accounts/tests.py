@@ -3784,6 +3784,207 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(response.data['payment_order']['order_no'], 'MOVERIFYEXIST')
         self.assertEqual(response.data['membership']['status'], UserMembership.STATUS_ACTIVE)
 
+        self.assertEqual(PaymentOrder.objects.filter(txid='manual-verify-existing').count(), 1)
+        self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
+
+    def test_manual_tx_hint_submit_empty_txid_fails(self):
+        user = self.create_user('manual-empty-txid@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': '   '},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('txid', response.data)
+        self.assertEqual(ManualMembershipPayment.objects.count(), 0)
+
+    def test_manual_tx_hint_submit_missing_plan_code_fails(self):
+        user = self.create_user('manual-missing-plan@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': 'does-not-exist', 'txid': 'manual-missing-plan-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(ManualMembershipPayment.objects.count(), 0)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_chain_lookup_failure_is_failed(self, mock_verify):
+        user = self.create_user('manual-chain-fail@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'chain_lookup_failed',
+            'txid': 'manual-chain-fail-tx',
+            'confirmations': 0,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('0'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': None,
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-chain-fail-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-chain-fail-tx')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_FAILED)
+        self.assertEqual(payment.reject_reason, '')
+        self.assertIsNone(payment.payment_order_id)
+        self.assertIsNone(payment.membership_id)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_address_mismatch_is_rejected(self, mock_verify):
+        user = self.create_user('manual-address-mismatch@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'no_matching_output',
+            'txid': 'manual-address-mismatch-tx',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('0'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-address-mismatch-tx'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-address-mismatch-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-address-mismatch-tx')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_REJECTED)
+        self.assertEqual(payment.reject_reason, 'no_matching_output')
+
+    @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_exact_amount_creates_paid_order(self, mock_verify):
+        user = self.create_user('manual-exact-paid@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-exact-paid-tx',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-exact-paid-tx'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-exact-paid-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-exact-paid-tx')
+        self.assertEqual(payment.payment_order.status, PaymentOrder.STATUS_PAID)
+        self.assertEqual(payment.payment_order.actual_amount_lbc, Decimal('12.50000000'))
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_same_txid_only_one_succeeds(self, mock_verify):
+        user = self.create_user('manual-race@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'pending_confirmation',
+            'txid': 'manual-race-tx',
+            'confirmations': 1,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-race-tx'},
+        }
+
+        first_response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-race-tx'},
+            format='json',
+        )
+        second_response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-race-tx'},
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(ManualMembershipPayment.objects.filter(txid='manual-race-tx').count(), 1)
+
+    @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_active_membership_extends_current_end(self, mock_verify):
+        user = self.create_user('manual-active-extension@example.com')
+        existing_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOACTIVEEXTEND',
+            txid='manual-active-existing',
+            confirmations=3,
+            pay_to_address='bManualPaymentAddress001',
+            paid_at=django_timezone.now(),
+        )
+        current_end = django_timezone.now() + timedelta(days=10)
+        existing_membership = UserMembership.objects.create(
+            user=user,
+            source_order=existing_order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=20),
+            ends_at=current_end,
+        )
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-active-extension-tx',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-active-extension-tx'},
+        }
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-active-extension-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-active-extension-tx')
+        new_membership = payment.membership
+        self.assertEqual(new_membership.starts_at, existing_membership.ends_at)
+        self.assertEqual(UserMembership.objects.filter(user=user).count(), 2)
+
     @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
     def test_manual_tx_hint_submit_pending_confirmation_status(self, mock_verify):
         user = self.create_user('manual-pending@example.com')

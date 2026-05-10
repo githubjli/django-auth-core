@@ -1992,6 +1992,8 @@ class ManualMembershipTxHintListAPIView(APIView):
             return ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED
         if verification['reason'] == 'pending_confirmation':
             return ManualMembershipPayment.STATUS_PENDING_CONFIRMATION
+        if verification['reason'] == 'chain_lookup_failed':
+            return ManualMembershipPayment.STATUS_FAILED
         return ManualMembershipPayment.STATUS_REJECTED
 
     def _serialize_verification(self, verification: dict) -> dict:
@@ -2138,7 +2140,11 @@ class ManualMembershipTxHintVerifyNowAPIView(ManualMembershipTxHintListAPIView):
                     ]
                 )
             else:
-                payment.status = ManualMembershipPayment.STATUS_REJECTED
+                payment.status = (
+                    ManualMembershipPayment.STATUS_FAILED
+                    if verification['reason'] == 'chain_lookup_failed'
+                    else ManualMembershipPayment.STATUS_REJECTED
+                )
                 payment.reject_reason = verification['reason']
                 payment.save(
                     update_fields=[
