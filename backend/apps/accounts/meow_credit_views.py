@@ -4,7 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts.models import MeowCreditLedger, MeowCreditPackage, MeowCreditRecharge, PaymentOrder
-from apps.accounts.serializers import DramaSeriesPagination
+from apps.accounts.drama_views import DramaSeriesPagination
 from apps.accounts.meow_credit_serializers import (
     MeowCreditLedgerSerializer,
     MeowCreditPackageSerializer,
