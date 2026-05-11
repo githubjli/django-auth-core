@@ -1668,22 +1668,30 @@ class LiveStreamStatusAPIView(APIView):
                     {'detail': 'Only idle or ready streams can be started.'},
                     status=status.HTTP_409_CONFLICT,
                 )
-            sync = adapter.get_broadcast_status(stream.stream_key)
-            ant_status = sync.get('ant_media_status')
-            if ant_status != 'broadcasting':
+            skip_ant_media = request.query_params.get('skip_ant_media') == 'true'
+            bypass_enabled = settings.DEBUG or getattr(settings, 'ALLOW_LIVE_START_BYPASS', False)
+            if skip_ant_media and not bypass_enabled:
                 return Response(
-                    {
-                        'detail': 'Stream is not publishing yet.',
-                        'status': 'waiting_for_signal',
-                        'django_status': stream.status,
-                        'ant_media_status': ant_status,
-                        'effective_status': 'waiting_for_signal',
-                        'next_action': 'retry_status',
-                        'sync_ok': sync.get('sync_ok', False),
-                        'sync_error': sync.get('sync_error'),
-                    },
-                    status=status.HTTP_409_CONFLICT,
+                    {'detail': 'Live start bypass is not enabled.'},
+                    status=status.HTTP_403_FORBIDDEN,
                 )
+            if not skip_ant_media:
+                sync = adapter.get_broadcast_status(stream.stream_key)
+                ant_status = sync.get('ant_media_status')
+                if ant_status != 'broadcasting':
+                    return Response(
+                        {
+                            'detail': 'Stream is not publishing yet.',
+                            'status': 'waiting_for_signal',
+                            'django_status': stream.status,
+                            'ant_media_status': ant_status,
+                            'effective_status': 'waiting_for_signal',
+                            'next_action': 'retry_status',
+                            'sync_ok': sync.get('sync_ok', False),
+                            'sync_error': sync.get('sync_error'),
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
             stream.status = LiveStream.STATUS_LIVE
             stream.started_at = now
             stream.ended_at = None

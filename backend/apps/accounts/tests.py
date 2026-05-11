@@ -2796,6 +2796,67 @@ class LiveStreamAPITestCase(APITestCase):
         stream.refresh_from_db()
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
 
+    @override_settings(DEBUG=False, ALLOW_LIVE_START_BYPASS=False)
+    def test_live_start_bypass_disabled_returns_forbidden(self):
+        owner = self.authenticate(email='bypass-disabled@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Bypass disabled', status=LiveStream.STATUS_IDLE)
+
+        response = self.client.post(
+            f"{reverse('live-stream-start', args=[stream.id])}?skip_ant_media=true",
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data, {'detail': 'Live start bypass is not enabled.'})
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
+    @override_settings(DEBUG=False, ALLOW_LIVE_START_BYPASS=True)
+    def test_live_start_bypass_enabled_can_start_without_ant_media(self):
+        owner = self.authenticate(email='bypass-enabled@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Bypass enabled', status=LiveStream.STATUS_IDLE)
+
+        with patch('apps.accounts.views.AntMediaLiveAdapter.get_broadcast_status') as mock_status:
+            response = self.client.post(
+                f"{reverse('live-stream-start', args=[stream.id])}?skip_ant_media=true",
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], LiveStream.STATUS_LIVE)
+        mock_status.assert_not_called()
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_LIVE)
+
+    @override_settings(DEBUG=True, ALLOW_LIVE_START_BYPASS=False)
+    def test_live_start_bypass_enabled_by_debug(self):
+        owner = self.authenticate(email='bypass-debug@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Bypass debug', status=LiveStream.STATUS_IDLE)
+
+        response = self.client.post(
+            f"{reverse('live-stream-start', args=[stream.id])}?skip_ant_media=true",
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], LiveStream.STATUS_LIVE)
+
+    @override_settings(DEBUG=True, ALLOW_LIVE_START_BYPASS=True)
+    def test_live_start_bypass_still_requires_owner(self):
+        owner = self.create_user('bypass-owner@example.com', is_creator=True)
+        stream = LiveStream.objects.create(owner=owner, title='Bypass owner', status=LiveStream.STATUS_IDLE)
+        self.authenticate(email='bypass-other@example.com')
+
+        response = self.client.post(
+            f"{reverse('live-stream-start', args=[stream.id])}?skip_ant_media=true",
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data['detail'], 'Only the live owner can perform this action.')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
     def test_end_returns_warning_when_ant_media_stop_fails(self):
         owner = self.authenticate(email='end-warning@example.com')
         stream = LiveStream.objects.create(owner=owner, title='End warning', status=LiveStream.STATUS_LIVE)
