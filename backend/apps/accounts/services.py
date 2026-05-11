@@ -157,7 +157,14 @@ class AntMediaLiveAdapter:
                 'message': 'Ant Media REST app is not configured.',
             }
 
-        endpoint = (
+        broadcast_url = self._broadcast_url(stream.stream_key)
+        existing_result = self._get_existing_broadcast(broadcast_url, stream.stream_key)
+        if existing_result.get('ok'):
+            return existing_result
+        if existing_result.get('error') not in {'ant_media_broadcast_not_found'}:
+            return existing_result
+
+        create_url = (
             f"{settings.ANT_MEDIA_BASE_URL}/"
             f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/create"
         )
@@ -168,9 +175,9 @@ class AntMediaLiveAdapter:
             'type': 'liveStream',
         }
         body = json.dumps(payload).encode('utf-8')
-        logger.debug('ant_media create_broadcast request url=%s payload=%s', endpoint, payload)
+        logger.debug('ant_media create_broadcast request url=%s payload=%s', create_url, payload)
         request_obj = urllib_request.Request(
-            endpoint,
+            create_url,
             data=body,
             headers={'Content-Type': 'application/json'},
             method='POST',
@@ -179,8 +186,26 @@ class AntMediaLiveAdapter:
             with urllib_request.urlopen(request_obj, timeout=3) as response:
                 response_body = response.read().decode('utf-8')
                 status_code = getattr(response, 'status', response.getcode())
+        except error.HTTPError as exc:
+            response_body = self._read_error_body(exc)
+            logger.warning(
+                'ant_media create_broadcast http_error url=%s status=%s body=%s',
+                create_url,
+                exc.code,
+                response_body,
+            )
+            if exc.code in {400, 409} and self._is_duplicate_broadcast_error(response_body):
+                retry_result = self._get_existing_broadcast(broadcast_url, stream.stream_key)
+                if retry_result.get('ok'):
+                    return retry_result
+            return {
+                'ok': False,
+                'error': 'ant_media_create_failed',
+                'message': 'Unable to create broadcast on Ant Media.',
+            }
         except (error.URLError, TimeoutError) as exc:
-            logger.debug('ant_media create_broadcast failed url=%s error=%s', endpoint, exc)
+            reason = getattr(exc, 'reason', exc)
+            logger.warning('ant_media create_broadcast failed url=%s reason=%s', create_url, reason)
             return {
                 'ok': False,
                 'error': 'ant_media_create_failed',
@@ -192,6 +217,18 @@ class AntMediaLiveAdapter:
             status_code,
             response_body,
         )
+        if status_code not in {200, 201}:
+            logger.warning(
+                'ant_media create_broadcast unexpected_status url=%s status=%s body=%s',
+                create_url,
+                status_code,
+                response_body,
+            )
+            return {
+                'ok': False,
+                'error': 'ant_media_create_failed',
+                'message': 'Unable to create broadcast on Ant Media.',
+            }
         try:
             response_payload = json.loads(response_body)
         except (ValueError, json.JSONDecodeError):
@@ -207,7 +244,64 @@ class AntMediaLiveAdapter:
                 'message': 'Invalid Ant Media create broadcast response.',
             }
         stream_id = response_payload.get('streamId') or stream.stream_key
-        return {'ok': True, 'stream_id': stream_id}
+        return {'ok': True, 'stream_id': stream_id, 'reused': False}
+
+    def _broadcast_url(self, stream_key: str) -> str:
+        return (
+            f"{settings.ANT_MEDIA_BASE_URL}/"
+            f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}"
+        )
+
+    def _get_existing_broadcast(self, endpoint: str, stream_key: str) -> dict:
+        try:
+            with urllib_request.urlopen(endpoint, timeout=2) as response:
+                response_body = response.read().decode('utf-8')
+                status_code = getattr(response, 'status', response.getcode())
+        except error.HTTPError as exc:
+            response_body = self._read_error_body(exc)
+            if exc.code == 404:
+                logger.debug('ant_media broadcast not found url=%s body=%s', endpoint, response_body)
+                return {'ok': False, 'error': 'ant_media_broadcast_not_found'}
+            logger.warning(
+                'ant_media get_broadcast http_error url=%s status=%s body=%s',
+                endpoint,
+                exc.code,
+                response_body,
+            )
+            return {'ok': False, 'error': 'ant_media_unavailable', 'message': 'Unable to inspect Ant Media broadcast.'}
+        except (error.URLError, TimeoutError) as exc:
+            reason = getattr(exc, 'reason', exc)
+            logger.warning('ant_media get_broadcast failed url=%s reason=%s', endpoint, reason)
+            return {'ok': False, 'error': 'ant_media_unavailable', 'message': 'Unable to inspect Ant Media broadcast.'}
+        if status_code != 200:
+            logger.warning('ant_media get_broadcast unexpected_status url=%s status=%s body=%s', endpoint, status_code, response_body)
+            return {'ok': False, 'error': 'ant_media_unavailable', 'message': 'Unable to inspect Ant Media broadcast.'}
+        try:
+            payload = json.loads(response_body)
+        except (ValueError, json.JSONDecodeError):
+            return {'ok': False, 'error': 'invalid_ant_media_payload', 'message': 'Invalid Ant Media broadcast response.'}
+        if not isinstance(payload, dict):
+            return {'ok': False, 'error': 'invalid_ant_media_payload', 'message': 'Invalid Ant Media broadcast response.'}
+        return {
+            'ok': True,
+            'stream_id': stream_key,
+            'reused': True,
+            'ant_media_status': payload.get('status'),
+            'message': 'Ant Media broadcast already exists.',
+        }
+
+    def _read_error_body(self, exc: error.HTTPError) -> str:
+        try:
+            return exc.read().decode('utf-8')
+        except Exception:
+            return ''
+
+    def _is_duplicate_broadcast_error(self, response_body: str) -> bool:
+        normalized = (response_body or '').lower()
+        return any(
+            marker in normalized
+            for marker in ('already being used', 'already exists', 'duplicate')
+        )
 
     def stop_broadcast(self, stream_key: str) -> dict:
         if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:

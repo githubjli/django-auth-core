@@ -1,8 +1,9 @@
 import shutil
 import tempfile
 import json
-from io import StringIO
-from unittest.mock import Mock, patch
+from io import BytesIO, StringIO
+from unittest.mock import MagicMock, Mock, patch
+from urllib.error import HTTPError
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -50,6 +51,7 @@ from apps.accounts.models import (
 )
 from apps.accounts.serializers import LiveStreamSerializer
 from apps.accounts.services import (
+    AntMediaLiveAdapter,
     LbryDaemonClient,
     LbryDaemonError,
     ManualMembershipChainVerifier,
@@ -1869,11 +1871,67 @@ class LiveStreamAPITestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    @override_settings(ANT_MEDIA_BASE_URL='https://ant.example.com', ANT_MEDIA_REST_APP_NAME='LiveApp')
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_ensure_broadcast_reuses_existing_ant_media_broadcast(self, mock_urlopen):
+        owner = self.authenticate(email='ensure-existing@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Existing Ant stream')
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"created"}'
+        response_payload.status = 200
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        result = AntMediaLiveAdapter().ensure_broadcast(stream)
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['reused'])
+        self.assertEqual(result['stream_id'], stream.stream_key)
+        self.assertEqual(result['ant_media_status'], 'created')
+        self.assertEqual(result['message'], 'Ant Media broadcast already exists.')
+        mock_urlopen.assert_called_once_with(
+            f'https://ant.example.com/LiveApp/rest/v2/broadcasts/{stream.stream_key}',
+            timeout=2,
+        )
+
+    @override_settings(ANT_MEDIA_BASE_URL='https://ant.example.com', ANT_MEDIA_REST_APP_NAME='LiveApp')
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_ensure_broadcast_recovers_from_duplicate_create_error(self, mock_urlopen):
+        owner = self.authenticate(email='ensure-duplicate@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Duplicate Ant stream')
+        not_found = HTTPError(
+            f'https://ant.example.com/LiveApp/rest/v2/broadcasts/{stream.stream_key}',
+            404,
+            'Not Found',
+            hdrs=None,
+            fp=BytesIO(b'not found'),
+        )
+        duplicate = HTTPError(
+            'https://ant.example.com/LiveApp/rest/v2/broadcasts/create',
+            400,
+            'Bad Request',
+            hdrs=None,
+            fp=BytesIO(b'Stream id is already being used by another broadcast'),
+        )
+        existing_response = Mock()
+        existing_response.read.return_value = b'{"status":"preparing"}'
+        existing_response.status = 200
+        existing_context = MagicMock()
+        existing_context.__enter__.return_value = existing_response
+        mock_urlopen.side_effect = [not_found, duplicate, existing_context]
+
+        result = AntMediaLiveAdapter().ensure_broadcast(stream)
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['reused'])
+        self.assertEqual(result['stream_id'], stream.stream_key)
+        self.assertEqual(result['ant_media_status'], 'preparing')
+        self.assertEqual(mock_urlopen.call_count, 3)
+
     @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
     @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
     def test_creator_quick_start_creates_live_stream_with_defaults(self, mock_ensure, mock_publish_config):
         user = self.authenticate(email='quick-creator@example.com')
-        mock_ensure.return_value = {'ok': True, 'stream_id': 'quick-stream-id'}
+        mock_ensure.return_value = {'ok': True, 'stream_id': 'quick-stream-id', 'reused': False}
         mock_publish_config.return_value = {
             'ok': True,
             'config': {
@@ -1889,6 +1947,7 @@ class LiveStreamAPITestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertFalse(response.data['reused'])
+        self.assertFalse(response.data['ant_media_reused'])
         self.assertEqual(response.data['next_action'], 'start_stream')
         self.assertTrue(response.data['publish_config']['ok'])
         self.assertEqual(response.data['publish_config']['config']['stream_id'], 'quick-stream-id')
@@ -1939,13 +1998,14 @@ class LiveStreamAPITestCase(APITestCase):
         user = self.authenticate(email='quick-reuse@example.com')
         LiveStream.objects.create(owner=user, title='Older idle stream', status=LiveStream.STATUS_IDLE)
         existing = LiveStream.objects.create(owner=user, title='Existing ready stream', status=LiveStream.STATUS_READY)
-        mock_ensure.return_value = {'ok': True}
+        mock_ensure.return_value = {'ok': True, 'reused': True}
         mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': existing.stream_key}}
 
         response = self.client.post(reverse('live-stream-quick-start'), {'title': 'New ignored'}, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['reused'])
+        self.assertTrue(response.data['ant_media_reused'])
         self.assertEqual(response.data['live']['id'], existing.id)
         self.assertEqual(response.data['live']['title'], existing.title)
         self.assertEqual(response.data['live']['status'], LiveStream.STATUS_READY)

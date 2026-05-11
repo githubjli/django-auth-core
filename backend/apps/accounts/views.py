@@ -1574,6 +1574,7 @@ class LiveStreamQuickStartAPIView(APIView):
         return Response(
             {
                 'reused': reused,
+                'ant_media_reused': bool(ensure_result.get('reused', False)),
                 'live': self._live_payload(stream, request),
                 'publish_config': publish_config,
                 'next_action': 'start_stream',
