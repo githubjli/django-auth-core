@@ -1565,6 +1565,15 @@ class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
             ).distinct()
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
+    def retrieve(self, request, *args, **kwargs):
+        stream = self.get_object()
+        stream._normalized_live_fields = AntMediaLiveAdapter().normalize_stream_fields(
+            stream,
+            persist_no_signal=True,
+        )
+        serializer = self.get_serializer(stream)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
 
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
     serializer_class = LiveStreamSerializer
@@ -1588,6 +1597,7 @@ class LiveStreamStatusAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         now = timezone.now()
+        adapter = AntMediaLiveAdapter()
 
         if self.new_status == LiveStream.STATUS_LIVE:
             if stream.status not in [LiveStream.STATUS_IDLE, LiveStream.STATUS_READY]:
@@ -1595,22 +1605,47 @@ class LiveStreamStatusAPIView(APIView):
                     {'detail': 'Only idle or ready streams can be started.'},
                     status=status.HTTP_409_CONFLICT,
                 )
+            sync = adapter.get_broadcast_status(stream.stream_key)
+            ant_status = sync.get('ant_media_status')
+            if ant_status != 'broadcasting':
+                return Response(
+                    {
+                        'detail': 'Stream is not publishing yet.',
+                        'status': 'waiting_for_signal',
+                        'django_status': stream.status,
+                        'ant_media_status': ant_status,
+                        'effective_status': 'waiting_for_signal',
+                        'next_action': 'retry_status',
+                        'sync_ok': sync.get('sync_ok', False),
+                        'sync_error': sync.get('sync_error'),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
             stream.status = LiveStream.STATUS_LIVE
             stream.started_at = now
             stream.ended_at = None
-            stream.save(update_fields=['status', 'started_at', 'ended_at'])
+            stream.ant_media_no_signal_count = 0
+            stream.save(update_fields=['status', 'started_at', 'ended_at', 'ant_media_no_signal_count'])
         elif self.new_status == LiveStream.STATUS_ENDED:
-            if stream.status != LiveStream.STATUS_LIVE:
+            if stream.status == LiveStream.STATUS_ENDED:
                 return Response(
-                    {'detail': 'Only live streams can be ended.'},
+                    {'detail': 'Only non-ended streams can be ended.'},
                     status=status.HTTP_409_CONFLICT,
                 )
             stream.status = LiveStream.STATUS_ENDED
             stream.ended_at = now
-            stream.save(update_fields=['status', 'ended_at'])
+            stream.ant_media_no_signal_count = 0
+            stream.save(update_fields=['status', 'ended_at', 'ant_media_no_signal_count'])
+            stop_result = adapter.stop_broadcast(stream.stream_key)
+            stream._ant_media_stop_result = stop_result
 
         serializer = LiveStreamSerializer(stream, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = dict(serializer.data)
+        stop_result = getattr(stream, '_ant_media_stop_result', None)
+        if stop_result and not stop_result.get('ok'):
+            payload['warning'] = stop_result.get('warning') or 'ant_media_stop_failed'
+            payload['warning_detail'] = stop_result.get('message')
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class LiveStreamPrepareAPIView(APIView):

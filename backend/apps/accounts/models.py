@@ -781,6 +781,7 @@ class LiveStream(models.Model):
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default=VISIBILITY_PUBLIC)
     stream_key = models.CharField(max_length=255, unique=True, default=generate_stream_key)
     viewer_count = models.PositiveIntegerField(default=0)
+    ant_media_no_signal_count = models.PositiveIntegerField(default=0)
     started_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

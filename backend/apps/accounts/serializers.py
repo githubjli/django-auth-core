@@ -569,6 +569,9 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     django_status = serializers.SerializerMethodField()
     effective_status = serializers.SerializerMethodField()
     raw_ant_media_status = serializers.SerializerMethodField()
+    ant_media_status = serializers.SerializerMethodField()
+    no_signal_count = serializers.SerializerMethodField()
+    should_end = serializers.SerializerMethodField()
     sync_ok = serializers.SerializerMethodField()
     sync_error = serializers.SerializerMethodField()
     message = serializers.SerializerMethodField()
@@ -594,6 +597,9 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'effective_status',
             'status_source',
             'raw_ant_media_status',
+            'ant_media_status',
+            'no_signal_count',
+            'should_end',
             'rtmp_url',
             'playback_url',
             'watch_url',
@@ -622,6 +628,9 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'effective_status',
             'status_source',
             'raw_ant_media_status',
+            'ant_media_status',
+            'no_signal_count',
+            'should_end',
             'rtmp_url',
             'playback_url',
             'watch_url',
@@ -693,6 +702,15 @@ class LiveStreamSerializer(serializers.ModelSerializer):
 
     def get_raw_ant_media_status(self, obj):
         return self._normalized(obj).get('raw_ant_media_status')
+
+    def get_ant_media_status(self, obj):
+        return self._normalized(obj).get('ant_media_status')
+
+    def get_no_signal_count(self, obj):
+        return self._normalized(obj).get('no_signal_count')
+
+    def get_should_end(self, obj):
+        return self._normalized(obj).get('should_end')
 
     def get_sync_ok(self, obj):
         return self._normalized(obj).get('sync_ok')

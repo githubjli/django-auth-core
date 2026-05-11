@@ -2067,7 +2067,11 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertTrue(detail_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertNotEqual(detail_response.data['watch_url'], detail_response.data['playback_url'])
 
-        start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.get_broadcast_status',
+            return_value={'payload': {'status': 'broadcasting'}, 'ant_media_status': 'broadcasting', 'sync_ok': True, 'sync_error': None},
+        ):
+            start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
         self.assertEqual(start_response.data['status'], 'live')
         self.assertEqual(start_response.data['django_status'], 'live')
@@ -2082,7 +2086,11 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertNotEqual(start_response.data['watch_url'], start_response.data['playback_url'])
         self.assertIsNotNone(start_response.data['started_at'])
 
-        end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.stop_broadcast',
+            return_value={'ok': True},
+        ):
+            end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(end_response.status_code, status.HTTP_200_OK)
         self.assertEqual(end_response.data['status'], 'ended')
         self.assertEqual(end_response.data['django_status'], 'ended')
@@ -2634,10 +2642,77 @@ class LiveStreamAPITestCase(APITestCase):
         self.client.force_authenticate(user=other_user)
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
-        self.assertEqual(start_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(start_response.status_code, status.HTTP_403_FORBIDDEN)
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
-        self.assertEqual(end_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(end_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_start_waits_for_ant_media_broadcasting(self):
+        owner = self.authenticate(email='wait-for-signal@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Waiting start', status=LiveStream.STATUS_IDLE)
+
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.get_broadcast_status',
+            return_value={'payload': {'status': 'created'}, 'ant_media_status': 'created', 'sync_ok': True, 'sync_error': None},
+        ):
+            response = self.client.post(reverse('live-stream-start', args=[stream.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['detail'], 'Stream is not publishing yet.')
+        self.assertEqual(response.data['status'], 'waiting_for_signal')
+        self.assertEqual(response.data['effective_status'], 'waiting_for_signal')
+        self.assertEqual(response.data['ant_media_status'], 'created')
+        self.assertEqual(response.data['next_action'], 'retry_status')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
+    def test_end_returns_warning_when_ant_media_stop_fails(self):
+        owner = self.authenticate(email='end-warning@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='End warning', status=LiveStream.STATUS_LIVE)
+
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.stop_broadcast',
+            return_value={
+                'ok': False,
+                'warning': 'ant_media_stop_failed',
+                'message': 'Live stream ended in Django, but Ant Media stop failed.',
+            },
+        ):
+            response = self.client.post(reverse('live-stream-end', args=[stream.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], LiveStream.STATUS_ENDED)
+        self.assertEqual(response.data['warning'], 'ant_media_stop_failed')
+        self.assertEqual(response.data['warning_detail'], 'Live stream ended in Django, but Ant Media stop failed.')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_ENDED)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+        ANT_MEDIA_NO_SIGNAL_END_THRESHOLD=2,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_status_sync_uses_ant_media_and_flags_repeated_no_signal(self, mock_urlopen):
+        owner = self.authenticate(email='status-sync@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Status sync', status=LiveStream.STATUS_LIVE)
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"created"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        first_response = self.client.get(reverse('live-stream-status', args=[stream.id]))
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data['django_status'], LiveStream.STATUS_LIVE)
+        self.assertEqual(first_response.data['ant_media_status'], 'created')
+        self.assertEqual(first_response.data['effective_status'], 'waiting_for_signal')
+        self.assertFalse(first_response.data['should_end'])
+
+        second_response = self.client.get(reverse('live-stream-status', args=[stream.id]))
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.data['effective_status'], 'waiting_for_signal')
+        self.assertTrue(second_response.data['should_end'])
+        self.assertEqual(second_response.data['no_signal_count'], 2)
 
     def test_repeated_start_or_invalid_end_returns_conflict(self):
         self.authenticate()
@@ -2647,12 +2722,20 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         ).data['id']
 
-        first_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.get_broadcast_status',
+            return_value={'payload': {'status': 'broadcasting'}, 'ant_media_status': 'broadcasting', 'sync_ok': True, 'sync_error': None},
+        ):
+            first_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(first_start.status_code, status.HTTP_200_OK)
         repeated_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(repeated_start.status_code, status.HTTP_409_CONFLICT)
 
-        first_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.stop_broadcast',
+            return_value={'ok': True},
+        ):
+            first_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(first_end.status_code, status.HTTP_200_OK)
         repeated_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(repeated_end.status_code, status.HTTP_409_CONFLICT)
