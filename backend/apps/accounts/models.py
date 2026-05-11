@@ -1,6 +1,7 @@
 import secrets
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from apps.accounts.constants import TOKEN_SYMBOL
@@ -137,6 +138,7 @@ class Video(models.Model):
     preview_seconds = models.PositiveIntegerField(default=0)
     like_count = models.PositiveIntegerField(default=0)
     comment_count = models.PositiveIntegerField(default=0)
+    share_count = models.PositiveIntegerField(default=0)
     file = models.FileField(upload_to='videos/')
     thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -369,6 +371,30 @@ class DramaUnlock(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['user', 'episode'], name='unique_drama_unlock_per_user_episode'),
         ]
+
+
+
+
+class VideoShare(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='video_shares',
+    )
+    video = models.ForeignKey(
+        Video,
+        on_delete=models.CASCADE,
+        related_name='shares',
+    )
+    channel = models.CharField(max_length=64, blank=True, default='')
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
 
 
 class VideoView(models.Model):
@@ -744,10 +770,12 @@ class ProductRefundRequest(models.Model):
 
 class LiveStream(models.Model):
     STATUS_IDLE = 'idle'
+    STATUS_READY = 'ready'
     STATUS_LIVE = 'live'
     STATUS_ENDED = 'ended'
     STATUS_CHOICES = [
         (STATUS_IDLE, 'Idle'),
+        (STATUS_READY, 'Ready'),
         (STATUS_LIVE, 'Live'),
         (STATUS_ENDED, 'Ended'),
     ]
@@ -779,6 +807,7 @@ class LiveStream(models.Model):
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default=VISIBILITY_PUBLIC)
     stream_key = models.CharField(max_length=255, unique=True, default=generate_stream_key)
     viewer_count = models.PositiveIntegerField(default=0)
+    ant_media_no_signal_count = models.PositiveIntegerField(default=0)
     started_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -913,6 +942,13 @@ class GiftTransaction(models.Model):
         blank=True,
         related_name='gift_transactions',
     )
+    video = models.ForeignKey(
+        Video,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transactions',
+    )
     gift = models.ForeignKey(
         Gift,
         on_delete=models.SET_NULL,
@@ -935,6 +971,11 @@ class GiftTransaction(models.Model):
 
     class Meta:
         ordering = ['-created_at', '-id']
+
+    def clean(self):
+        super().clean()
+        if self.stream_id is None and self.video_id is None:
+            raise ValidationError('Gift transaction must be associated with a stream or video.')
 
 
 class StreamPaymentMethod(models.Model):
@@ -1287,6 +1328,71 @@ class UserMembership(models.Model):
             models.Index(fields=['user', 'status', 'ends_at'], name='membership_user_status_end_idx'),
             models.Index(fields=['starts_at', 'ends_at'], name='membership_valid_window_idx'),
         ]
+
+
+class ManualMembershipPayment(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_DRY_RUN_VERIFIED = 'dry_run_verified'
+    STATUS_PENDING_CONFIRMATION = 'pending_confirmation'
+    STATUS_VERIFIED = 'verified'
+    STATUS_REJECTED = 'rejected'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_SUBMITTED, 'Submitted'),
+        (STATUS_DRY_RUN_VERIFIED, 'Dry Run Verified'),
+        (STATUS_PENDING_CONFIRMATION, 'Pending Confirmation'),
+        (STATUS_VERIFIED, 'Verified'),
+        (STATUS_REJECTED, 'Rejected'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='manual_membership_payments',
+    )
+    plan = models.ForeignKey(
+        MembershipPlan,
+        on_delete=models.PROTECT,
+        related_name='manual_membership_payments',
+    )
+    txid = models.CharField(max_length=128, unique=True)
+    expected_amount_lbc = models.DecimalField(max_digits=18, decimal_places=8)
+    actual_amount_lbc = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
+    pay_to_address = models.CharField(max_length=128)
+    confirmations = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    reject_reason = models.TextField(blank=True, default='')
+    raw_tx = models.JSONField(null=True, blank=True)
+    payment_order = models.OneToOneField(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='manual_membership_payment',
+    )
+    membership = models.OneToOneField(
+        'UserMembership',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='manual_payment',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['user', 'status', 'created_at'], name='manual_member_user_status_idx'),
+            models.Index(fields=['status', 'created_at'], name='manual_member_status_idx'),
+        ]
+
+    def __str__(self) -> str:
+        return self.txid
 
 
 class BillingPlan(models.Model):
