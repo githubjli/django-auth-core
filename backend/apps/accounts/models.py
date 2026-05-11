@@ -1015,12 +1015,14 @@ class PaymentOrder(models.Model):
     TYPE_PAID_PROGRAM = 'paid_program'
     TYPE_MEMBERSHIP = 'membership'
     TYPE_MEOW_POINTS_RECHARGE = 'meow_points_recharge'
+    TYPE_MEOW_CREDITS_RECHARGE = 'meow_credits_recharge'
     ORDER_TYPE_CHOICES = [
         (TYPE_TIP, 'Tip'),
         (TYPE_PRODUCT, 'Product'),
         (TYPE_PAID_PROGRAM, 'Paid Program'),
         (TYPE_MEMBERSHIP, 'Membership'),
         (TYPE_MEOW_POINTS_RECHARGE, 'Meow Points Recharge'),
+        (TYPE_MEOW_CREDITS_RECHARGE, 'Meow Credits Recharge'),
     ]
 
     STATUS_PENDING = 'pending'
@@ -1393,6 +1395,193 @@ class ManualMembershipPayment(models.Model):
 
     def __str__(self) -> str:
         return self.txid
+
+
+class MeowCreditWallet(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_credit_wallet',
+    )
+    balance = models.IntegerField(default=0)
+    total_recharged = models.PositiveIntegerField(default=0)
+    total_spent = models.PositiveIntegerField(default=0)
+    total_redeemed = models.PositiveIntegerField(default=0)
+    total_adjusted = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-id']
+
+
+class MeowCreditPackage(models.Model):
+    STATUS_ACTIVE = 'active'
+    STATUS_INACTIVE = 'inactive'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_INACTIVE, 'Inactive'),
+    ]
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255)
+    credit_amount = models.PositiveIntegerField(default=0)
+    bonus_credit = models.PositiveIntegerField(default=0)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=16, default=TOKEN_SYMBOL)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    sort_order = models.PositiveIntegerField(default=0)
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+    def __str__(self) -> str:
+        return f'{self.code} - {self.name}'
+
+
+class MeowCreditLedger(models.Model):
+    TYPE_RECHARGE = 'recharge'
+    TYPE_SPEND = 'spend'
+    TYPE_REDEEM = 'redeem'
+    TYPE_REFUND = 'refund'
+    TYPE_ADMIN_ADJUST = 'admin_adjust'
+    ENTRY_TYPE_CHOICES = [
+        (TYPE_RECHARGE, 'Recharge'),
+        (TYPE_SPEND, 'Spend'),
+        (TYPE_REDEEM, 'Redeem'),
+        (TYPE_REFUND, 'Refund'),
+        (TYPE_ADMIN_ADJUST, 'Admin Adjust'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_COMPLETED = 'completed'
+    STATUS_REJECTED = 'rejected'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_REJECTED, 'Rejected'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_credit_ledger_entries',
+    )
+    entry_type = models.CharField(max_length=24, choices=ENTRY_TYPE_CHOICES)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_COMPLETED)
+    amount = models.IntegerField()
+    balance_before = models.IntegerField()
+    balance_after = models.IntegerField()
+    target_type = models.CharField(max_length=64, blank=True, default='')
+    target_id = models.PositiveBigIntegerField(null=True, blank=True)
+    payment_order = models.ForeignKey(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='meow_credit_ledger_entries',
+    )
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class MeowCreditRecharge(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_CREDITED = 'credited'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_CREDITED, 'Credited'),
+        (STATUS_EXPIRED, 'Expired'),
+        (STATUS_CANCELLED, 'Cancelled'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    order_no = models.CharField(max_length=64, unique=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_credit_recharges',
+    )
+    package = models.ForeignKey(
+        MeowCreditPackage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='recharges',
+    )
+    package_code_snapshot = models.CharField(max_length=64, blank=True, default='')
+    package_name_snapshot = models.CharField(max_length=255, blank=True, default='')
+    credit_amount = models.PositiveIntegerField(default=0)
+    bonus_credit = models.PositiveIntegerField(default=0)
+    total_credit = models.PositiveIntegerField(default=0)
+    price_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    price_currency = models.CharField(max_length=16, default=TOKEN_SYMBOL)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    payment_order = models.OneToOneField(
+        PaymentOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='meow_credit_recharge',
+    )
+    paid_at = models.DateTimeField(null=True, blank=True)
+    credited_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class MeowCreditRedeemRequest(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_COMPLETED = 'completed'
+    STATUS_REJECTED = 'rejected'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_REJECTED, 'Rejected'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    redeem_no = models.CharField(max_length=64, unique=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meow_credit_redeem_requests',
+    )
+    amount = models.PositiveIntegerField()
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    redeem_method = models.CharField(max_length=64)
+    account_snapshot = models.JSONField(default=dict)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_meow_credit_redeems',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reject_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
 
 
 class BillingPlan(models.Model):

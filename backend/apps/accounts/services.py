@@ -29,6 +29,11 @@ from apps.accounts.models import (
     Gift,
     GiftTransaction,
     MembershipPlan,
+    MeowCreditLedger,
+    MeowCreditPackage,
+    MeowCreditRecharge,
+    MeowCreditRedeemRequest,
+    MeowCreditWallet,
     MeowPointLedger,
     MeowPointPackage,
     MeowPointPurchase,
@@ -2467,6 +2472,271 @@ class MeowPointPurchaseService:
             if not MeowPointPurchase.objects.filter(order_no=candidate).exists():
                 return candidate
         raise ValidationError('Unable to generate unique Meow Points order number.')
+
+
+class MeowCreditService:
+    @staticmethod
+    def get_or_create_wallet(user):
+        wallet, _created = MeowCreditWallet.objects.get_or_create(user=user)
+        return wallet
+
+    @staticmethod
+    def credit_recharge(*, user, amount: int, payment_order: PaymentOrder, target):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        target_id = getattr(target, 'id', None)
+        with transaction.atomic():
+            existing = MeowCreditLedger.objects.filter(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_RECHARGE,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                payment_order=payment_order,
+                target_type='meow_credit_recharge',
+                target_id=target_id,
+            ).first()
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if existing is not None:
+                return wallet, existing
+
+            balance_before = wallet.balance
+            balance_after = balance_before + amount
+            wallet.balance = balance_after
+            wallet.total_recharged += amount
+            wallet.save(update_fields=['balance', 'total_recharged', 'updated_at'])
+
+            ledger = MeowCreditLedger.objects.create(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_RECHARGE,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                amount=amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type='meow_credit_recharge',
+                target_id=target_id,
+                payment_order=payment_order,
+                note=f'Recharge credit for order {getattr(target, "order_no", "")}',
+            )
+        return wallet, ledger
+
+    @staticmethod
+    def spend_credit(*, user, amount: int, target_type: str = '', target_id: int | None = None, note: str = ''):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        with transaction.atomic():
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if wallet.balance < amount:
+                raise ValidationError('Insufficient Meow Credit balance.')
+            balance_before = wallet.balance
+            balance_after = balance_before - amount
+            wallet.balance = balance_after
+            wallet.total_spent += amount
+            wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+            ledger = MeowCreditLedger.objects.create(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_SPEND,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                amount=-amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type=target_type,
+                target_id=target_id,
+                note=note,
+            )
+        return wallet, ledger
+
+    @staticmethod
+    def create_redeem_request(*, user, amount: int, redeem_method: str, account_snapshot: dict):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        if not redeem_method:
+            raise ValidationError({'redeem_method': ['redeem_method is required.']})
+        with transaction.atomic():
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if wallet.balance < amount:
+                raise ValidationError('Insufficient Meow Credit balance.')
+            redeem = MeowCreditRedeemRequest.objects.create(
+                user=user,
+                redeem_no=MeowCreditService._generate_redeem_no(),
+                amount=amount,
+                status=MeowCreditRedeemRequest.STATUS_PENDING,
+                redeem_method=redeem_method,
+                account_snapshot=account_snapshot or {},
+            )
+            balance_before = wallet.balance
+            balance_after = balance_before - amount
+            wallet.balance = balance_after
+            wallet.total_redeemed += amount
+            wallet.save(update_fields=['balance', 'total_redeemed', 'updated_at'])
+            MeowCreditLedger.objects.create(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_REDEEM,
+                status=MeowCreditLedger.STATUS_PENDING,
+                amount=-amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+                note=f'Redeem request {redeem.redeem_no}',
+            )
+        return redeem
+
+    @staticmethod
+    def approve_redeem_request(request, reviewer):
+        with transaction.atomic():
+            redeem = MeowCreditRedeemRequest.objects.select_for_update().get(pk=request.pk)
+            if redeem.status == MeowCreditRedeemRequest.STATUS_COMPLETED:
+                return redeem
+            if redeem.status != MeowCreditRedeemRequest.STATUS_PENDING:
+                raise ValidationError('Only pending redeem requests can be completed.')
+            MeowCreditLedger.objects.filter(
+                entry_type=MeowCreditLedger.TYPE_REDEEM,
+                status=MeowCreditLedger.STATUS_PENDING,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+            ).update(status=MeowCreditLedger.STATUS_COMPLETED)
+            redeem.status = MeowCreditRedeemRequest.STATUS_COMPLETED
+            redeem.reviewed_by = reviewer
+            redeem.reviewed_at = timezone.now()
+            redeem.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'updated_at'])
+        return redeem
+
+    @staticmethod
+    def reject_redeem_request(request, reviewer, reason: str = ''):
+        with transaction.atomic():
+            redeem = MeowCreditRedeemRequest.objects.select_for_update().get(pk=request.pk)
+            if redeem.status == MeowCreditRedeemRequest.STATUS_REJECTED:
+                return redeem
+            if redeem.status != MeowCreditRedeemRequest.STATUS_PENDING:
+                raise ValidationError('Only pending redeem requests can be rejected.')
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=redeem.user)[0]
+            existing_refund = MeowCreditLedger.objects.filter(
+                user=redeem.user,
+                entry_type=MeowCreditLedger.TYPE_REFUND,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+            ).first()
+            if existing_refund is None:
+                balance_before = wallet.balance
+                balance_after = balance_before + redeem.amount
+                wallet.balance = balance_after
+                wallet.save(update_fields=['balance', 'updated_at'])
+                MeowCreditLedger.objects.create(
+                    user=redeem.user,
+                    entry_type=MeowCreditLedger.TYPE_REFUND,
+                    status=MeowCreditLedger.STATUS_COMPLETED,
+                    amount=redeem.amount,
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                    target_type='meow_credit_redeem_request',
+                    target_id=redeem.id,
+                    note=f'Refund rejected redeem request {redeem.redeem_no}',
+                )
+            MeowCreditLedger.objects.filter(
+                entry_type=MeowCreditLedger.TYPE_REDEEM,
+                status=MeowCreditLedger.STATUS_PENDING,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+            ).update(status=MeowCreditLedger.STATUS_REJECTED)
+            redeem.status = MeowCreditRedeemRequest.STATUS_REJECTED
+            redeem.reviewed_by = reviewer
+            redeem.reviewed_at = timezone.now()
+            redeem.reject_reason = reason or ''
+            redeem.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reject_reason', 'updated_at'])
+        return redeem
+
+    @staticmethod
+    def _generate_redeem_no():
+        for _ in range(8):
+            candidate = f'MCR{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not MeowCreditRedeemRequest.objects.filter(redeem_no=candidate).exists():
+                return candidate
+        raise ValidationError('Unable to generate unique Meow Credit redeem number.')
+
+
+class MeowCreditRechargeService:
+    @transaction.atomic
+    def create_order(self, *, user, package_code: str):
+        package = MeowCreditPackage.objects.filter(code=package_code, status=MeowCreditPackage.STATUS_ACTIVE).first()
+        if package is None:
+            raise ValidationError({'package_code': ['Active Meow Credit package not found.']})
+
+        order_no = self._generate_order_no()
+        now = timezone.now()
+        expires_at = now + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES)
+        receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        wallet_address = None
+        if receive_address:
+            wallet_address = WalletAddress.objects.filter(address=receive_address).first()
+            if wallet_address is None:
+                wallet_address = WalletAddress.objects.create(
+                    address=receive_address,
+                    label=f'meow-credit:{order_no}',
+                    usage_type=WalletAddress.USAGE_MEMBERSHIP,
+                    status=WalletAddress.STATUS_ASSIGNED,
+                    wallet_id=(settings.LBRY_PLATFORM_WALLET_ID or '').strip(),
+                    account_id=(settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip(),
+                )
+
+        recharge = MeowCreditRecharge.objects.create(
+            user=user,
+            package=package,
+            order_no=order_no,
+            package_code_snapshot=package.code,
+            package_name_snapshot=package.name,
+            credit_amount=package.credit_amount,
+            bonus_credit=package.bonus_credit,
+            total_credit=package.credit_amount + package.bonus_credit,
+            price_amount=package.price_amount,
+            price_currency=package.price_currency,
+            status=MeowCreditRecharge.STATUS_PENDING,
+        )
+        payment_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEOW_CREDITS_RECHARGE,
+            target_type='meow_credit_recharge',
+            target_id=recharge.id,
+            order_no=order_no,
+            amount=package.price_amount,
+            expected_amount_lbc=package.price_amount,
+            currency=package.price_currency,
+            status=PaymentOrder.STATUS_PENDING,
+            pay_to_address=receive_address,
+            wallet_address=wallet_address,
+            expires_at=expires_at,
+        )
+        recharge.payment_order = payment_order
+        recharge.save(update_fields=['payment_order', 'updated_at'])
+        return recharge
+
+    @transaction.atomic
+    def credit_paid_recharge(self, recharge: MeowCreditRecharge):
+        locked_recharge = MeowCreditRecharge.objects.select_for_update().select_related('payment_order', 'user').get(pk=recharge.pk)
+        if locked_recharge.credited_at is not None or locked_recharge.status == MeowCreditRecharge.STATUS_CREDITED:
+            return locked_recharge
+        payment_order = locked_recharge.payment_order
+        if payment_order is None:
+            raise ValidationError('Recharge does not have a linked payment order.')
+        if payment_order.status not in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+            return locked_recharge
+        MeowCreditService.credit_recharge(
+            user=locked_recharge.user,
+            amount=int(locked_recharge.total_credit),
+            payment_order=payment_order,
+            target=locked_recharge,
+        )
+        locked_recharge.status = MeowCreditRecharge.STATUS_CREDITED
+        locked_recharge.paid_at = payment_order.paid_at or timezone.now()
+        locked_recharge.credited_at = timezone.now()
+        locked_recharge.save(update_fields=['status', 'paid_at', 'credited_at', 'updated_at'])
+        return locked_recharge
+
+    def _generate_order_no(self):
+        for _ in range(8):
+            candidate = f'MC{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not MeowCreditRecharge.objects.filter(order_no=candidate).exists() and not PaymentOrder.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise ValidationError('Unable to generate unique Meow Credit order number.')
 
 
 class DramaAccessService:
