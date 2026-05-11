@@ -135,6 +135,43 @@ LEGACY_CATEGORY_SLUG_ALIASES = {
 }
 
 
+LIVE_OWNER_PERMISSION_DETAIL = 'Only the live owner can perform this action.'
+
+
+class IsCreatorOrStaff(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = getattr(request, 'user', None)
+        return bool(
+            user
+            and user.is_authenticated
+            and (user.is_creator or user.is_staff or user.is_superuser)
+        )
+
+
+def live_owner_forbidden_response():
+    return Response(
+        {'detail': LIVE_OWNER_PERMISSION_DETAIL},
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
+def publish_config_error_response(*, live_payload, error=None, message=None):
+    return Response(
+        {
+            'detail': 'Publish config unavailable.',
+            'error': error or 'ant_media_publish_config_unavailable',
+            'live': live_payload,
+            'publish_config': {
+                'ok': False,
+                'error': error or 'ant_media_publish_config_unavailable',
+                'message': message or 'Publish config unavailable.',
+            },
+            'next_action': 'retry_prepare',
+        },
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
 def annotate_videos_for_request(queryset, request):
     queryset = queryset.select_related('owner', 'category').annotate(
         view_count=Count('views', distinct=True),
@@ -1128,16 +1165,24 @@ class LiveChatMessageListCreateAPIView(APIView):
         return Response({'results': serializer.data, 'next_after_id': next_after_id}, status=status.HTTP_200_OK)
 
     def post(self, request, pk):
+        user = getattr(request, 'user', None)
+        if not (user and user.is_authenticated):
+            return Response({'detail': 'Authentication credentials were not provided.'}, status=status.HTTP_401_UNAUTHORIZED)
         stream = self._stream_for_write(request, pk)
         if stream is None:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if stream.status == LiveStream.STATUS_ENDED:
+            return Response({'detail': 'Live stream has ended.'}, status=status.HTTP_400_BAD_REQUEST)
         room = self._room(stream)
         if not room.is_enabled:
             return Response({'detail': 'Chat is disabled for this stream.'}, status=status.HTTP_409_CONFLICT)
 
         serializer = LiveChatMessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = request.user
+        cutoff = timezone.now() - timedelta(seconds=2)
+        recent_exists = LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists()
+        if recent_exists:
+            return Response({'detail': 'Please wait before sending another chat message.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         if room.slow_mode_seconds > 0:
             cutoff = timezone.now() - timedelta(seconds=room.slow_mode_seconds)
             recent_exists = LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists()
@@ -1429,6 +1474,29 @@ class LiveStreamCreateAPIView(generics.CreateAPIView):
         serializer.save(owner=self.request.user)
 
 
+
+class LiveStreamHealthAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsCreatorOrStaff]
+
+    def get(self, request):
+        websocket_url = AntMediaLiveAdapter()._get_websocket_url()
+        ant_media_base_url_configured = bool(settings.ANT_MEDIA_BASE_URL)
+        websocket_url_configured = bool(websocket_url)
+        rest_app_name = settings.ANT_MEDIA_REST_APP_NAME or ''
+        app_name = settings.ANT_MEDIA_APP_NAME or ''
+        return Response(
+            {
+                'ant_media_base_url_configured': ant_media_base_url_configured,
+                'ant_media_app_name': app_name or None,
+                'websocket_url_configured': websocket_url_configured,
+                'rest_app_name': rest_app_name or None,
+                'udp_ports_note': 'Ensure UDP 50000-60000 are open for WebRTC publishing.',
+                'ok': bool(ant_media_base_url_configured and app_name and rest_app_name and websocket_url_configured),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class LiveStreamQuickStartAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsCreator]
     parser_classes = [JSONParser, FormParser]
@@ -1471,19 +1539,10 @@ class LiveStreamQuickStartAPIView(APIView):
         adapter = AntMediaLiveAdapter()
         ensure_result = adapter.ensure_broadcast(stream)
         if not ensure_result.get('ok'):
-            return Response(
-                {
-                    'detail': ensure_result.get('message') or 'Unable to prepare live stream broadcast.',
-                    'live_stream_id': stream.id,
-                    'error': ensure_result.get('error'),
-                    'live': self._live_payload(stream, request),
-                    'publish_config': {
-                        'ok': False,
-                        'error': ensure_result.get('error'),
-                        'message': ensure_result.get('message'),
-                    },
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=ensure_result.get('error'),
+                message=ensure_result.get('message'),
             )
 
         ant_stream_id = ensure_result.get('stream_id') or stream.stream_key
@@ -1493,17 +1552,10 @@ class LiveStreamQuickStartAPIView(APIView):
 
         publish_config = adapter.get_browser_publish_config(stream)
         if not publish_config.get('ok'):
-            return Response(
-                {
-                    'detail': publish_config.get('message') or 'Live stream publish config is unavailable.',
-                    'live': self._live_payload(stream, request),
-                    'publish_config': {
-                        'ok': False,
-                        'error': publish_config.get('error'),
-                        'message': publish_config.get('message'),
-                    },
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=publish_config.get('error'),
+                message=publish_config.get('message'),
             )
 
         return Response(
@@ -1592,10 +1644,7 @@ class LiveStreamStatusAPIView(APIView):
     def post(self, request, pk):
         stream = generics.get_object_or_404(LiveStream.objects.select_related('category', 'owner'), pk=pk)
         if stream.owner_id != request.user.id:
-            return Response(
-                {'detail': 'You do not have permission to manage this live stream.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            return live_owner_forbidden_response()
         now = timezone.now()
         adapter = AntMediaLiveAdapter()
 
@@ -1662,10 +1711,7 @@ class LiveStreamPrepareAPIView(APIView):
             pk=pk,
         )
         if stream.owner_id != request.user.id:
-            return Response(
-                {'detail': 'You do not have permission to manage this live stream.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            return live_owner_forbidden_response()
         if stream.status != LiveStream.STATUS_IDLE:
             return Response(
                 {'detail': 'Only idle streams can be prepared.'},
@@ -1676,12 +1722,10 @@ class LiveStreamPrepareAPIView(APIView):
         adapter = AntMediaLiveAdapter()
         ensure_result = adapter.ensure_broadcast(stream)
         if not ensure_result.get('ok'):
-            return Response(
-                {
-                    'detail': ensure_result.get('message'),
-                    'error': ensure_result.get('error'),
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=ensure_result.get('error'),
+                message=ensure_result.get('message'),
             )
 
         ant_stream_id = ensure_result.get('stream_id') or stream.stream_key
@@ -1691,6 +1735,12 @@ class LiveStreamPrepareAPIView(APIView):
         logger.debug('live_prepare persisted stream_id live_id=%s stream_id=%s', stream.id, stream.stream_key)
 
         publish_config = adapter.get_browser_publish_config(stream)
+        if not publish_config.get('ok'):
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=publish_config.get('error'),
+                message=publish_config.get('message'),
+            )
         ant_media_config = publish_config.get('config', {})
 
         masked_stream_id = stream.stream_key[:6] + '...' if stream.stream_key else None
@@ -1728,6 +1778,13 @@ class LiveStreamPrepareAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+    def _live_payload(self, stream: LiveStream, request) -> dict:
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = dict(serializer.data)
+        payload['stream_key'] = stream.stream_key
+        payload['status'] = stream.status
+        return payload
 
 
 class VideoListCreateAPIView(generics.ListCreateAPIView):

@@ -1959,10 +1959,12 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.post(reverse('live-stream-quick-start'), format='json')
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
         self.assertEqual(response.data['error'], 'ant_media_create_failed')
         self.assertFalse(response.data['publish_config']['ok'])
-        self.assertIn('live_stream_id', response.data)
-        self.assertTrue(LiveStream.objects.filter(id=response.data['live_stream_id'], owner=user).exists())
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
+        self.assertIn('live', response.data)
+        self.assertTrue(LiveStream.objects.filter(id=response.data['live']['id'], owner=user).exists())
 
     @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
     @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
@@ -1978,9 +1980,11 @@ class LiveStreamAPITestCase(APITestCase):
         response = self.client.post(reverse('live-stream-quick-start'), format='json')
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
         self.assertIn('live', response.data)
         self.assertEqual(response.data['publish_config']['error'], 'ant_media_publish_config_unavailable')
         self.assertFalse(response.data['publish_config']['ok'])
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
 
     def test_quick_start_rejects_unknown_category(self):
         self.authenticate(email='quick-bad-category@example.com')
@@ -1994,6 +1998,61 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('category', response.data)
         self.assertEqual(LiveStream.objects.count(), 0)
+
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_APP_NAME='live',
+        ANT_MEDIA_REST_APP_NAME='live',
+    )
+    def test_live_health_check_for_creator(self):
+        self.authenticate(email='health-creator@example.com')
+
+        response = self.client.get(reverse('live-stream-health'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['ant_media_base_url_configured'])
+        self.assertEqual(response.data['ant_media_app_name'], 'live')
+        self.assertEqual(response.data['rest_app_name'], 'live')
+        self.assertTrue(response.data['websocket_url_configured'])
+        self.assertTrue(response.data['ok'])
+        self.assertEqual(
+            response.data['udp_ports_note'],
+            'Ensure UDP 50000-60000 are open for WebRTC publishing.',
+        )
+
+    @override_settings(ANT_MEDIA_BASE_URL='', ANT_MEDIA_APP_NAME='', ANT_MEDIA_REST_APP_NAME='')
+    def test_live_health_check_reports_missing_config(self):
+        staff = self.create_user('health-staff@example.com', is_staff=True)
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.get(reverse('live-stream-health'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['ant_media_base_url_configured'])
+        self.assertFalse(response.data['websocket_url_configured'])
+        self.assertFalse(response.data['ok'])
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_prepare_publish_config_failure_returns_mobile_error_contract(self, mock_ensure, mock_publish_config):
+        owner = self.authenticate(email='prepare-config-fail@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Prepare config fail', status=LiveStream.STATUS_IDLE)
+        mock_ensure.return_value = {'ok': True, 'stream_id': stream.stream_key}
+        mock_publish_config.return_value = {
+            'ok': False,
+            'error': 'ant_media_publish_config_unavailable',
+            'message': 'Ant Media publish config is unavailable.',
+        }
+
+        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
+        self.assertEqual(response.data['error'], 'ant_media_publish_config_unavailable')
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
+        self.assertFalse(response.data['publish_config']['ok'])
+        self.assertEqual(response.data['live']['id'], stream.id)
 
     def test_non_creator_cannot_prepare_start_or_end_even_as_owner(self):
         owner = self.create_user('noncreator-owner@example.com', is_creator=False)
@@ -2314,14 +2373,17 @@ class LiveStreamAPITestCase(APITestCase):
 
         prepare_response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(prepare_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(prepare_response.data['detail'], 'Only the live owner can perform this action.')
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream.id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(start_response.data['detail'], 'Only the live owner can perform this action.')
 
         stream.status = LiveStream.STATUS_LIVE
         stream.save(update_fields=['status'])
         end_response = self.client.post(reverse('live-stream-end', args=[stream.id]), format='json')
         self.assertEqual(end_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(end_response.data['detail'], 'Only the live owner can perform this action.')
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
@@ -2365,7 +2427,10 @@ class LiveStreamAPITestCase(APITestCase):
         stream = LiveStream.objects.create(owner=owner, title='Prepare fail stream', status=LiveStream.STATUS_IDLE)
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
         self.assertEqual(response.data['error'], 'ant_media_create_failed')
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
+        self.assertIn('live', response.data)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
@@ -3059,6 +3124,59 @@ class LiveChatAPITestCase(APITestCase):
         get_response = self.client.get(reverse('live-chat-messages', args=[stream.id]))
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
         self.assertEqual(get_response.data, {'results': [], 'next_after_id': None})
+
+
+    def test_unauthenticated_user_cannot_send_chat(self):
+        owner = self.create_user('chat-auth-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Auth chat stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'blocked'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_chat_blocked_when_live_stream_has_ended(self):
+        owner = self.create_user('chat-ended-owner@example.com')
+        viewer = self.create_user('chat-ended-viewer@example.com')
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Ended chat stream',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+            status=LiveStream.STATUS_ENDED,
+        )
+        self.client.force_authenticate(user=viewer)
+
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'too late'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'detail': 'Live stream has ended.'})
+
+    def test_chat_two_second_debounce(self):
+        owner = self.create_user('chat-debounce-owner@example.com')
+        viewer = self.create_user('chat-debounce-viewer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Debounce chat stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=viewer)
+
+        first_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'first'},
+            format='json',
+        )
+        second_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'second'},
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
     def test_message_validation(self):
         owner = self.create_user('chat-validation-owner@example.com')
