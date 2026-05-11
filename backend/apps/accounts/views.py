@@ -1,14 +1,16 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth import authenticate
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Exists, F, OuterRef, Q
 from datetime import timedelta
 import json
 import hmac
 import logging
+import secrets
 from asgiref.sync import async_to_sync
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
@@ -21,12 +23,15 @@ from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
     Category,
+    Gift,
+    GiftTransaction,
     ChannelSubscription,
     CommentLike,
     LiveChatMessage,
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    ManualMembershipPayment,
     MembershipPlan,
     PaymentOrder,
     Product,
@@ -41,10 +46,12 @@ from apps.accounts.models import (
     Video,
     VideoComment,
     VideoLike,
+    VideoShare,
     VideoView,
     generate_stream_key,
 )
 from apps.accounts.permissions import IsCreator, IsStaffOrSuperuser
+from apps.accounts.gift_serializers import GiftSendSerializer, GiftTransactionSerializer
 from apps.accounts.serializers import (
     AccountPasswordChangeSerializer,
     AccountPreferencesSerializer,
@@ -54,6 +61,8 @@ from apps.accounts.serializers import (
     BillingPlanSerializer,
     BillingSubscriptionCreateSerializer,
     BillingSubscriptionSerializer,
+    ManualMembershipPaymentHintSerializer,
+    ManualMembershipTxHintSubmitSerializer,
     MembershipOrderCreateSerializer,
     MembershipOrderTxHintSerializer,
     MembershipOrderSerializer,
@@ -101,6 +110,8 @@ from apps.accounts.services import (
     LbryDaemonError,
     LbryDaemonInvalidParamsError,
     LbryDaemonRpcError,
+    ManualMembershipChainVerifier,
+    MembershipActivationService,
     MembershipOrderService,
     ProductOrderService,
     ProductPaymentDetectionService,
@@ -115,6 +126,7 @@ from apps.accounts.services import (
     WalletAddressConflictError,
     generate_video_thumbnail,
     MeowPointService,
+    GiftService,
 )
 
 User = get_user_model()
@@ -127,6 +139,50 @@ except ModuleNotFoundError:  # pragma: no cover
 LEGACY_CATEGORY_SLUG_ALIASES = {
     'tech': 'technology',
 }
+
+
+LIVE_OWNER_PERMISSION_DETAIL = 'Only the live owner can perform this action.'
+
+
+class IsCreatorOrStaff(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = getattr(request, 'user', None)
+        return bool(
+            user
+            and user.is_authenticated
+            and (user.is_creator or user.is_staff or user.is_superuser)
+        )
+
+
+def live_owner_forbidden_response():
+    return Response(
+        {'detail': LIVE_OWNER_PERMISSION_DETAIL},
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
+def publish_config_error_response(*, live_payload, error=None, message=None):
+    return Response(
+        {
+            'detail': 'Publish config unavailable.',
+            'error': error or 'ant_media_publish_config_unavailable',
+            'live': live_payload,
+            'publish_config': {
+                'ok': False,
+                'error': error or 'ant_media_publish_config_unavailable',
+                'message': message or 'Publish config unavailable.',
+            },
+            'next_action': 'retry_prepare',
+        },
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+def get_client_ip(request):
+    forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip() or None
+    return request.META.get('REMOTE_ADDR') or None
 
 
 def annotate_videos_for_request(queryset, request):
@@ -168,6 +224,46 @@ class CommentPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+def build_membership_purchase_preview(user, plan: MembershipPlan) -> dict:
+    now = timezone.now()
+    current = (
+        UserMembership.objects.filter(
+            user=user,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        )
+        .select_related('plan')
+        .order_by('-ends_at', '-id')
+        .first()
+    )
+
+    if current is None:
+        starts_at = now
+        purchase_mode = 'new'
+        current_membership = None
+    else:
+        starts_at = current.ends_at
+        purchase_mode = 'renewal' if current.plan_id == plan.id else 'plan_change'
+        current_membership = {
+            'plan_code': current.plan.code,
+            'plan_name': current.plan.name,
+            'starts_at': current.starts_at,
+            'ends_at': current.ends_at,
+        }
+
+    ends_at = starts_at + timedelta(days=plan.duration_days)
+    return {
+        'has_active_membership': current is not None,
+        'current_membership': current_membership,
+        'purchase_mode': purchase_mode,
+        'is_renewal': purchase_mode == 'renewal',
+        'is_plan_change': purchase_mode == 'plan_change',
+        'estimated_new_starts_at': starts_at,
+        'estimated_new_ends_at': ends_at,
+    }
 
 
 class PaymentOrderPagination(PageNumberPagination):
@@ -1082,16 +1178,24 @@ class LiveChatMessageListCreateAPIView(APIView):
         return Response({'results': serializer.data, 'next_after_id': next_after_id}, status=status.HTTP_200_OK)
 
     def post(self, request, pk):
+        user = getattr(request, 'user', None)
+        if not (user and user.is_authenticated):
+            return Response({'detail': 'Authentication credentials were not provided.'}, status=status.HTTP_401_UNAUTHORIZED)
         stream = self._stream_for_write(request, pk)
         if stream is None:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if stream.status == LiveStream.STATUS_ENDED:
+            return Response({'detail': 'Live stream has ended.'}, status=status.HTTP_400_BAD_REQUEST)
         room = self._room(stream)
         if not room.is_enabled:
             return Response({'detail': 'Chat is disabled for this stream.'}, status=status.HTTP_409_CONFLICT)
 
         serializer = LiveChatMessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = request.user
+        cutoff = timezone.now() - timedelta(seconds=2)
+        recent_exists = LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists()
+        if recent_exists:
+            return Response({'detail': 'Please wait before sending another chat message.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         if room.slow_mode_seconds > 0:
             cutoff = timezone.now() - timedelta(seconds=room.slow_mode_seconds)
             recent_exists = LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists()
@@ -1383,6 +1487,108 @@ class LiveStreamCreateAPIView(generics.CreateAPIView):
         serializer.save(owner=self.request.user)
 
 
+
+class LiveStreamHealthAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsCreatorOrStaff]
+
+    def get(self, request):
+        websocket_url = AntMediaLiveAdapter()._get_websocket_url()
+        ant_media_base_url_configured = bool(settings.ANT_MEDIA_BASE_URL)
+        websocket_url_configured = bool(websocket_url)
+        rest_app_name = settings.ANT_MEDIA_REST_APP_NAME or ''
+        app_name = settings.ANT_MEDIA_APP_NAME or ''
+        return Response(
+            {
+                'ant_media_base_url_configured': ant_media_base_url_configured,
+                'ant_media_app_name': app_name or None,
+                'websocket_url_configured': websocket_url_configured,
+                'rest_app_name': rest_app_name or None,
+                'udp_ports_note': 'Ensure UDP 50000-60000 are open for WebRTC publishing.',
+                'ok': bool(ant_media_base_url_configured and app_name and rest_app_name and websocket_url_configured),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class LiveStreamQuickStartAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsCreator]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        category = None
+        category_slug = (request.data.get('category') or '').strip()
+        if category_slug:
+            category = Category.objects.filter(slug=category_slug, is_active=True).first()
+            if category is None:
+                return Response({'category': ['Active category not found.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        visibility = (request.data.get('visibility') or LiveStream.VISIBILITY_PUBLIC).strip()
+        valid_visibilities = {choice[0] for choice in LiveStream.VISIBILITY_CHOICES}
+        if visibility not in valid_visibilities:
+            return Response({'visibility': ['Invalid visibility.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        stream = (
+            LiveStream.objects.filter(
+                owner=request.user,
+                status__in=[LiveStream.STATUS_IDLE, LiveStream.STATUS_READY, LiveStream.STATUS_LIVE],
+            )
+            .select_related('category', 'owner')
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        reused = stream is not None
+        if stream is None:
+            title = (request.data.get('title') or '').strip() or f"{request.user.display_name}'s Live"
+            description = request.data.get('description') or ''
+            stream = LiveStream.objects.create(
+                owner=request.user,
+                title=title,
+                description=description,
+                visibility=visibility,
+                status=LiveStream.STATUS_IDLE,
+                category=category,
+            )
+
+        adapter = AntMediaLiveAdapter()
+        ensure_result = adapter.ensure_broadcast(stream)
+        if not ensure_result.get('ok'):
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=ensure_result.get('error'),
+                message=ensure_result.get('message'),
+            )
+
+        ant_stream_id = ensure_result.get('stream_id') or stream.stream_key
+        if ant_stream_id != stream.stream_key:
+            stream.stream_key = ant_stream_id
+            stream.save(update_fields=['stream_key'])
+
+        publish_config = adapter.get_browser_publish_config(stream)
+        if not publish_config.get('ok'):
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=publish_config.get('error'),
+                message=publish_config.get('message'),
+            )
+
+        return Response(
+            {
+                'reused': reused,
+                'live': self._live_payload(stream, request),
+                'publish_config': publish_config,
+                'next_action': 'start_stream',
+            },
+            status=status.HTTP_200_OK if reused else status.HTTP_201_CREATED,
+        )
+
+    def _live_payload(self, stream: LiveStream, request) -> dict:
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = dict(serializer.data)
+        payload['stream_key'] = stream.stream_key
+        payload['status'] = stream.status
+        return payload
+
+
 class LiveStreamDetailAPIView(generics.RetrieveAPIView):
     serializer_class = LiveStreamSerializer
     permission_classes = [permissions.AllowAny]
@@ -1400,8 +1606,15 @@ class LiveStreamDetailAPIView(generics.RetrieveAPIView):
         stream = self.get_object()
         serializer = self.get_serializer(stream)
         payload = dict(serializer.data)
-        payload['stream_key'] = stream.stream_key
+        if self._is_owner(request, stream):
+            payload['stream_key'] = stream.stream_key
+            publish_config = AntMediaLiveAdapter().get_browser_publish_config(stream)
+            payload['publish_config'] = publish_config
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _is_owner(self, request, stream: LiveStream) -> bool:
+        user = getattr(request, 'user', None)
+        return bool(user and user.is_authenticated and stream.owner_id == user.id)
 
 
 class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
@@ -1416,6 +1629,15 @@ class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
                 Q(visibility=LiveStream.VISIBILITY_PUBLIC) | Q(owner=user)
             ).distinct()
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
+
+    def retrieve(self, request, *args, **kwargs):
+        stream = self.get_object()
+        stream._normalized_live_fields = AntMediaLiveAdapter().normalize_stream_fields(
+            stream,
+            persist_no_signal=True,
+        )
+        serializer = self.get_serializer(stream)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
@@ -1433,31 +1655,59 @@ class LiveStreamStatusAPIView(APIView):
     new_status = LiveStream.STATUS_IDLE
 
     def post(self, request, pk):
-        stream = generics.get_object_or_404(LiveStream.objects.select_related('category'), pk=pk, owner=request.user)
+        stream = generics.get_object_or_404(LiveStream.objects.select_related('category', 'owner'), pk=pk)
+        if stream.owner_id != request.user.id:
+            return live_owner_forbidden_response()
         now = timezone.now()
+        adapter = AntMediaLiveAdapter()
 
         if self.new_status == LiveStream.STATUS_LIVE:
-            if stream.status != LiveStream.STATUS_IDLE:
+            if stream.status not in [LiveStream.STATUS_IDLE, LiveStream.STATUS_READY]:
                 return Response(
-                    {'detail': 'Only idle streams can be started.'},
+                    {'detail': 'Only idle or ready streams can be started.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            sync = adapter.get_broadcast_status(stream.stream_key)
+            ant_status = sync.get('ant_media_status')
+            if ant_status != 'broadcasting':
+                return Response(
+                    {
+                        'detail': 'Stream is not publishing yet.',
+                        'status': 'waiting_for_signal',
+                        'django_status': stream.status,
+                        'ant_media_status': ant_status,
+                        'effective_status': 'waiting_for_signal',
+                        'next_action': 'retry_status',
+                        'sync_ok': sync.get('sync_ok', False),
+                        'sync_error': sync.get('sync_error'),
+                    },
                     status=status.HTTP_409_CONFLICT,
                 )
             stream.status = LiveStream.STATUS_LIVE
             stream.started_at = now
             stream.ended_at = None
-            stream.save(update_fields=['status', 'started_at', 'ended_at'])
+            stream.ant_media_no_signal_count = 0
+            stream.save(update_fields=['status', 'started_at', 'ended_at', 'ant_media_no_signal_count'])
         elif self.new_status == LiveStream.STATUS_ENDED:
-            if stream.status != LiveStream.STATUS_LIVE:
+            if stream.status == LiveStream.STATUS_ENDED:
                 return Response(
-                    {'detail': 'Only live streams can be ended.'},
+                    {'detail': 'Only non-ended streams can be ended.'},
                     status=status.HTTP_409_CONFLICT,
                 )
             stream.status = LiveStream.STATUS_ENDED
             stream.ended_at = now
-            stream.save(update_fields=['status', 'ended_at'])
+            stream.ant_media_no_signal_count = 0
+            stream.save(update_fields=['status', 'ended_at', 'ant_media_no_signal_count'])
+            stop_result = adapter.stop_broadcast(stream.stream_key)
+            stream._ant_media_stop_result = stop_result
 
         serializer = LiveStreamSerializer(stream, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = dict(serializer.data)
+        stop_result = getattr(stream, '_ant_media_stop_result', None)
+        if stop_result and not stop_result.get('ok'):
+            payload['warning'] = stop_result.get('warning') or 'ant_media_stop_failed'
+            payload['warning_detail'] = stop_result.get('message')
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class LiveStreamPrepareAPIView(APIView):
@@ -1470,10 +1720,11 @@ class LiveStreamPrepareAPIView(APIView):
 
     def post(self, request, pk):
         stream = generics.get_object_or_404(
-            LiveStream.objects.select_related('category'),
+            LiveStream.objects.select_related('category', 'owner'),
             pk=pk,
-            owner=request.user,
         )
+        if stream.owner_id != request.user.id:
+            return live_owner_forbidden_response()
         if stream.status != LiveStream.STATUS_IDLE:
             return Response(
                 {'detail': 'Only idle streams can be prepared.'},
@@ -1484,12 +1735,10 @@ class LiveStreamPrepareAPIView(APIView):
         adapter = AntMediaLiveAdapter()
         ensure_result = adapter.ensure_broadcast(stream)
         if not ensure_result.get('ok'):
-            return Response(
-                {
-                    'detail': ensure_result.get('message'),
-                    'error': ensure_result.get('error'),
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=ensure_result.get('error'),
+                message=ensure_result.get('message'),
             )
 
         ant_stream_id = ensure_result.get('stream_id') or stream.stream_key
@@ -1499,6 +1748,12 @@ class LiveStreamPrepareAPIView(APIView):
         logger.debug('live_prepare persisted stream_id live_id=%s stream_id=%s', stream.id, stream.stream_key)
 
         publish_config = adapter.get_browser_publish_config(stream)
+        if not publish_config.get('ok'):
+            return publish_config_error_response(
+                live_payload=self._live_payload(stream, request),
+                error=publish_config.get('error'),
+                message=publish_config.get('message'),
+            )
         ant_media_config = publish_config.get('config', {})
 
         masked_stream_id = stream.stream_key[:6] + '...' if stream.stream_key else None
@@ -1536,6 +1791,13 @@ class LiveStreamPrepareAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+    def _live_payload(self, stream: LiveStream, request) -> dict:
+        serializer = LiveStreamSerializer(stream, context={'request': request})
+        payload = dict(serializer.data)
+        payload['stream_key'] = stream.stream_key
+        payload['status'] = stream.status
+        return payload
 
 
 class VideoListCreateAPIView(generics.ListCreateAPIView):
@@ -1707,6 +1969,86 @@ class PublicVideoInteractionSummaryAPIView(APIView):
         return Response(serializer.data)
 
 
+class PublicVideoShareTrackAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, pk):
+        video = generics.get_object_or_404(
+            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            pk=pk,
+        )
+        channel = (request.data.get('channel') or '').strip()[:64]
+        user = request.user if request.user.is_authenticated else None
+        VideoShare.objects.create(
+            user=user,
+            video=video,
+            channel=channel,
+            ip_address=get_client_ip(request),
+            user_agent=(request.META.get('HTTP_USER_AGENT') or '')[:1000],
+        )
+        Video.objects.filter(pk=video.pk).update(share_count=F('share_count') + 1)
+        video.refresh_from_db(fields=['share_count'])
+        return Response(
+            {
+                'video_id': video.id,
+                'share_count': video.share_count,
+                'channel': channel,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class PublicVideoGiftSendAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        video = generics.get_object_or_404(
+            Video.objects.select_related('owner').filter(visibility=Video.VISIBILITY_PUBLIC),
+            pk=pk,
+        )
+        serializer = GiftSendSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        gift = generics.get_object_or_404(Gift, code=serializer.validated_data['gift_code'])
+        cutoff = timezone.now() - timedelta(seconds=2)
+        existing_tx = (
+            GiftTransaction.objects.filter(
+                sender=request.user,
+                video=video,
+                gift=gift,
+                quantity=serializer.validated_data['quantity'],
+                created_at__gte=cutoff,
+            )
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        if existing_tx is not None:
+            response_serializer = GiftTransactionSerializer(existing_tx)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        try:
+            tx = GiftService.send_video_gift(
+                sender=request.user,
+                receiver=video.owner,
+                video=video,
+                gift=gift,
+                quantity=serializer.validated_data['quantity'],
+            )
+        except ValidationError as exc:
+            error_text = str(exc)
+            if 'Insufficient Meow Points balance.' in error_text:
+                return Response(
+                    {'code': 'insufficient_balance', 'detail': 'Insufficient Meow Points balance.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if 'Gift is not active.' in error_text:
+                return Response({'detail': 'Gift is not active.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': error_text}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_serializer = GiftTransactionSerializer(tx)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+
 class VideoLikeAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1771,38 +2113,54 @@ class ChannelSubscriptionAPIView(APIView):
 class CreatorFollowAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request, pk):
-        creator = generics.get_object_or_404(User, pk=pk)
+    def post(self, request, creator_id):
+        creator = generics.get_object_or_404(User, pk=creator_id)
+        validation_response = self._validate_creator_target(request, creator)
+        if validation_response is not None:
+            return validation_response
+
+        ChannelSubscription.objects.get_or_create(channel=creator, subscriber=request.user)
+        subscriber_count = self._sync_subscriber_count(creator)
+        return Response(
+            self._response_payload(creator=creator, is_following=True, subscriber_count=subscriber_count),
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, creator_id):
+        creator = generics.get_object_or_404(User, pk=creator_id)
+        validation_response = self._validate_creator_target(request, creator)
+        if validation_response is not None:
+            return validation_response
+
+        ChannelSubscription.objects.filter(channel=creator, subscriber=request.user).delete()
+        subscriber_count = self._sync_subscriber_count(creator)
+        return Response(
+            self._response_payload(creator=creator, is_following=False, subscriber_count=subscriber_count),
+            status=status.HTTP_200_OK,
+        )
+
+    def _validate_creator_target(self, request, creator):
         if creator.pk == request.user.pk:
             return Response({'detail': 'You cannot follow yourself.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not creator.is_creator:
+            return Response({'detail': 'Target user is not a creator.'}, status=status.HTTP_400_BAD_REQUEST)
+        return None
 
-        _, created = ChannelSubscription.objects.get_or_create(channel=creator, subscriber=request.user)
-        if created:
-            User.objects.filter(pk=creator.pk).update(subscriber_count=F('subscriber_count') + 1)
-        creator.refresh_from_db(fields=['subscriber_count'])
-        return Response(
-            {
-                'creator_id': creator.pk,
-                'follower_count': creator.subscriber_count,
-                'viewer_is_following': True,
-            },
-            status=status.HTTP_200_OK,
-        )
+    def _sync_subscriber_count(self, creator) -> int:
+        subscriber_count = ChannelSubscription.objects.filter(channel=creator).count()
+        creator.subscriber_count = subscriber_count
+        creator.save(update_fields=['subscriber_count'])
+        return subscriber_count
 
-    def delete(self, request, pk):
-        creator = generics.get_object_or_404(User, pk=pk)
-        deleted_count, _ = ChannelSubscription.objects.filter(channel=creator, subscriber=request.user).delete()
-        if deleted_count:
-            User.objects.filter(pk=creator.pk, subscriber_count__gt=0).update(subscriber_count=F('subscriber_count') - 1)
-        creator.refresh_from_db(fields=['subscriber_count'])
-        return Response(
-            {
-                'creator_id': creator.pk,
-                'follower_count': creator.subscriber_count,
-                'viewer_is_following': False,
-            },
-            status=status.HTTP_200_OK,
-        )
+    def _response_payload(self, *, creator, is_following: bool, subscriber_count: int) -> dict:
+        return {
+            'creator_id': creator.pk,
+            'is_following': is_following,
+            'subscriber_count': subscriber_count,
+            # Backward-compatible aliases for existing clients.
+            'viewer_is_following': is_following,
+            'follower_count': subscriber_count,
+        }
 
 
 class BillingPlanListAPIView(generics.ListAPIView):
@@ -1871,6 +2229,345 @@ class MembershipPlanListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         return MembershipPlan.objects.filter(is_active=True).order_by('sort_order', 'id')
+
+
+class ManualMembershipPaymentInfoAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        plan_code = (request.query_params.get('plan_code') or '').strip()
+        if not plan_code:
+            return Response({'plan_code': ['This query parameter is required.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        plan = generics.get_object_or_404(
+            MembershipPlan.objects.filter(is_active=True),
+            code=plan_code,
+        )
+        pay_to_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        if not pay_to_address:
+            return Response({'detail': 'Manual membership payment address is not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        purchase_preview = build_membership_purchase_preview(request.user, plan)
+        return Response(
+            {
+                'plan_code': plan.code,
+                'plan_name': plan.name,
+                'expected_amount_lbc': f'{plan.price_lbc:.8f}',
+                'currency': 'LBC',
+                'pay_to_address': pay_to_address,
+                'required_confirmations': int(settings.LBC_MIN_CONFIRMATIONS),
+                'notice': 'Send the exact LBC amount to the platform address, then wait for staff verification. This endpoint does not create an order or accept txid submission.',
+                **purchase_preview,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ManualMembershipTxHintListAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def get(self, request):
+        payments = list(
+            ManualMembershipPayment.objects.filter(user=request.user)
+            .select_related('plan')
+            .order_by('-created_at', '-id')[:50]
+        )
+        serializer = ManualMembershipPaymentHintSerializer(payments, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = ManualMembershipTxHintSubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        plan = generics.get_object_or_404(
+            MembershipPlan.objects.filter(is_active=True),
+            code=serializer.validated_data['plan_code'],
+        )
+        txid = serializer.validated_data['txid']
+        existing_txid_payment = ManualMembershipPayment.objects.select_related('payment_order').filter(txid=txid).first()
+        if existing_txid_payment is not None:
+            return Response(
+                self._duplicate_txid_payload(existing_txid_payment),
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        blocking_payment = (
+            ManualMembershipPayment.objects.filter(
+                user=request.user,
+                plan=plan,
+                status__in=[
+                    ManualMembershipPayment.STATUS_PENDING,
+                    ManualMembershipPayment.STATUS_SUBMITTED,
+                    ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+                    ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED,
+                ],
+            )
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        if blocking_payment is not None:
+            return Response(
+                {
+                    'detail': 'A pending manual membership payment already exists.',
+                    'manual_payment_id': blocking_payment.id,
+                    'status': blocking_payment.status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        purchase_preview = build_membership_purchase_preview(request.user, plan)
+        verification = ManualMembershipChainVerifier().verify(txid=txid, plan=plan)
+        payment_status = self._status_from_verification(verification)
+        reject_reason = verification['reason'] if payment_status == ManualMembershipPayment.STATUS_REJECTED else ''
+        try:
+            with transaction.atomic():
+                payment = ManualMembershipPayment.objects.create(
+                    user=request.user,
+                    plan=plan,
+                    txid=txid,
+                    expected_amount_lbc=verification['expected_amount_lbc'],
+                    actual_amount_lbc=verification['actual_amount_lbc'],
+                    pay_to_address=verification['pay_to_address'],
+                    confirmations=verification['confirmations'],
+                    status=payment_status,
+                    reject_reason=reject_reason,
+                    raw_tx=verification['raw_tx'],
+                    verified_at=timezone.now() if verification['ok'] else None,
+                )
+                if verification['ok'] and bool(getattr(settings, 'MANUAL_MEMBERSHIP_AUTO_ACTIVATE', False)):
+                    payment_order, membership = self._activate_verified_manual_payment(
+                        payment=payment,
+                        user=request.user,
+                        plan=plan,
+                        verification=verification,
+                    )
+                    payment.payment_order = payment_order
+                    payment.membership = membership
+                    payment.status = ManualMembershipPayment.STATUS_VERIFIED
+                    payment.verified_at = timezone.now()
+                    payment.save(update_fields=['payment_order', 'membership', 'status', 'verified_at', 'updated_at'])
+        except IntegrityError:
+            existing_payment = ManualMembershipPayment.objects.select_related('payment_order').filter(txid=txid).first()
+            if existing_payment is not None:
+                return Response(
+                    self._duplicate_txid_payload(existing_payment),
+                    status=status.HTTP_409_CONFLICT,
+                )
+            raise
+
+        return Response(
+            self._manual_payment_response_payload(
+                payment=payment,
+                verification=verification,
+                purchase_preview=purchase_preview,
+            ),
+            status=status.HTTP_201_CREATED,
+        )
+
+    def _status_from_verification(self, verification: dict) -> str:
+        if verification['ok']:
+            if bool(getattr(settings, 'MANUAL_MEMBERSHIP_AUTO_ACTIVATE', False)):
+                return ManualMembershipPayment.STATUS_SUBMITTED
+            return ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED
+        if verification['reason'] == 'pending_confirmation':
+            return ManualMembershipPayment.STATUS_PENDING_CONFIRMATION
+        if verification['reason'] == 'chain_lookup_failed':
+            return ManualMembershipPayment.STATUS_FAILED
+        return ManualMembershipPayment.STATUS_REJECTED
+
+    def _serialize_verification(self, verification: dict) -> dict:
+        payload = dict(verification)
+        payload['expected_amount_lbc'] = f"{verification['expected_amount_lbc']:.8f}"
+        payload['actual_amount_lbc'] = f"{verification['actual_amount_lbc']:.8f}"
+        return payload
+
+    def _manual_payment_response_payload(
+        self,
+        *,
+        payment: ManualMembershipPayment,
+        verification: dict | None = None,
+        purchase_preview: dict | None = None,
+    ) -> dict:
+        payment_order = payment.payment_order if payment.payment_order_id else None
+        payload = {
+            'verified': payment.status == ManualMembershipPayment.STATUS_VERIFIED
+            or payment.status == ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED,
+            'manual_payment_id': payment.id,
+            'status': payment.status,
+            'order_no': payment_order.order_no if payment_order is not None else '',
+            'payment': ManualMembershipPaymentHintSerializer(payment).data,
+            'payment_order': MembershipOrderSerializer(payment_order).data if payment_order is not None else None,
+            'membership': MyMembershipSerializer.from_membership(payment.membership).data if payment.membership_id else None,
+        }
+        if purchase_preview is not None:
+            payload.update(purchase_preview)
+        if verification is not None:
+            payload['verification'] = self._serialize_verification(verification)
+        return payload
+
+    def _duplicate_txid_payload(self, payment: ManualMembershipPayment) -> dict:
+        payment_order = payment.payment_order if payment.payment_order_id else None
+        return {
+            'detail': 'txid already submitted.',
+            'manual_payment_id': payment.id,
+            'status': payment.status,
+            'order_no': payment_order.order_no if payment_order is not None else '',
+            'created_at': payment.created_at,
+            'verified_at': payment.verified_at,
+        }
+
+    def _activate_verified_manual_payment(self, *, payment: ManualMembershipPayment, user, plan: MembershipPlan, verification: dict):
+        actual_amount = verification['actual_amount_lbc']
+        expected_amount = verification['expected_amount_lbc']
+        order_status = PaymentOrder.STATUS_OVERPAID if actual_amount > expected_amount else PaymentOrder.STATUS_PAID
+        now = timezone.now()
+        payment_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=expected_amount,
+            actual_amount_lbc=actual_amount,
+            txid=verification['txid'],
+            confirmations=verification['confirmations'],
+            pay_to_address=verification['pay_to_address'],
+            status=order_status,
+            paid_at=now,
+            order_no=self._generate_manual_order_no(),
+            amount='0.00',
+            currency='LBC',
+        )
+        membership = MembershipActivationService().activate_for_order(order=payment_order)
+        return payment_order, membership
+
+    def _generate_manual_order_no(self) -> str:
+        for _ in range(8):
+            candidate = f'MO{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not PaymentOrder.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise LbryDaemonError('Unable to generate unique membership order number.')
+
+
+
+class ManualMembershipTxHintVerifyNowAPIView(ManualMembershipTxHintListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        with transaction.atomic():
+            payment = generics.get_object_or_404(
+                ManualMembershipPayment.objects.select_for_update().select_related('plan', 'payment_order', 'membership'),
+                pk=pk,
+                user=request.user,
+            )
+            if payment.status == ManualMembershipPayment.STATUS_VERIFIED:
+                return Response(
+                    self._manual_payment_response_payload(payment=payment),
+                    status=status.HTTP_200_OK,
+                )
+            if payment.status != ManualMembershipPayment.STATUS_PENDING_CONFIRMATION:
+                return Response(
+                    {
+                        **self._manual_payment_response_payload(payment=payment),
+                        'detail': 'Manual membership payment is not pending confirmation.',
+                        'reason': 'not_pending_confirmation',
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            verification = ManualMembershipChainVerifier().verify(txid=payment.txid, plan=payment.plan)
+            payment.expected_amount_lbc = verification['expected_amount_lbc']
+            payment.actual_amount_lbc = verification['actual_amount_lbc']
+            payment.pay_to_address = verification['pay_to_address']
+            payment.confirmations = verification['confirmations']
+            payment.raw_tx = verification['raw_tx']
+
+            if verification['ok']:
+                if bool(getattr(settings, 'MANUAL_MEMBERSHIP_AUTO_ACTIVATE', False)):
+                    payment_order, membership = self._activate_verified_manual_payment(
+                        payment=payment,
+                        user=request.user,
+                        plan=payment.plan,
+                        verification=verification,
+                    )
+                    payment.payment_order = payment_order
+                    payment.membership = membership
+                    payment.status = ManualMembershipPayment.STATUS_VERIFIED
+                    payment.reject_reason = ''
+                    payment.verified_at = timezone.now()
+                    payment.save(
+                        update_fields=[
+                            'expected_amount_lbc',
+                            'actual_amount_lbc',
+                            'pay_to_address',
+                            'confirmations',
+                            'raw_tx',
+                            'payment_order',
+                            'membership',
+                            'status',
+                            'reject_reason',
+                            'verified_at',
+                            'updated_at',
+                        ]
+                    )
+                else:
+                    payment.status = ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED
+                    payment.reject_reason = ''
+                    payment.verified_at = timezone.now()
+                    payment.save(
+                        update_fields=[
+                            'expected_amount_lbc',
+                            'actual_amount_lbc',
+                            'pay_to_address',
+                            'confirmations',
+                            'raw_tx',
+                            'status',
+                            'reject_reason',
+                            'verified_at',
+                            'updated_at',
+                        ]
+                    )
+            elif verification['reason'] == 'pending_confirmation':
+                payment.status = ManualMembershipPayment.STATUS_PENDING_CONFIRMATION
+                payment.reject_reason = ''
+                payment.save(
+                    update_fields=[
+                        'expected_amount_lbc',
+                        'actual_amount_lbc',
+                        'pay_to_address',
+                        'confirmations',
+                        'raw_tx',
+                        'status',
+                        'reject_reason',
+                        'updated_at',
+                    ]
+                )
+            else:
+                payment.status = (
+                    ManualMembershipPayment.STATUS_FAILED
+                    if verification['reason'] == 'chain_lookup_failed'
+                    else ManualMembershipPayment.STATUS_REJECTED
+                )
+                payment.reject_reason = verification['reason']
+                payment.save(
+                    update_fields=[
+                        'expected_amount_lbc',
+                        'actual_amount_lbc',
+                        'pay_to_address',
+                        'confirmations',
+                        'raw_tx',
+                        'status',
+                        'reject_reason',
+                        'updated_at',
+                    ]
+                )
+
+            payment.refresh_from_db()
+            return Response(
+                self._manual_payment_response_payload(payment=payment, verification=verification),
+                status=status.HTTP_200_OK,
+            )
 
 
 class MembershipOrderCreateAPIView(APIView):
