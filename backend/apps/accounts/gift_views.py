@@ -1,12 +1,14 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from datetime import timedelta
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.gift_serializers import GiftSendSerializer, GiftSerializer, GiftTransactionSerializer
-from apps.accounts.models import Gift, LiveStream
+from apps.accounts.models import Gift, GiftTransaction, LiveStream
 from apps.accounts.services import GiftService
 
 
@@ -24,10 +26,27 @@ class LiveGiftSendAPIView(APIView):
 
     def post(self, request, pk):
         stream = get_object_or_404(LiveStream.objects.select_related('owner'), pk=pk)
+        if stream.status == LiveStream.STATUS_ENDED:
+            return Response({'detail': 'Live stream has ended.'}, status=status.HTTP_400_BAD_REQUEST)
         serializer = GiftSendSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         gift = get_object_or_404(Gift, code=serializer.validated_data['gift_code'])
+        cutoff = timezone.now() - timedelta(seconds=2)
+        existing_tx = (
+            GiftTransaction.objects.filter(
+                sender=request.user,
+                stream=stream,
+                gift=gift,
+                quantity=serializer.validated_data['quantity'],
+                created_at__gte=cutoff,
+            )
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        if existing_tx is not None:
+            response_serializer = GiftTransactionSerializer(existing_tx)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
         try:
             tx = GiftService.send_gift(
                 sender=request.user,

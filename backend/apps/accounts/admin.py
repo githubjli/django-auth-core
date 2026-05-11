@@ -20,6 +20,7 @@ from apps.accounts.models import (
     LiveChatMessage,
     LiveChatRoom,
     LiveStreamProduct,
+    ManualMembershipPayment,
     MembershipPlan,
     MeowPointLedger,
     MeowPointPackage,
@@ -475,6 +476,37 @@ class MembershipPlanAdmin(admin.ModelAdmin):
     search_fields = ('code', 'name', 'description')
     ordering = ('sort_order', 'id')
     readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ManualMembershipPayment)
+class ManualMembershipPaymentAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'txid',
+        'user',
+        'plan',
+        'status',
+        'expected_amount_lbc',
+        'actual_amount_lbc',
+        'pay_to_address',
+        'confirmations',
+        'payment_order',
+        'membership',
+        'created_at',
+        'verified_at',
+    )
+    list_filter = ('status', 'plan__code', 'created_at', 'verified_at')
+    search_fields = (
+        'txid',
+        'pay_to_address',
+        'user__email',
+        'plan__code',
+        'plan__name',
+        'payment_order__order_no',
+    )
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('raw_tx', 'payment_order', 'membership', 'created_at', 'updated_at')
+    autocomplete_fields = ('user', 'plan')
 
 
 @admin.register(WalletAddress)
