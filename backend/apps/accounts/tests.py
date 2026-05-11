@@ -2012,6 +2012,74 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(response.data['next_action'], 'start_stream')
         self.assertEqual(LiveStream.objects.filter(owner=user).count(), 2)
 
+    @patch('apps.accounts.views.AntMediaLiveAdapter.stop_broadcast')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_fresh_ends_existing_streams_and_creates_new_one(
+        self,
+        mock_ensure,
+        mock_publish_config,
+        mock_stop_broadcast,
+    ):
+        user = self.authenticate(email='quick-fresh@example.com')
+        old_ready = LiveStream.objects.create(owner=user, title='Old ready stream', status=LiveStream.STATUS_READY)
+        old_live = LiveStream.objects.create(owner=user, title='Old live stream', status=LiveStream.STATUS_LIVE)
+        mock_stop_broadcast.return_value = {'ok': True}
+        mock_ensure.return_value = {'ok': True, 'stream_id': 'fresh-stream-id', 'reused': False}
+        mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': 'fresh-stream-id'}}
+
+        response = self.client.post(
+            f"{reverse('live-stream-quick-start')}?fresh=true",
+            {'title': 'Fresh live'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['reused'])
+        self.assertFalse(response.data['ant_media_reused'])
+        self.assertTrue(response.data['fresh'])
+        self.assertCountEqual(response.data['ended_stream_ids'], [old_ready.id, old_live.id])
+        self.assertEqual(response.data['live']['title'], 'Fresh live')
+        self.assertEqual(response.data['live']['stream_key'], 'fresh-stream-id')
+        self.assertEqual(LiveStream.objects.filter(owner=user).count(), 3)
+        old_ready.refresh_from_db()
+        old_live.refresh_from_db()
+        self.assertEqual(old_ready.status, LiveStream.STATUS_ENDED)
+        self.assertEqual(old_live.status, LiveStream.STATUS_ENDED)
+        self.assertIsNotNone(old_ready.ended_at)
+        self.assertIsNotNone(old_live.ended_at)
+        mock_stop_broadcast.assert_any_call(old_ready.stream_key)
+        mock_stop_broadcast.assert_any_call(old_live.stream_key)
+        self.assertEqual(mock_stop_broadcast.call_count, 2)
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.stop_broadcast')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_fresh_reports_stop_warning_without_blocking(
+        self,
+        mock_ensure,
+        mock_publish_config,
+        mock_stop_broadcast,
+    ):
+        user = self.authenticate(email='quick-fresh-warning@example.com')
+        old_stream = LiveStream.objects.create(owner=user, title='Old stream', status=LiveStream.STATUS_IDLE)
+        mock_stop_broadcast.return_value = {
+            'ok': False,
+            'warning': 'ant_media_stop_failed',
+            'message': 'Live stream ended in Django, but Ant Media stop failed.',
+        }
+        mock_ensure.return_value = {'ok': True, 'stream_id': 'fresh-warning-stream-id', 'reused': False}
+        mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': 'fresh-warning-stream-id'}}
+
+        response = self.client.post(f"{reverse('live-stream-quick-start')}?fresh=true", format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['ended_stream_ids'], [old_stream.id])
+        self.assertEqual(response.data['ant_media_stop_warnings'][0]['live_stream_id'], old_stream.id)
+        self.assertEqual(response.data['ant_media_stop_warnings'][0]['warning'], 'ant_media_stop_failed')
+        old_stream.refresh_from_db()
+        self.assertEqual(old_stream.status, LiveStream.STATUS_ENDED)
+
     @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
     def test_quick_start_ensure_broadcast_failure_keeps_live_stream(self, mock_ensure):
         user = self.authenticate(email='quick-ensure-fail@example.com')
@@ -3839,6 +3907,140 @@ class ManualMembershipChainVerifierTestCase(APITestCase):
         service = ManualMembershipChainVerifier(daemon_client=daemon)
         result = service.verify(txid=txid, plan=plan or self.create_plan())
         return result, daemon
+
+    def test_verified_payment_uses_only_chain_output_amount_and_address(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-ok',
+            'confirmations': 3,
+            'outputs': [
+                {'nout': 0, 'address': 'bOtherAddress001', 'amount': '99.00000000'},
+                {'nout': 1, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'},
+            ],
+        }
+
+        result, daemon = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-ok')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['reason'], 'ok')
+        self.assertEqual(result['txid'], 'manual-tx-ok')
+        self.assertEqual(result['confirmations'], 3)
+        self.assertEqual(result['required_confirmations'], 2)
+        self.assertEqual(result['expected_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+        self.assertEqual(result['raw_tx'], tx_payload)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-ok'])
+
+    def test_multiple_matching_outputs_are_summed(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-split',
+            'confirmations': 2,
+            'outputs': [
+                {'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '4.00000000'},
+                {'nout': 1, 'addresses': ['bManualPlatformAddress001'], 'amount_lbc': '6.00000000'},
+            ],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-split')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+
+    def test_pending_confirmation_is_not_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-pending',
+            'confirmations': 1,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-pending')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'pending_confirmation')
+        self.assertEqual(result['confirmations'], 1)
+
+    def test_insufficient_amount_returns_chain_amount(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-under',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '9.99000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-under')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'insufficient_amount')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('9.99000000'))
+
+    def test_no_matching_platform_output_is_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-wrong-address',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bAttackerAddress001', 'amount': '100.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-wrong-address')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'no_matching_output')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('0'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='')
+    def test_receive_address_must_be_configured(self):
+        plan = self.create_plan(price='10.00000000')
+        result, daemon = self.verify(plan=plan, tx_payload={'outputs': []}, txid='manual-tx-config')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'receive_address_not_configured')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, [])
+
+    def test_chain_lookup_failure_returns_reason_without_raising(self):
+        plan = self.create_plan(price='10.00000000')
+
+        result, daemon = self.verify(plan=plan, error=LbryDaemonError('daemon down'), txid='manual-tx-error')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'chain_lookup_failed')
+        self.assertEqual(result['txid'], 'manual-tx-error')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-error'])
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    MEMBERSHIP_ORDER_EXPIRE_MINUTES=45,
+)
+class MembershipAPITestCase(APITestCase):
+    def create_user(self, email='member@example.com'):
+        return User.objects.create_user(email=email, password='strong-pass-123', first_name='Mem', last_name='Ber')
+
+    def setUp(self):
+        self.plan = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_MONTHLY,
+            name='Monthly',
+            description='Monthly plan',
+            price_lbc='12.50000000',
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def test_membership_plan_list(self):
+        response = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['code'], MembershipPlan.CODE_MONTHLY)
+        self.assertEqual(response.data[0]['settlement']['blockchain'], BLOCKCHAIN_NAME)
+        self.assertEqual(response.data[0]['settlement']['token_name'], TOKEN_NAME)
+        self.assertEqual(response.data[0]['settlement']['token_symbol'], TOKEN_SYMBOL)
+        self.assertEqual(response.data[0]['settlement']['token_peg'], TOKEN_PEG)
 
     def test_verified_payment_uses_only_chain_output_amount_and_address(self):
         plan = self.create_plan(price='10.00000000')

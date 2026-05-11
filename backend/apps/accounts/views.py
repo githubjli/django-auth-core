@@ -1527,15 +1527,48 @@ class LiveStreamQuickStartAPIView(APIView):
         if visibility not in valid_visibilities:
             return Response({'visibility': ['Invalid visibility.']}, status=status.HTTP_400_BAD_REQUEST)
 
-        stream = (
-            LiveStream.objects.filter(
-                owner=request.user,
-                status__in=[LiveStream.STATUS_IDLE, LiveStream.STATUS_READY, LiveStream.STATUS_LIVE],
+        adapter = AntMediaLiveAdapter()
+        reusable_statuses = [LiveStream.STATUS_IDLE, LiveStream.STATUS_READY, LiveStream.STATUS_LIVE]
+        fresh = request.query_params.get('fresh') == 'true'
+        ended_stream_ids = []
+        ant_media_stop_warnings = []
+
+        if fresh:
+            stale_streams = list(
+                LiveStream.objects.filter(
+                    owner=request.user,
+                    status__in=reusable_statuses,
+                )
+                .select_related('category', 'owner')
+                .order_by('-created_at', '-id')
             )
-            .select_related('category', 'owner')
-            .order_by('-created_at', '-id')
-            .first()
-        )
+            now = timezone.now()
+            for stale_stream in stale_streams:
+                stop_result = adapter.stop_broadcast(stale_stream.stream_key)
+                if not stop_result.get('ok'):
+                    ant_media_stop_warnings.append(
+                        {
+                            'live_stream_id': stale_stream.id,
+                            'warning': stop_result.get('warning') or 'ant_media_stop_failed',
+                            'message': stop_result.get('message'),
+                        }
+                    )
+                stale_stream.status = LiveStream.STATUS_ENDED
+                stale_stream.ended_at = now
+                stale_stream.ant_media_no_signal_count = 0
+                stale_stream.save(update_fields=['status', 'ended_at', 'ant_media_no_signal_count'])
+                ended_stream_ids.append(stale_stream.id)
+            stream = None
+        else:
+            stream = (
+                LiveStream.objects.filter(
+                    owner=request.user,
+                    status__in=reusable_statuses,
+                )
+                .select_related('category', 'owner')
+                .order_by('-created_at', '-id')
+                .first()
+            )
         reused = stream is not None
         if stream is None:
             title = (request.data.get('title') or '').strip() or f"{request.user.display_name}'s Live"
@@ -1549,7 +1582,6 @@ class LiveStreamQuickStartAPIView(APIView):
                 category=category,
             )
 
-        adapter = AntMediaLiveAdapter()
         ensure_result = adapter.ensure_broadcast(stream)
         if not ensure_result.get('ok'):
             return publish_config_error_response(
@@ -1571,14 +1603,20 @@ class LiveStreamQuickStartAPIView(APIView):
                 message=publish_config.get('message'),
             )
 
+        response_payload = {
+            'reused': reused,
+            'ant_media_reused': bool(ensure_result.get('reused', False)),
+            'live': self._live_payload(stream, request),
+            'publish_config': publish_config,
+            'next_action': 'start_stream',
+        }
+        if fresh:
+            response_payload['fresh'] = True
+            response_payload['ended_stream_ids'] = ended_stream_ids
+            if ant_media_stop_warnings:
+                response_payload['ant_media_stop_warnings'] = ant_media_stop_warnings
         return Response(
-            {
-                'reused': reused,
-                'ant_media_reused': bool(ensure_result.get('reused', False)),
-                'live': self._live_payload(stream, request),
-                'publish_config': publish_config,
-                'next_action': 'start_stream',
-            },
+            response_payload,
             status=status.HTTP_200_OK if reused else status.HTTP_201_CREATED,
         )
 
