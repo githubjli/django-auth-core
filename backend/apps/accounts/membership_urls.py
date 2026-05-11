@@ -1,6 +1,9 @@
 from django.urls import path
 
 from apps.accounts.views import (
+    ManualMembershipPaymentInfoAPIView,
+    ManualMembershipTxHintListAPIView,
+    ManualMembershipTxHintVerifyNowAPIView,
     MembershipMeAPIView,
     MembershipOrderCreateAPIView,
     MembershipOrderDetailAPIView,
@@ -11,6 +14,9 @@ from apps.accounts.views import (
 
 urlpatterns = [
     path('plans/', MembershipPlanListAPIView.as_view(), name='membership-plan-list'),
+    path('manual/payment-info/', ManualMembershipPaymentInfoAPIView.as_view(), name='manual-membership-payment-info'),
+    path('manual/tx-hints/', ManualMembershipTxHintListAPIView.as_view(), name='manual-membership-tx-hints'),
+    path('manual/tx-hints/<int:pk>/verify-now/', ManualMembershipTxHintVerifyNowAPIView.as_view(), name='manual-membership-tx-hint-verify-now'),
     path('orders/', MembershipOrderCreateAPIView.as_view(), name='membership-order-create'),
     path('orders/<str:order_no>/', MembershipOrderDetailAPIView.as_view(), name='membership-order-detail'),
     path('orders/<str:order_no>/tx-hint/', MembershipOrderTxHintAPIView.as_view(), name='membership-order-tx-hint'),

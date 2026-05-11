@@ -61,20 +61,38 @@ class AntMediaLiveAdapter:
         'broadcasting': LiveStream.STATUS_LIVE,
         'finished': LiveStream.STATUS_ENDED,
     }
+    WAITING_STATUSES = {None, '', 'created', 'preparing'}
 
-    def normalize_stream_fields(self, stream: LiveStream) -> dict:
-        sync = self._fetch_broadcast_payload(stream.stream_key)
+    def normalize_stream_fields(
+        self,
+        stream: LiveStream,
+        *,
+        persist_no_signal: bool = False,
+        require_sync_enabled: bool = True,
+    ) -> dict:
+        sync = self._fetch_broadcast_payload(
+            stream.stream_key,
+            require_sync_enabled=require_sync_enabled,
+        )
         payload = sync.get('payload')
         ant_status = payload.get('status') if payload else None
-        mapped_status = self.STATUS_MAP.get(ant_status)
 
         django_status = stream.status
-        effective_status = self._normalize_status(django_status, ant_status)
-        status_source = 'ant_media' if ant_status is not None else 'django_control'
+        effective_status = self._normalize_status(django_status, ant_status, sync_ok=sync.get('sync_ok', False))
+        status_source = 'ant_media' if sync.get('sync_ok') else 'django_control'
+        no_signal_count = stream.ant_media_no_signal_count
+        should_end = False
+
+        if persist_no_signal and sync.get('sync_ok'):
+            no_signal_count = self._sync_no_signal_count(stream, ant_status)
+        threshold = getattr(settings, 'ANT_MEDIA_NO_SIGNAL_END_THRESHOLD', 3)
+        if django_status == LiveStream.STATUS_LIVE and effective_status != LiveStream.STATUS_LIVE:
+            should_end = no_signal_count >= threshold
 
         return {
             'status': effective_status,
             'django_status': django_status,
+            'ant_media_status': ant_status,
             'effective_status': effective_status,
             'status_source': status_source,
             'raw_ant_media_status': ant_status,
@@ -93,7 +111,20 @@ class AntMediaLiveAdapter:
             ),
             'can_start': effective_status != LiveStream.STATUS_LIVE,
             'can_end': effective_status != LiveStream.STATUS_ENDED,
+            'no_signal_count': no_signal_count,
+            'should_end': should_end,
         }
+
+    def get_broadcast_status(self, stream_key: str) -> dict:
+        sync = self._fetch_broadcast_payload(stream_key, require_sync_enabled=False)
+        ant_status = (sync.get('payload') or {}).get('status') if sync.get('sync_ok') else None
+        sync['ant_media_status'] = ant_status
+        sync['effective_status'] = self._normalize_status(
+            LiveStream.STATUS_IDLE,
+            ant_status,
+            sync_ok=sync.get('sync_ok', False),
+        )
+        return sync
 
     def get_browser_publish_config(self, stream: LiveStream) -> dict:
         stream_id = stream.stream_key
@@ -177,18 +208,57 @@ class AntMediaLiveAdapter:
         stream_id = response_payload.get('streamId') or stream.stream_key
         return {'ok': True, 'stream_id': stream_id}
 
-    def _normalize_status(self, db_status: str, ant_status: str | None) -> str:
-        if ant_status is not None:
+    def stop_broadcast(self, stream_key: str) -> dict:
+        if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
+            return {
+                'ok': False,
+                'warning': 'ant_media_not_configured',
+                'message': 'Ant Media REST app is not configured.',
+            }
+        endpoint = (
+            f"{settings.ANT_MEDIA_BASE_URL}/"
+            f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}/stop"
+        )
+        request_obj = urllib_request.Request(endpoint, data=b'', method='POST')
+        try:
+            with urllib_request.urlopen(request_obj, timeout=3) as response:
+                response_body = response.read().decode('utf-8')
+                status_code = getattr(response, 'status', response.getcode())
+        except (error.URLError, TimeoutError) as exc:
+            logger.warning('ant_media stop_broadcast failed stream_key=%s error=%s', stream_key, exc)
+            return {
+                'ok': False,
+                'warning': 'ant_media_stop_failed',
+                'message': 'Live stream ended in Django, but Ant Media stop failed.',
+            }
+        return {'ok': 200 <= status_code < 300, 'status_code': status_code, 'body': response_body}
+
+    def _normalize_status(self, db_status: str, ant_status: str | None, *, sync_ok: bool) -> str:
+        if sync_ok:
             if ant_status == 'broadcasting':
                 return LiveStream.STATUS_LIVE
             if ant_status == 'finished':
                 return LiveStream.STATUS_ENDED
+            if ant_status in self.WAITING_STATUSES or ant_status == 'no_signal':
+                return 'waiting_for_signal'
             return 'waiting_for_signal'
         if db_status == LiveStream.STATUS_LIVE:
             return LiveStream.STATUS_LIVE
         if db_status == LiveStream.STATUS_ENDED:
             return LiveStream.STATUS_ENDED
         return 'ready'
+
+    def _sync_no_signal_count(self, stream: LiveStream, ant_status: str | None) -> int:
+        if stream.status != LiveStream.STATUS_LIVE:
+            if stream.ant_media_no_signal_count != 0:
+                stream.ant_media_no_signal_count = 0
+                stream.save(update_fields=['ant_media_no_signal_count'])
+            return 0
+        next_count = 0 if ant_status == 'broadcasting' else stream.ant_media_no_signal_count + 1
+        if next_count != stream.ant_media_no_signal_count:
+            stream.ant_media_no_signal_count = next_count
+            stream.save(update_fields=['ant_media_no_signal_count'])
+        return next_count
 
     def _normalize_viewer_count(self, payload: dict | None, fallback: int) -> int:
         if not payload:
@@ -207,8 +277,8 @@ class AntMediaLiveAdapter:
                 continue
         return total if has_metric else fallback
 
-    def _fetch_broadcast_payload(self, stream_key: str) -> dict:
-        if not settings.ANT_MEDIA_SYNC_STATUS:
+    def _fetch_broadcast_payload(self, stream_key: str, *, require_sync_enabled: bool = True) -> dict:
+        if require_sync_enabled and not settings.ANT_MEDIA_SYNC_STATUS:
             return {'payload': None, 'sync_ok': False, 'sync_error': 'sync_disabled'}
         if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
             return {'payload': None, 'sync_ok': False, 'sync_error': 'ant_media_not_configured'}
@@ -264,10 +334,11 @@ class AntMediaLiveAdapter:
         if not base_url or not app_name:
             return None
         parsed = urlparse(base_url)
-        if parsed.scheme not in {'http', 'https', 'ws', 'wss'} or not parsed.netloc:
+        scheme = 'wss' if parsed.scheme == 'https' else 'ws'
+        netloc = parsed.netloc or parsed.path
+        if not netloc:
             return None
-        scheme = {'http': 'ws', 'https': 'wss'}.get(parsed.scheme, parsed.scheme)
-        return f'{scheme}://{parsed.netloc}/{app_name}/websocket'
+        return f"{scheme}://{netloc}/{app_name}/websocket"
 
     def _get_adaptor_script_url(self) -> str | None:
         explicit = getattr(settings, 'ANT_MEDIA_ADAPTOR_SCRIPT_URL', '')
@@ -277,7 +348,7 @@ class AntMediaLiveAdapter:
         app_name = settings.ANT_MEDIA_APP_NAME or ''
         if not base_url or not app_name:
             return None
-        return f'{base_url}/{app_name}/js/webrtc_adaptor.js'
+        return f"{base_url}/{app_name}/js/webrtc_adaptor.js"
 
 
 class LbryDaemonError(RuntimeError):
@@ -640,6 +711,113 @@ class MembershipOrderService:
             if not PaymentOrder.objects.filter(order_no=candidate).exists():
                 return candidate
         raise LbryDaemonError('Unable to generate unique membership order number.')
+
+
+class ManualMembershipChainVerifier:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client
+
+    def verify(self, *, txid: str, plan: MembershipPlan) -> dict:
+        txid_value = (txid or '').strip()
+        platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        required_confirmations = int(settings.LBC_MIN_CONFIRMATIONS)
+        expected_amount = Decimal(str(plan.price_lbc))
+
+        base_result = {
+            'ok': False,
+            'reason': '',
+            'txid': txid_value,
+            'confirmations': 0,
+            'required_confirmations': required_confirmations,
+            'expected_amount_lbc': expected_amount,
+            'actual_amount_lbc': Decimal('0'),
+            'pay_to_address': platform_receive_address,
+            'raw_tx': None,
+        }
+
+        if not txid_value:
+            return {**base_result, 'reason': 'txid_required'}
+        if not platform_receive_address:
+            return {**base_result, 'reason': 'receive_address_not_configured'}
+
+        try:
+            daemon_client = self.daemon_client or self.daemon_client_class()
+            tx_detail = daemon_client.transaction_show(txid_value)
+            if not isinstance(tx_detail, dict):
+                raise LbryDaemonError('Unexpected transaction_show response from LBRY daemon.')
+        except Exception as exc:
+            logger.warning('manual_membership_chain_lookup_failed txid=%s error=%s', txid_value, exc)
+            return {**base_result, 'reason': 'chain_lookup_failed'}
+
+        confirmations = self._extract_confirmations(tx_detail)
+        matching_amount = Decimal('0')
+        matched_address = ''
+        for output in self._extract_outputs(tx_detail):
+            address = (output.get('address') or '').strip()
+            if address != platform_receive_address:
+                continue
+            amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+            if amount is None:
+                continue
+            matching_amount += amount
+            matched_address = address
+
+        result = {
+            **base_result,
+            'confirmations': confirmations,
+            'actual_amount_lbc': matching_amount,
+            'pay_to_address': matched_address or platform_receive_address,
+            'raw_tx': tx_detail,
+        }
+
+        if matching_amount <= 0:
+            return {**result, 'reason': 'no_matching_output'}
+        if matching_amount < expected_amount:
+            return {**result, 'reason': 'insufficient_amount'}
+        if confirmations < required_confirmations:
+            return {**result, 'reason': 'pending_confirmation'}
+        return {**result, 'ok': True, 'reason': 'ok'}
+
+    def _extract_outputs(self, tx_detail: dict) -> list[dict]:
+        outputs = tx_detail.get('outputs')
+        if not isinstance(outputs, list):
+            return []
+        parsed_outputs = []
+        for index, output in enumerate(outputs):
+            if not isinstance(output, dict):
+                continue
+            address = output.get('address')
+            if not address:
+                addresses = output.get('addresses')
+                if isinstance(addresses, list) and addresses:
+                    address = addresses[0]
+            parsed_outputs.append(
+                {
+                    'address': address,
+                    'amount': output.get('amount'),
+                    'amount_lbc': output.get('amount_lbc'),
+                    'vout': output.get('vout'),
+                    'nout': output.get('nout', index),
+                }
+            )
+        return parsed_outputs
+
+    def _extract_confirmations(self, tx_detail: dict) -> int:
+        value = tx_detail.get('confirmations')
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
 
 
 class MembershipActivationService:
