@@ -2,6 +2,7 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -14,6 +15,7 @@ from apps.accounts.models import (
     MembershipPlan,
     Category,
     ChannelSubscription,
+    GiftTransaction,
     LiveChatMessage,
     LiveChatRoom,
     LiveStream,
@@ -403,6 +405,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'like_count',
             'comment_count',
             'view_count',
+            'share_count',
             'is_liked',
             'file',
             'file_url',
@@ -423,6 +426,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'like_count',
             'comment_count',
             'view_count',
+            'share_count',
             'is_liked',
             'file_url',
             'thumbnail_url',
@@ -1719,6 +1723,11 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     video_id = serializers.IntegerField(source='id', read_only=True)
     like_count = serializers.IntegerField(read_only=True)
     comment_count = serializers.IntegerField(read_only=True)
+    view_count = serializers.SerializerMethodField()
+    share_count = serializers.IntegerField(read_only=True)
+    gift_count = serializers.SerializerMethodField()
+    gift_points_total = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
     viewer_has_liked = serializers.SerializerMethodField()
     viewer_is_following = serializers.SerializerMethodField()
     follower_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
@@ -1726,6 +1735,23 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     viewer_is_subscribed = serializers.SerializerMethodField()
     channel_id = serializers.IntegerField(source='owner.id', read_only=True)
     subscriber_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
+
+    def get_view_count(self, obj):
+        prefetched = getattr(obj, 'view_count', None)
+        if prefetched is not None:
+            return prefetched
+        return obj.views.count()
+
+    def get_gift_count(self, obj):
+        value = GiftTransaction.objects.filter(video=obj).aggregate(total=Sum('quantity')).get('total')
+        return value or 0
+
+    def get_gift_points_total(self, obj):
+        value = GiftTransaction.objects.filter(video=obj).aggregate(total=Sum('total_points')).get('total')
+        return value or 0
+
+    def get_is_liked(self, obj):
+        return self.get_viewer_has_liked(obj)
 
     def get_viewer_has_liked(self, obj):
         request = self.context.get('request')
@@ -1806,6 +1832,7 @@ class VideoMetadataSerializer(VideoSerializer):
             'like_count',
             'comment_count',
             'view_count',
+            'share_count',
             'is_liked',
             'thumbnail_url',
             'created_at',

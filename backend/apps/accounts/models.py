@@ -1,6 +1,7 @@
 import secrets
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from apps.accounts.constants import TOKEN_SYMBOL
@@ -137,6 +138,7 @@ class Video(models.Model):
     preview_seconds = models.PositiveIntegerField(default=0)
     like_count = models.PositiveIntegerField(default=0)
     comment_count = models.PositiveIntegerField(default=0)
+    share_count = models.PositiveIntegerField(default=0)
     file = models.FileField(upload_to='videos/')
     thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -369,6 +371,30 @@ class DramaUnlock(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['user', 'episode'], name='unique_drama_unlock_per_user_episode'),
         ]
+
+
+
+
+class VideoShare(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='video_shares',
+    )
+    video = models.ForeignKey(
+        Video,
+        on_delete=models.CASCADE,
+        related_name='shares',
+    )
+    channel = models.CharField(max_length=64, blank=True, default='')
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
 
 
 class VideoView(models.Model):
@@ -916,6 +942,13 @@ class GiftTransaction(models.Model):
         blank=True,
         related_name='gift_transactions',
     )
+    video = models.ForeignKey(
+        Video,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transactions',
+    )
     gift = models.ForeignKey(
         Gift,
         on_delete=models.SET_NULL,
@@ -938,6 +971,11 @@ class GiftTransaction(models.Model):
 
     class Meta:
         ordering = ['-created_at', '-id']
+
+    def clean(self):
+        super().clean()
+        if self.stream_id is None and self.video_id is None:
+            raise ValidationError('Gift transaction must be associated with a stream or video.')
 
 
 class StreamPaymentMethod(models.Model):

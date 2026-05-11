@@ -25,6 +25,7 @@ from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKE
 from apps.accounts.models import (
     ChainReceipt,
     LiveStream,
+    Video,
     Gift,
     GiftTransaction,
     MembershipPlan,
@@ -2457,6 +2458,34 @@ class GiftService:
             sender=sender,
             receiver=receiver,
             stream=stream,
+            gift=gift,
+            gift_name_snapshot=gift.name,
+            points_price_snapshot=gift.points_price,
+            quantity=quantity,
+            total_points=total_points,
+            ledger_entry=ledger_entry,
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def send_video_gift(*, sender, receiver, video: Video, gift: Gift, quantity: int) -> GiftTransaction:
+        if quantity <= 0:
+            raise ValidationError({'quantity': ['Quantity must be greater than zero.']})
+        if not gift.is_active:
+            raise ValidationError({'gift_code': ['Gift is not active.']})
+        total_points = gift.points_price * quantity
+        _wallet, ledger_entry = MeowPointService.spend_points(
+            user=sender,
+            amount=total_points,
+            entry_type=MeowPointLedger.TYPE_SPEND,
+            target_type='video_gift',
+            target_id=video.id,
+            note=f'Gift {gift.code} x{quantity} to video {video.id}',
+        )
+        return GiftTransaction.objects.create(
+            sender=sender,
+            receiver=receiver,
+            video=video,
             gift=gift,
             gift_name_snapshot=gift.name,
             points_price_snapshot=gift.points_price,

@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth import authenticate
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
@@ -22,6 +23,8 @@ from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
     Category,
+    Gift,
+    GiftTransaction,
     ChannelSubscription,
     CommentLike,
     LiveChatMessage,
@@ -43,10 +46,12 @@ from apps.accounts.models import (
     Video,
     VideoComment,
     VideoLike,
+    VideoShare,
     VideoView,
     generate_stream_key,
 )
 from apps.accounts.permissions import IsCreator, IsStaffOrSuperuser
+from apps.accounts.gift_serializers import GiftSendSerializer, GiftTransactionSerializer
 from apps.accounts.serializers import (
     AccountPasswordChangeSerializer,
     AccountPreferencesSerializer,
@@ -121,6 +126,7 @@ from apps.accounts.services import (
     WalletAddressConflictError,
     generate_video_thumbnail,
     MeowPointService,
+    GiftService,
 )
 
 User = get_user_model()
@@ -170,6 +176,13 @@ def publish_config_error_response(*, live_payload, error=None, message=None):
         },
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
+
+
+def get_client_ip(request):
+    forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip() or None
+    return request.META.get('REMOTE_ADDR') or None
 
 
 def annotate_videos_for_request(queryset, request):
@@ -1954,6 +1967,86 @@ class PublicVideoInteractionSummaryAPIView(APIView):
         )
         serializer = VideoInteractionSummarySerializer(video, context={'request': request})
         return Response(serializer.data)
+
+
+class PublicVideoShareTrackAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, pk):
+        video = generics.get_object_or_404(
+            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            pk=pk,
+        )
+        channel = (request.data.get('channel') or '').strip()[:64]
+        user = request.user if request.user.is_authenticated else None
+        VideoShare.objects.create(
+            user=user,
+            video=video,
+            channel=channel,
+            ip_address=get_client_ip(request),
+            user_agent=(request.META.get('HTTP_USER_AGENT') or '')[:1000],
+        )
+        Video.objects.filter(pk=video.pk).update(share_count=F('share_count') + 1)
+        video.refresh_from_db(fields=['share_count'])
+        return Response(
+            {
+                'video_id': video.id,
+                'share_count': video.share_count,
+                'channel': channel,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class PublicVideoGiftSendAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        video = generics.get_object_or_404(
+            Video.objects.select_related('owner').filter(visibility=Video.VISIBILITY_PUBLIC),
+            pk=pk,
+        )
+        serializer = GiftSendSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        gift = generics.get_object_or_404(Gift, code=serializer.validated_data['gift_code'])
+        cutoff = timezone.now() - timedelta(seconds=2)
+        existing_tx = (
+            GiftTransaction.objects.filter(
+                sender=request.user,
+                video=video,
+                gift=gift,
+                quantity=serializer.validated_data['quantity'],
+                created_at__gte=cutoff,
+            )
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        if existing_tx is not None:
+            response_serializer = GiftTransactionSerializer(existing_tx)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        try:
+            tx = GiftService.send_video_gift(
+                sender=request.user,
+                receiver=video.owner,
+                video=video,
+                gift=gift,
+                quantity=serializer.validated_data['quantity'],
+            )
+        except ValidationError as exc:
+            error_text = str(exc)
+            if 'Insufficient Meow Points balance.' in error_text:
+                return Response(
+                    {'code': 'insufficient_balance', 'detail': 'Insufficient Meow Points balance.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if 'Gift is not active.' in error_text:
+                return Response({'detail': 'Gift is not active.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': error_text}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_serializer = GiftTransactionSerializer(tx)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 
 class VideoLikeAPIView(APIView):
