@@ -1,8 +1,9 @@
 import shutil
 import tempfile
 import json
-from io import StringIO
-from unittest.mock import Mock, patch
+from io import BytesIO, StringIO
+from unittest.mock import MagicMock, Mock, patch
+from urllib.error import HTTPError
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -11,6 +12,7 @@ from django.core import management
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from django.test import override_settings
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone as django_timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -30,6 +32,7 @@ from apps.accounts.models import (
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    ManualMembershipPayment,
     MembershipPlan,
     OrderPayment,
     PaymentOrder,
@@ -48,8 +51,10 @@ from apps.accounts.models import (
 )
 from apps.accounts.serializers import LiveStreamSerializer
 from apps.accounts.services import (
+    AntMediaLiveAdapter,
     LbryDaemonClient,
     LbryDaemonError,
+    ManualMembershipChainVerifier,
     MembershipActivationService,
     PaymentDetectionService,
     ProductOrderService,
@@ -1525,6 +1530,11 @@ class VideoAPITestCase(APITestCase):
                 'video_id',
                 'like_count',
                 'comment_count',
+                'view_count',
+                'share_count',
+                'gift_count',
+                'gift_points_total',
+                'is_liked',
                 'viewer_has_liked',
                 'viewer_is_following',
                 'follower_count',
@@ -1535,21 +1545,90 @@ class VideoAPITestCase(APITestCase):
         )
 
     def test_creator_follow_endpoints(self):
-        creator = self.authenticate(email='creator-follow@example.com')
+        creator = self.create_user(email='creator-follow@example.com', is_creator=True)
         follower = self.create_user(email='follower@example.com')
         self.client.force_authenticate(user=follower)
 
         follow_response = self.client.post(reverse('creator-follow', args=[creator.id]))
         self.assertEqual(follow_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(follow_response.data['is_following'])
         self.assertTrue(follow_response.data['viewer_is_following'])
+        self.assertEqual(follow_response.data['subscriber_count'], 1)
         self.assertEqual(follow_response.data['follower_count'], 1)
         self.assertEqual(follow_response.data['creator_id'], creator.id)
 
+        second_follow_response = self.client.post(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(second_follow_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(second_follow_response.data['is_following'])
+        self.assertEqual(second_follow_response.data['subscriber_count'], 1)
+        self.assertEqual(ChannelSubscription.objects.filter(channel=creator, subscriber=follower).count(), 1)
+
         unfollow_response = self.client.delete(reverse('creator-follow', args=[creator.id]))
         self.assertEqual(unfollow_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(unfollow_response.data['is_following'])
         self.assertFalse(unfollow_response.data['viewer_is_following'])
+        self.assertEqual(unfollow_response.data['subscriber_count'], 0)
         self.assertEqual(unfollow_response.data['follower_count'], 0)
         self.assertEqual(unfollow_response.data['creator_id'], creator.id)
+
+        second_unfollow_response = self.client.delete(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(second_unfollow_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(second_unfollow_response.data['is_following'])
+        self.assertEqual(second_unfollow_response.data['subscriber_count'], 0)
+        creator.refresh_from_db()
+        self.assertEqual(creator.subscriber_count, ChannelSubscription.objects.filter(channel=creator).count())
+
+    def test_creator_follow_requires_authentication(self):
+        creator = self.create_user(email='creator-follow-auth@example.com', is_creator=True)
+
+        response = self.client.post(reverse('creator-follow', args=[creator.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_creator_follow_rejects_self_and_non_creator(self):
+        creator = self.create_user(email='creator-self@example.com', is_creator=True)
+        self.client.force_authenticate(user=creator)
+
+        self_response = self.client.post(reverse('creator-follow', args=[creator.id]))
+        self.assertEqual(self_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self_response.data['detail'], 'You cannot follow yourself.')
+
+        follower = self.create_user(email='creator-non-target-follower@example.com')
+        non_creator = self.create_user(email='creator-non-target@example.com', is_creator=False)
+        self.client.force_authenticate(user=follower)
+        non_creator_response = self.client.post(reverse('creator-follow', args=[non_creator.id]))
+        self.assertEqual(non_creator_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(non_creator_response.data['detail'], 'Target user is not a creator.')
+
+    def test_public_video_detail_includes_creator_follow_state(self):
+        creator = self.create_user(
+            email='creator-video-detail@example.com',
+            first_name='Creator',
+            last_name='Detail',
+            is_creator=True,
+        )
+        viewer = self.create_user(email='creator-video-viewer@example.com')
+        ChannelSubscription.objects.create(channel=creator, subscriber=viewer)
+        creator.subscriber_count = ChannelSubscription.objects.filter(channel=creator).count()
+        creator.save(update_fields=['subscriber_count'])
+        video = Video.objects.create(
+            owner=creator,
+            title='Creator video detail',
+            file=SimpleUploadedFile('creator-detail.mp4', b'video-bytes', content_type='video/mp4'),
+            visibility=Video.VISIBILITY_PUBLIC,
+        )
+
+        self.client.force_authenticate(user=viewer)
+        response = self.client.get(reverse('public-video-detail', args=[video.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_following_owner'])
+        self.assertEqual(response.data['owner_subscriber_count'], 1)
+        self.assertEqual(response.data['creator']['id'], creator.id)
+        self.assertEqual(response.data['creator']['name'], 'Creator Detail')
+        self.assertTrue(response.data['creator']['is_creator'])
+        self.assertTrue(response.data['creator']['is_following'])
+        self.assertEqual(response.data['creator']['subscriber_count'], 1)
 
     def test_public_comments_contract_fields(self):
         self.authenticate()
@@ -1779,6 +1858,267 @@ class LiveStreamAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_quick_start_requires_authentication(self):
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_non_creator_cannot_quick_start_live_stream(self):
+        non_creator = self.create_user('quick-viewer@example.com', is_creator=False)
+        self.client.force_authenticate(user=non_creator)
+
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @override_settings(ANT_MEDIA_BASE_URL='https://ant.example.com', ANT_MEDIA_REST_APP_NAME='LiveApp')
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_ensure_broadcast_reuses_existing_ant_media_broadcast(self, mock_urlopen):
+        owner = self.authenticate(email='ensure-existing@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Existing Ant stream')
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"created"}'
+        response_payload.status = 200
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        result = AntMediaLiveAdapter().ensure_broadcast(stream)
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['reused'])
+        self.assertEqual(result['stream_id'], stream.stream_key)
+        self.assertEqual(result['ant_media_status'], 'created')
+        self.assertEqual(result['message'], 'Ant Media broadcast already exists.')
+        mock_urlopen.assert_called_once_with(
+            f'https://ant.example.com/LiveApp/rest/v2/broadcasts/{stream.stream_key}',
+            timeout=2,
+        )
+
+    @override_settings(ANT_MEDIA_BASE_URL='https://ant.example.com', ANT_MEDIA_REST_APP_NAME='LiveApp')
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_ensure_broadcast_recovers_from_duplicate_create_error(self, mock_urlopen):
+        owner = self.authenticate(email='ensure-duplicate@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Duplicate Ant stream')
+        not_found = HTTPError(
+            f'https://ant.example.com/LiveApp/rest/v2/broadcasts/{stream.stream_key}',
+            404,
+            'Not Found',
+            hdrs=None,
+            fp=BytesIO(b'not found'),
+        )
+        duplicate = HTTPError(
+            'https://ant.example.com/LiveApp/rest/v2/broadcasts/create',
+            400,
+            'Bad Request',
+            hdrs=None,
+            fp=BytesIO(b'Stream id is already being used by another broadcast'),
+        )
+        existing_response = Mock()
+        existing_response.read.return_value = b'{"status":"preparing"}'
+        existing_response.status = 200
+        existing_context = MagicMock()
+        existing_context.__enter__.return_value = existing_response
+        mock_urlopen.side_effect = [not_found, duplicate, existing_context]
+
+        result = AntMediaLiveAdapter().ensure_broadcast(stream)
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['reused'])
+        self.assertEqual(result['stream_id'], stream.stream_key)
+        self.assertEqual(result['ant_media_status'], 'preparing')
+        self.assertEqual(mock_urlopen.call_count, 3)
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_creator_quick_start_creates_live_stream_with_defaults(self, mock_ensure, mock_publish_config):
+        user = self.authenticate(email='quick-creator@example.com')
+        mock_ensure.return_value = {'ok': True, 'stream_id': 'quick-stream-id', 'reused': False}
+        mock_publish_config.return_value = {
+            'ok': True,
+            'config': {
+                'websocket_url': 'wss://media.example/live/websocket',
+                'adaptor_script_url': 'https://media.example/live/js/webrtc_adaptor.js',
+                'stream_id': 'quick-stream-id',
+                'app_name': 'live',
+                'publish_mode': 'webrtc',
+            },
+        }
+
+        response = self.client.post(reverse('live-stream-quick-start'), {'title': '   '}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data['reused'])
+        self.assertFalse(response.data['ant_media_reused'])
+        self.assertEqual(response.data['next_action'], 'start_stream')
+        self.assertTrue(response.data['publish_config']['ok'])
+        self.assertEqual(response.data['publish_config']['config']['stream_id'], 'quick-stream-id')
+        self.assertEqual(response.data['live']['title'], f"{user.display_name}'s Live")
+        self.assertEqual(response.data['live']['status'], LiveStream.STATUS_IDLE)
+        self.assertEqual(response.data['live']['visibility'], LiveStream.VISIBILITY_PUBLIC)
+        self.assertEqual(response.data['live']['stream_key'], 'quick-stream-id')
+        self.assertTrue(response.data['live']['can_start'])
+        self.assertEqual(LiveStream.objects.filter(owner=user).count(), 1)
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_accepts_optional_fields_and_category(self, mock_ensure, mock_publish_config):
+        user = self.authenticate(email='quick-category@example.com')
+        Category.objects.update_or_create(
+            slug='entertainment',
+            defaults={
+                'name': 'Entertainment',
+                'description': 'Entertainment streams',
+                'sort_order': 5,
+                'is_active': True,
+            },
+        )
+        mock_ensure.return_value = {'ok': True}
+        mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': 'category-stream'}}
+
+        response = self.client.post(
+            reverse('live-stream-quick-start'),
+            {
+                'title': 'Jenny Live',
+                'description': 'Mobile stream',
+                'visibility': LiveStream.VISIBILITY_PUBLIC,
+                'category': 'entertainment',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        stream = LiveStream.objects.get(owner=user)
+        self.assertEqual(stream.title, 'Jenny Live')
+        self.assertEqual(stream.description, 'Mobile stream')
+        self.assertEqual(stream.category.slug, 'entertainment')
+        self.assertEqual(response.data['live']['category'], 'entertainment')
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_reuses_existing_idle_live_or_ready_stream(self, mock_ensure, mock_publish_config):
+        user = self.authenticate(email='quick-reuse@example.com')
+        LiveStream.objects.create(owner=user, title='Older idle stream', status=LiveStream.STATUS_IDLE)
+        existing = LiveStream.objects.create(owner=user, title='Existing ready stream', status=LiveStream.STATUS_READY)
+        mock_ensure.return_value = {'ok': True, 'reused': True}
+        mock_publish_config.return_value = {'ok': True, 'config': {'stream_id': existing.stream_key}}
+
+        response = self.client.post(reverse('live-stream-quick-start'), {'title': 'New ignored'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['reused'])
+        self.assertTrue(response.data['ant_media_reused'])
+        self.assertEqual(response.data['live']['id'], existing.id)
+        self.assertEqual(response.data['live']['title'], existing.title)
+        self.assertEqual(response.data['live']['status'], LiveStream.STATUS_READY)
+        self.assertEqual(response.data['next_action'], 'start_stream')
+        self.assertEqual(LiveStream.objects.filter(owner=user).count(), 2)
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_ensure_broadcast_failure_keeps_live_stream(self, mock_ensure):
+        user = self.authenticate(email='quick-ensure-fail@example.com')
+        mock_ensure.return_value = {
+            'ok': False,
+            'error': 'ant_media_create_failed',
+            'message': 'Unable to create broadcast on Ant Media.',
+        }
+
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
+        self.assertEqual(response.data['error'], 'ant_media_create_failed')
+        self.assertFalse(response.data['publish_config']['ok'])
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
+        self.assertIn('live', response.data)
+        self.assertTrue(LiveStream.objects.filter(id=response.data['live']['id'], owner=user).exists())
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_quick_start_publish_config_failure_returns_live_and_config_error(self, mock_ensure, mock_publish_config):
+        self.authenticate(email='quick-config-fail@example.com')
+        mock_ensure.return_value = {'ok': True}
+        mock_publish_config.return_value = {
+            'ok': False,
+            'error': 'ant_media_publish_config_unavailable',
+            'message': 'Ant Media publish config is unavailable.',
+        }
+
+        response = self.client.post(reverse('live-stream-quick-start'), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
+        self.assertIn('live', response.data)
+        self.assertEqual(response.data['publish_config']['error'], 'ant_media_publish_config_unavailable')
+        self.assertFalse(response.data['publish_config']['ok'])
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
+
+    def test_quick_start_rejects_unknown_category(self):
+        self.authenticate(email='quick-bad-category@example.com')
+
+        response = self.client.post(
+            reverse('live-stream-quick-start'),
+            {'category': 'missing-category'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('category', response.data)
+        self.assertEqual(LiveStream.objects.count(), 0)
+
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_APP_NAME='live',
+        ANT_MEDIA_REST_APP_NAME='live',
+    )
+    def test_live_health_check_for_creator(self):
+        self.authenticate(email='health-creator@example.com')
+
+        response = self.client.get(reverse('live-stream-health'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['ant_media_base_url_configured'])
+        self.assertEqual(response.data['ant_media_app_name'], 'live')
+        self.assertEqual(response.data['rest_app_name'], 'live')
+        self.assertTrue(response.data['websocket_url_configured'])
+        self.assertTrue(response.data['ok'])
+        self.assertEqual(
+            response.data['udp_ports_note'],
+            'Ensure UDP 50000-60000 are open for WebRTC publishing.',
+        )
+
+    @override_settings(ANT_MEDIA_BASE_URL='', ANT_MEDIA_APP_NAME='', ANT_MEDIA_REST_APP_NAME='')
+    def test_live_health_check_reports_missing_config(self):
+        staff = self.create_user('health-staff@example.com', is_staff=True)
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.get(reverse('live-stream-health'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['ant_media_base_url_configured'])
+        self.assertFalse(response.data['websocket_url_configured'])
+        self.assertFalse(response.data['ok'])
+
+    @patch('apps.accounts.views.AntMediaLiveAdapter.get_browser_publish_config')
+    @patch('apps.accounts.views.AntMediaLiveAdapter.ensure_broadcast')
+    def test_prepare_publish_config_failure_returns_mobile_error_contract(self, mock_ensure, mock_publish_config):
+        owner = self.authenticate(email='prepare-config-fail@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Prepare config fail', status=LiveStream.STATUS_IDLE)
+        mock_ensure.return_value = {'ok': True, 'stream_id': stream.stream_key}
+        mock_publish_config.return_value = {
+            'ok': False,
+            'error': 'ant_media_publish_config_unavailable',
+            'message': 'Ant Media publish config is unavailable.',
+        }
+
+        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
+        self.assertEqual(response.data['error'], 'ant_media_publish_config_unavailable')
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
+        self.assertFalse(response.data['publish_config']['ok'])
+        self.assertEqual(response.data['live']['id'], stream.id)
+
     def test_non_creator_cannot_prepare_start_or_end_even_as_owner(self):
         owner = self.create_user('noncreator-owner@example.com', is_creator=False)
         stream = LiveStream.objects.create(owner=owner, title='Owner stream')
@@ -1841,10 +2181,21 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['status_source'], 'django_control')
         self.assertEqual(detail_response.data['status'], 'ready')
         self.assertEqual(detail_response.data['stream_key'], LiveStream.objects.get(pk=stream_id).stream_key)
+        self.assertIn('publish_config', detail_response.data)
+        self.assertTrue(detail_response.data['publish_config']['ok'])
+        self.assertEqual(
+            detail_response.data['publish_config']['config']['stream_id'],
+            detail_response.data['stream_key'],
+        )
+        self.assertIn('adaptor_script_url', detail_response.data['publish_config']['config'])
         self.assertTrue(detail_response.data['watch_url'].endswith(f'/live/{stream_id}'))
         self.assertNotEqual(detail_response.data['watch_url'], detail_response.data['playback_url'])
 
-        start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.get_broadcast_status',
+            return_value={'payload': {'status': 'broadcasting'}, 'ant_media_status': 'broadcasting', 'sync_ok': True, 'sync_error': None},
+        ):
+            start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
         self.assertEqual(start_response.data['status'], 'live')
         self.assertEqual(start_response.data['django_status'], 'live')
@@ -1859,7 +2210,11 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertNotEqual(start_response.data['watch_url'], start_response.data['playback_url'])
         self.assertIsNotNone(start_response.data['started_at'])
 
-        end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.stop_broadcast',
+            return_value={'ok': True},
+        ):
+            end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(end_response.status_code, status.HTTP_200_OK)
         self.assertEqual(end_response.data['status'], 'ended')
         self.assertEqual(end_response.data['django_status'], 'ended')
@@ -1937,7 +2292,17 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(detail_response.data['owner_id'], owner.id)
         self.assertIn('owner_avatar_url', detail_response.data)
         self.assertEqual(detail_response.data['creator']['id'], owner.id)
-        self.assertEqual(detail_response.data['stream_key'], public_stream.stream_key)
+        self.assertNotIn('stream_key', detail_response.data)
+        self.assertNotIn('publish_config', detail_response.data)
+        self.assertNotIn('adaptor_script_url', detail_response.data)
+
+        self.client.force_authenticate(user=owner)
+        owner_response = self.client.get(reverse('live-stream-detail', args=[public_stream.id]))
+        self.assertEqual(owner_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(owner_response.data['stream_key'], public_stream.stream_key)
+        self.assertIn('publish_config', owner_response.data)
+        self.assertTrue(owner_response.data['publish_config']['ok'])
+        self.assertIn('adaptor_script_url', owner_response.data['publish_config']['config'])
 
     def test_live_list_and_detail_expose_creator_avatar_when_owner_has_avatar(self):
         owner = self.create_user('avatar-streamer@example.com')
@@ -2066,12 +2431,24 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
         self.assertEqual(stream.stream_key, response.data['stream_key'])
 
-    def test_non_owner_cannot_prepare_live_stream(self):
+    def test_non_owner_cannot_prepare_start_or_end_live_stream(self):
         owner = self.create_user('prepare-owner@example.com', is_creator=True)
-        stream = LiveStream.objects.create(owner=owner, title='Owner stream')
+        stream = LiveStream.objects.create(owner=owner, title='Owner stream', status=LiveStream.STATUS_IDLE)
         self.authenticate(email='prepare-other@example.com')
-        response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        prepare_response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
+        self.assertEqual(prepare_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(prepare_response.data['detail'], 'Only the live owner can perform this action.')
+
+        start_response = self.client.post(reverse('live-stream-start', args=[stream.id]), format='json')
+        self.assertEqual(start_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(start_response.data['detail'], 'Only the live owner can perform this action.')
+
+        stream.status = LiveStream.STATUS_LIVE
+        stream.save(update_fields=['status'])
+        end_response = self.client.post(reverse('live-stream-end', args=[stream.id]), format='json')
+        self.assertEqual(end_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(end_response.data['detail'], 'Only the live owner can perform this action.')
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
@@ -2115,7 +2492,10 @@ class LiveStreamAPITestCase(APITestCase):
         stream = LiveStream.objects.create(owner=owner, title='Prepare fail stream', status=LiveStream.STATUS_IDLE)
         response = self.client.post(reverse('live-stream-prepare', args=[stream.id]), format='json')
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['detail'], 'Publish config unavailable.')
         self.assertEqual(response.data['error'], 'ant_media_create_failed')
+        self.assertEqual(response.data['next_action'], 'retry_prepare')
+        self.assertIn('live', response.data)
 
     @override_settings(
         ANT_MEDIA_BASE_URL='https://ant.example.com',
@@ -2392,10 +2772,77 @@ class LiveStreamAPITestCase(APITestCase):
         self.client.force_authenticate(user=other_user)
 
         start_response = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
-        self.assertEqual(start_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(start_response.status_code, status.HTTP_403_FORBIDDEN)
 
         end_response = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
-        self.assertEqual(end_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(end_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_start_waits_for_ant_media_broadcasting(self):
+        owner = self.authenticate(email='wait-for-signal@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Waiting start', status=LiveStream.STATUS_IDLE)
+
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.get_broadcast_status',
+            return_value={'payload': {'status': 'created'}, 'ant_media_status': 'created', 'sync_ok': True, 'sync_error': None},
+        ):
+            response = self.client.post(reverse('live-stream-start', args=[stream.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['detail'], 'Stream is not publishing yet.')
+        self.assertEqual(response.data['status'], 'waiting_for_signal')
+        self.assertEqual(response.data['effective_status'], 'waiting_for_signal')
+        self.assertEqual(response.data['ant_media_status'], 'created')
+        self.assertEqual(response.data['next_action'], 'retry_status')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_IDLE)
+
+    def test_end_returns_warning_when_ant_media_stop_fails(self):
+        owner = self.authenticate(email='end-warning@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='End warning', status=LiveStream.STATUS_LIVE)
+
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.stop_broadcast',
+            return_value={
+                'ok': False,
+                'warning': 'ant_media_stop_failed',
+                'message': 'Live stream ended in Django, but Ant Media stop failed.',
+            },
+        ):
+            response = self.client.post(reverse('live-stream-end', args=[stream.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], LiveStream.STATUS_ENDED)
+        self.assertEqual(response.data['warning'], 'ant_media_stop_failed')
+        self.assertEqual(response.data['warning_detail'], 'Live stream ended in Django, but Ant Media stop failed.')
+        stream.refresh_from_db()
+        self.assertEqual(stream.status, LiveStream.STATUS_ENDED)
+
+    @override_settings(
+        ANT_MEDIA_BASE_URL='https://ant.example.com',
+        ANT_MEDIA_REST_APP_NAME='LiveApp',
+        ANT_MEDIA_SYNC_STATUS=True,
+        ANT_MEDIA_NO_SIGNAL_END_THRESHOLD=2,
+    )
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_status_sync_uses_ant_media_and_flags_repeated_no_signal(self, mock_urlopen):
+        owner = self.authenticate(email='status-sync@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Status sync', status=LiveStream.STATUS_LIVE)
+        response_payload = Mock()
+        response_payload.read.return_value = b'{"status":"created"}'
+        mock_urlopen.return_value.__enter__.return_value = response_payload
+
+        first_response = self.client.get(reverse('live-stream-status', args=[stream.id]))
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data['django_status'], LiveStream.STATUS_LIVE)
+        self.assertEqual(first_response.data['ant_media_status'], 'created')
+        self.assertEqual(first_response.data['effective_status'], 'waiting_for_signal')
+        self.assertFalse(first_response.data['should_end'])
+
+        second_response = self.client.get(reverse('live-stream-status', args=[stream.id]))
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.data['effective_status'], 'waiting_for_signal')
+        self.assertTrue(second_response.data['should_end'])
+        self.assertEqual(second_response.data['no_signal_count'], 2)
 
     def test_repeated_start_or_invalid_end_returns_conflict(self):
         self.authenticate()
@@ -2405,12 +2852,20 @@ class LiveStreamAPITestCase(APITestCase):
             format='json',
         ).data['id']
 
-        first_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.get_broadcast_status',
+            return_value={'payload': {'status': 'broadcasting'}, 'ant_media_status': 'broadcasting', 'sync_ok': True, 'sync_error': None},
+        ):
+            first_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(first_start.status_code, status.HTTP_200_OK)
         repeated_start = self.client.post(reverse('live-stream-start', args=[stream_id]), format='json')
         self.assertEqual(repeated_start.status_code, status.HTTP_409_CONFLICT)
 
-        first_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
+        with patch(
+            'apps.accounts.views.AntMediaLiveAdapter.stop_broadcast',
+            return_value={'ok': True},
+        ):
+            first_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(first_end.status_code, status.HTTP_200_OK)
         repeated_end = self.client.post(reverse('live-stream-end', args=[stream_id]), format='json')
         self.assertEqual(repeated_end.status_code, status.HTTP_409_CONFLICT)
@@ -2734,6 +3189,59 @@ class LiveChatAPITestCase(APITestCase):
         get_response = self.client.get(reverse('live-chat-messages', args=[stream.id]))
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
         self.assertEqual(get_response.data, {'results': [], 'next_after_id': None})
+
+
+    def test_unauthenticated_user_cannot_send_chat(self):
+        owner = self.create_user('chat-auth-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Auth chat stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'blocked'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_chat_blocked_when_live_stream_has_ended(self):
+        owner = self.create_user('chat-ended-owner@example.com')
+        viewer = self.create_user('chat-ended-viewer@example.com')
+        stream = LiveStream.objects.create(
+            owner=owner,
+            title='Ended chat stream',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+            status=LiveStream.STATUS_ENDED,
+        )
+        self.client.force_authenticate(user=viewer)
+
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'too late'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'detail': 'Live stream has ended.'})
+
+    def test_chat_two_second_debounce(self):
+        owner = self.create_user('chat-debounce-owner@example.com')
+        viewer = self.create_user('chat-debounce-viewer@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Debounce chat stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        self.client.force_authenticate(user=viewer)
+
+        first_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'first'},
+            format='json',
+        )
+        second_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': 'text', 'content': 'second'},
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
     def test_message_validation(self):
         owner = self.create_user('chat-validation-owner@example.com')
@@ -3238,6 +3746,146 @@ class LbryDaemonClientTestCase(APITestCase):
 
 @override_settings(
     LBRY_DAEMON_URL='http://127.0.0.1:5279',
+    LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPlatformAddress001',
+    LBC_MIN_CONFIRMATIONS=2,
+)
+class ManualMembershipChainVerifierTestCase(APITestCase):
+    class FakeDaemonClient:
+        def __init__(self, tx_payload=None, error=None):
+            self.tx_payload = tx_payload or {}
+            self.error = error
+            self.seen_txids = []
+
+        def transaction_show(self, txid):
+            self.seen_txids.append(txid)
+            if self.error is not None:
+                raise self.error
+            return self.tx_payload
+
+    def create_plan(self, price='10.00000000'):
+        return MembershipPlan.objects.create(
+            code=f'manual-{MembershipPlan.objects.count() + 1}',
+            name='Manual plan',
+            description='Manual verifier plan',
+            price_lbc=price,
+            duration_days=30,
+            is_active=True,
+            sort_order=1,
+        )
+
+    def verify(self, *, plan=None, tx_payload=None, error=None, txid='manual-tx-001'):
+        daemon = self.FakeDaemonClient(tx_payload=tx_payload, error=error)
+        service = ManualMembershipChainVerifier(daemon_client=daemon)
+        result = service.verify(txid=txid, plan=plan or self.create_plan())
+        return result, daemon
+
+    def test_verified_payment_uses_only_chain_output_amount_and_address(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-ok',
+            'confirmations': 3,
+            'outputs': [
+                {'nout': 0, 'address': 'bOtherAddress001', 'amount': '99.00000000'},
+                {'nout': 1, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'},
+            ],
+        }
+
+        result, daemon = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-ok')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['reason'], 'ok')
+        self.assertEqual(result['txid'], 'manual-tx-ok')
+        self.assertEqual(result['confirmations'], 3)
+        self.assertEqual(result['required_confirmations'], 2)
+        self.assertEqual(result['expected_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+        self.assertEqual(result['raw_tx'], tx_payload)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-ok'])
+
+    def test_multiple_matching_outputs_are_summed(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-split',
+            'confirmations': 2,
+            'outputs': [
+                {'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '4.00000000'},
+                {'nout': 1, 'addresses': ['bManualPlatformAddress001'], 'amount_lbc': '6.00000000'},
+            ],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-split')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['actual_amount_lbc'], Decimal('10.00000000'))
+
+    def test_pending_confirmation_is_not_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-pending',
+            'confirmations': 1,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '10.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-pending')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'pending_confirmation')
+        self.assertEqual(result['confirmations'], 1)
+
+    def test_insufficient_amount_returns_chain_amount(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-under',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bManualPlatformAddress001', 'amount': '9.99000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-under')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'insufficient_amount')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('9.99000000'))
+
+    def test_no_matching_platform_output_is_rejected(self):
+        plan = self.create_plan(price='10.00000000')
+        tx_payload = {
+            'txid': 'manual-tx-wrong-address',
+            'confirmations': 3,
+            'outputs': [{'nout': 0, 'address': 'bAttackerAddress001', 'amount': '100.00000000'}],
+        }
+
+        result, _ = self.verify(plan=plan, tx_payload=tx_payload, txid='manual-tx-wrong-address')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'no_matching_output')
+        self.assertEqual(result['actual_amount_lbc'], Decimal('0'))
+        self.assertEqual(result['pay_to_address'], 'bManualPlatformAddress001')
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='')
+    def test_receive_address_must_be_configured(self):
+        plan = self.create_plan(price='10.00000000')
+        result, daemon = self.verify(plan=plan, tx_payload={'outputs': []}, txid='manual-tx-config')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'receive_address_not_configured')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, [])
+
+    def test_chain_lookup_failure_returns_reason_without_raising(self):
+        plan = self.create_plan(price='10.00000000')
+
+        result, daemon = self.verify(plan=plan, error=LbryDaemonError('daemon down'), txid='manual-tx-error')
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'chain_lookup_failed')
+        self.assertEqual(result['txid'], 'manual-tx-error')
+        self.assertEqual(result['raw_tx'], None)
+        self.assertEqual(daemon.seen_txids, ['manual-tx-error'])
+
+
+@override_settings(
+    LBRY_DAEMON_URL='http://127.0.0.1:5279',
     MEMBERSHIP_ORDER_EXPIRE_MINUTES=45,
 )
 class MembershipAPITestCase(APITestCase):
@@ -3283,6 +3931,794 @@ class MembershipAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('plan_code', response.data)
+
+    def test_manual_payment_info_requires_authentication(self):
+        response = self.client.get(
+            reverse('manual-membership-payment-info'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(
+        LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPaymentAddress001',
+        LBC_MIN_CONFIRMATIONS=3,
+    )
+    def test_manual_payment_info_returns_read_only_plan_payment_details_without_order(self):
+        user = self.create_user('manual-info@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get(
+            reverse('manual-membership-payment-info'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            set(response.data.keys()),
+            {
+                'plan_code',
+                'plan_name',
+                'expected_amount_lbc',
+                'currency',
+                'pay_to_address',
+                'required_confirmations',
+                'notice',
+                'has_active_membership',
+                'current_membership',
+                'purchase_mode',
+                'is_renewal',
+                'is_plan_change',
+                'estimated_new_starts_at',
+                'estimated_new_ends_at',
+            },
+        )
+        self.assertEqual(response.data['purchase_mode'], 'new')
+        self.assertFalse(response.data['has_active_membership'])
+        self.assertIsNone(response.data['current_membership'])
+        self.assertFalse(response.data['is_renewal'])
+        self.assertFalse(response.data['is_plan_change'])
+        self.assertEqual(response.data['plan_code'], MembershipPlan.CODE_MONTHLY)
+        self.assertEqual(response.data['plan_name'], self.plan.name)
+        self.assertEqual(response.data['expected_amount_lbc'], '12.50000000')
+        self.assertEqual(response.data['currency'], 'LBC')
+        self.assertEqual(response.data['pay_to_address'], 'bManualPaymentAddress001')
+        self.assertEqual(response.data['required_confirmations'], 3)
+        self.assertEqual(PaymentOrder.objects.count(), 0)
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPaymentAddress001')
+    def test_manual_payment_info_with_same_plan_membership_is_renewal(self):
+        user = self.create_user('manual-info-renewal@example.com')
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MORENEWALINFO',
+        )
+        starts_at = django_timezone.now().replace(microsecond=0) - timedelta(days=5)
+        ends_at = django_timezone.now().replace(microsecond=0) + timedelta(days=25)
+        UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=starts_at,
+            ends_at=ends_at,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('manual-membership-payment-info'), {'plan_code': self.plan.code})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['has_active_membership'])
+        self.assertEqual(response.data['purchase_mode'], 'renewal')
+        self.assertTrue(response.data['is_renewal'])
+        self.assertFalse(response.data['is_plan_change'])
+        self.assertEqual(response.data['current_membership']['plan_code'], self.plan.code)
+        estimated_starts_value = response.data['estimated_new_starts_at']
+        estimated_ends_value = response.data['estimated_new_ends_at']
+        estimated_starts = parse_datetime(estimated_starts_value) if isinstance(estimated_starts_value, str) else estimated_starts_value
+        estimated_ends = parse_datetime(estimated_ends_value) if isinstance(estimated_ends_value, str) else estimated_ends_value
+        self.assertEqual(estimated_starts, ends_at)
+        self.assertEqual(estimated_ends, ends_at + timedelta(days=self.plan.duration_days))
+
+    @override_settings(LBRY_PLATFORM_RECEIVE_ADDRESS='bManualPaymentAddress001')
+    def test_manual_payment_info_with_different_plan_membership_is_plan_change(self):
+        user = self.create_user('manual-info-plan-change@example.com')
+        yearly = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_YEARLY,
+            name='Yearly',
+            description='Yearly plan',
+            price_lbc='120.00000000',
+            duration_days=365,
+            is_active=True,
+            sort_order=2,
+        )
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOPLANCHANGEINFO',
+        )
+        ends_at = django_timezone.now().replace(microsecond=0) + timedelta(days=20)
+        UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=10),
+            ends_at=ends_at,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('manual-membership-payment-info'), {'plan_code': yearly.code})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['purchase_mode'], 'plan_change')
+        self.assertFalse(response.data['is_renewal'])
+        self.assertTrue(response.data['is_plan_change'])
+        estimated_starts_value = response.data['estimated_new_starts_at']
+        estimated_ends_value = response.data['estimated_new_ends_at']
+        estimated_starts = parse_datetime(estimated_starts_value) if isinstance(estimated_starts_value, str) else estimated_starts_value
+        estimated_ends = parse_datetime(estimated_ends_value) if isinstance(estimated_ends_value, str) else estimated_ends_value
+        self.assertEqual(estimated_starts, ends_at)
+        self.assertEqual(estimated_ends, ends_at + timedelta(days=yearly.duration_days))
+
+    def test_manual_tx_hints_requires_authentication(self):
+        response = self.client.get(reverse('manual-membership-tx-hints'))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_manual_tx_hints_returns_current_user_recent_50(self):
+        user = self.create_user('manual-hints@example.com')
+        other_user = self.create_user('manual-hints-other@example.com')
+        for index in range(55):
+            ManualMembershipPayment.objects.create(
+                user=user,
+                plan=self.plan,
+                txid=f'user-manual-tx-{index:02d}',
+                expected_amount_lbc=self.plan.price_lbc,
+                actual_amount_lbc='12.50000000',
+                pay_to_address='bManualPaymentAddress001',
+                confirmations=index,
+                status=ManualMembershipPayment.STATUS_PENDING,
+            )
+        ManualMembershipPayment.objects.create(
+            user=other_user,
+            plan=self.plan,
+            txid='other-user-manual-tx',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=99,
+            status=ManualMembershipPayment.STATUS_VERIFIED,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('manual-membership-tx-hints'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 50)
+        self.assertEqual(response.data[0]['txid'], 'user-manual-tx-54')
+        self.assertEqual(response.data[-1]['txid'], 'user-manual-tx-05')
+        self.assertNotIn('raw_tx', response.data[0])
+        self.assertNotIn('other-user-manual-tx', [item['txid'] for item in response.data])
+
+    def test_manual_tx_hint_submit_requires_authentication(self):
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-auth'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_creates_dry_run_verified_payment_only(self, mock_verify):
+        user = self.create_user('manual-submit@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-submit-ok',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-ok', 'outputs': []},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-ok'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mock_verify.assert_called_once_with(txid='manual-submit-ok', plan=self.plan)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-ok')
+        self.assertEqual(payment.user_id, user.id)
+        self.assertEqual(payment.plan_id, self.plan.id)
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED)
+        self.assertIsNone(payment.payment_order_id)
+        self.assertIsNone(payment.membership_id)
+        self.assertEqual(PaymentOrder.objects.count(), 0)
+        self.assertEqual(UserMembership.objects.count(), 0)
+        self.assertEqual(response.data['payment']['status'], ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED)
+        self.assertEqual(response.data['verification']['reason'], 'ok')
+        self.assertEqual(response.data['verification']['expected_amount_lbc'], '12.50000000')
+
+    @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_auto_activates_when_enabled(self, mock_verify):
+        user = self.create_user('manual-auto@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-submit-auto',
+            'confirmations': 4,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('13.00000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-auto', 'outputs': []},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-auto'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-auto')
+        payment_order = payment.payment_order
+        membership = payment.membership
+        self.assertIsNotNone(payment_order)
+        self.assertIsNotNone(membership)
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_VERIFIED)
+        self.assertIsNotNone(payment.verified_at)
+        self.assertEqual(payment_order.user_id, user.id)
+        self.assertEqual(payment_order.order_type, PaymentOrder.TYPE_MEMBERSHIP)
+        self.assertEqual(payment_order.target_type, 'membership_plan')
+        self.assertEqual(payment_order.target_id, self.plan.id)
+        self.assertEqual(payment_order.plan_code_snapshot, self.plan.code)
+        self.assertEqual(payment_order.plan_name_snapshot, self.plan.name)
+        self.assertEqual(payment_order.expected_amount_lbc, Decimal('12.50000000'))
+        self.assertEqual(payment_order.actual_amount_lbc, Decimal('13.00000000'))
+        self.assertEqual(payment_order.txid, 'manual-submit-auto')
+        self.assertEqual(payment_order.confirmations, 4)
+        self.assertEqual(payment_order.pay_to_address, 'bManualPaymentAddress001')
+        self.assertEqual(payment_order.status, PaymentOrder.STATUS_OVERPAID)
+        self.assertEqual(payment_order.currency, 'LBC')
+        self.assertTrue(payment_order.order_no)
+        self.assertIsNotNone(payment_order.paid_at)
+        self.assertEqual(membership.user_id, user.id)
+        self.assertEqual(membership.source_order_id, payment_order.id)
+        self.assertEqual(membership.plan_id, self.plan.id)
+        self.assertEqual(response.data['payment']['status'], ManualMembershipPayment.STATUS_VERIFIED)
+        self.assertTrue(response.data['verified'])
+        self.assertEqual(response.data['manual_payment_id'], payment.id)
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_VERIFIED)
+        self.assertEqual(response.data['purchase_mode'], 'new')
+        self.assertEqual(response.data['order_no'], payment_order.order_no)
+
+    @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_verify_now_auto_activates_pending_confirmation(self, mock_verify):
+        user = self.create_user('manual-verify-now@example.com')
+        payment = ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-verify-now-ok',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=1,
+            status=ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+            raw_tx={'txid': 'manual-verify-now-ok'},
+        )
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-verify-now-ok',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-verify-now-ok', 'outputs': []},
+        }
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(reverse('manual-membership-tx-hint-verify-now', args=[payment.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_VERIFIED)
+        self.assertIsNotNone(payment.payment_order_id)
+        self.assertIsNotNone(payment.membership_id)
+        self.assertEqual(payment.payment_order.status, PaymentOrder.STATUS_PAID)
+        self.assertEqual(payment.payment_order.txid, 'manual-verify-now-ok')
+        self.assertEqual(payment.membership.source_order_id, payment.payment_order_id)
+        self.assertEqual(response.data['payment']['status'], ManualMembershipPayment.STATUS_VERIFIED)
+        self.assertEqual(response.data['payment_order']['txid'], 'manual-verify-now-ok')
+        self.assertEqual(response.data['membership']['status'], UserMembership.STATUS_ACTIVE)
+
+    def test_manual_tx_hint_verify_now_rejects_other_users_payment(self):
+        owner = self.create_user('manual-verify-owner@example.com')
+        other = self.create_user('manual-verify-other@example.com')
+        payment = ManualMembershipPayment.objects.create(
+            user=owner,
+            plan=self.plan,
+            txid='manual-verify-other-user',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=1,
+            status=ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+        )
+
+        self.client.force_authenticate(user=other)
+        response = self.client.post(reverse('manual-membership-tx-hint-verify-now', args=[payment.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_verify_now_keeps_pending_when_confirmations_low(self, mock_verify):
+        user = self.create_user('manual-verify-pending@example.com')
+        payment = ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-verify-now-pending',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=1,
+            status=ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+        )
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'pending_confirmation',
+            'txid': 'manual-verify-now-pending',
+            'confirmations': 1,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-verify-now-pending'},
+        }
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(reverse('manual-membership-tx-hint-verify-now', args=[payment.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+        self.assertIsNone(payment.payment_order_id)
+        self.assertIsNone(payment.membership_id)
+        self.assertEqual(response.data['verification']['reason'], 'pending_confirmation')
+        self.assertFalse(response.data['verified'])
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_verify_now_rejects_when_recheck_fails(self, mock_verify):
+        user = self.create_user('manual-verify-rejected@example.com')
+        payment = ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-verify-now-rejected',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=1,
+            status=ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+        )
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'insufficient_amount',
+            'txid': 'manual-verify-now-rejected',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('1.00000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-verify-now-rejected'},
+        }
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(reverse('manual-membership-tx-hint-verify-now', args=[payment.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_REJECTED)
+        self.assertEqual(payment.reject_reason, 'insufficient_amount')
+        self.assertIsNone(payment.payment_order_id)
+        self.assertIsNone(payment.membership_id)
+
+    def test_manual_tx_hint_verify_now_verified_returns_existing_links(self):
+        user = self.create_user('manual-verify-existing@example.com')
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOVERIFYEXIST',
+            txid='manual-verify-existing',
+            confirmations=3,
+            pay_to_address='bManualPaymentAddress001',
+            paid_at=django_timezone.now(),
+        )
+        membership = UserMembership.objects.create(
+            user=user,
+            source_order=order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now(),
+            ends_at=django_timezone.now() + timedelta(days=self.plan.duration_days),
+        )
+        payment = ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-verify-existing',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc=self.plan.price_lbc,
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=3,
+            status=ManualMembershipPayment.STATUS_VERIFIED,
+            payment_order=order,
+            membership=membership,
+            verified_at=django_timezone.now(),
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(reverse('manual-membership-tx-hint-verify-now', args=[payment.id]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['payment_order']['order_no'], 'MOVERIFYEXIST')
+        self.assertEqual(response.data['membership']['status'], UserMembership.STATUS_ACTIVE)
+
+        self.assertEqual(PaymentOrder.objects.filter(txid='manual-verify-existing').count(), 1)
+        self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
+
+    def test_manual_tx_hint_submit_empty_txid_fails(self):
+        user = self.create_user('manual-empty-txid@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': '   '},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('txid', response.data)
+        self.assertEqual(ManualMembershipPayment.objects.count(), 0)
+
+    def test_manual_tx_hint_submit_missing_plan_code_fails(self):
+        user = self.create_user('manual-missing-plan@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': 'does-not-exist', 'txid': 'manual-missing-plan-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(ManualMembershipPayment.objects.count(), 0)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_chain_lookup_failure_is_failed(self, mock_verify):
+        user = self.create_user('manual-chain-fail@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'chain_lookup_failed',
+            'txid': 'manual-chain-fail-tx',
+            'confirmations': 0,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('0'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': None,
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-chain-fail-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-chain-fail-tx')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_FAILED)
+        self.assertEqual(payment.reject_reason, '')
+        self.assertIsNone(payment.payment_order_id)
+        self.assertIsNone(payment.membership_id)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_address_mismatch_is_rejected(self, mock_verify):
+        user = self.create_user('manual-address-mismatch@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'no_matching_output',
+            'txid': 'manual-address-mismatch-tx',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('0'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-address-mismatch-tx'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-address-mismatch-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-address-mismatch-tx')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_REJECTED)
+        self.assertEqual(payment.reject_reason, 'no_matching_output')
+
+    @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_exact_amount_creates_paid_order(self, mock_verify):
+        user = self.create_user('manual-exact-paid@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-exact-paid-tx',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-exact-paid-tx'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-exact-paid-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-exact-paid-tx')
+        self.assertEqual(payment.payment_order.status, PaymentOrder.STATUS_PAID)
+        self.assertEqual(payment.payment_order.actual_amount_lbc, Decimal('12.50000000'))
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_same_txid_only_one_succeeds(self, mock_verify):
+        user = self.create_user('manual-race@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'pending_confirmation',
+            'txid': 'manual-race-tx',
+            'confirmations': 1,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-race-tx'},
+        }
+
+        first_response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-race-tx'},
+            format='json',
+        )
+        second_response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-race-tx'},
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(ManualMembershipPayment.objects.filter(txid='manual-race-tx').count(), 1)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_blocks_same_user_plan_pending_payment(self, mock_verify):
+        user = self.create_user('manual-pending-block@example.com')
+        ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-existing-pending-plan',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=1,
+            status=ManualMembershipPayment.STATUS_PENDING_CONFIRMATION,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-new-pending-blocked'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data['detail'], 'A pending manual membership payment already exists.')
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+        self.assertIn('manual_payment_id', response.data)
+        mock_verify.assert_not_called()
+
+    @override_settings(MANUAL_MEMBERSHIP_AUTO_ACTIVATE=True)
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_active_membership_extends_current_end(self, mock_verify):
+        user = self.create_user('manual-active-extension@example.com')
+        existing_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOACTIVEEXTEND',
+            txid='manual-active-existing',
+            confirmations=3,
+            pay_to_address='bManualPaymentAddress001',
+            paid_at=django_timezone.now(),
+        )
+        current_end = django_timezone.now() + timedelta(days=10)
+        existing_membership = UserMembership.objects.create(
+            user=user,
+            source_order=existing_order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=django_timezone.now() - timedelta(days=20),
+            ends_at=current_end,
+        )
+        mock_verify.return_value = {
+            'ok': True,
+            'reason': 'ok',
+            'txid': 'manual-active-extension-tx',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-active-extension-tx'},
+        }
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-active-extension-tx'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-active-extension-tx')
+        new_membership = payment.membership
+        self.assertEqual(new_membership.starts_at, existing_membership.ends_at)
+        self.assertEqual(UserMembership.objects.filter(user=user).count(), 2)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_pending_confirmation_status(self, mock_verify):
+        user = self.create_user('manual-pending@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'pending_confirmation',
+            'txid': 'manual-submit-pending',
+            'confirmations': 1,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('12.50000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-pending'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-pending'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-pending')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+        self.assertEqual(payment.reject_reason, '')
+        self.assertEqual(response.data['verification']['reason'], 'pending_confirmation')
+        self.assertFalse(response.data['verified'])
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_PENDING_CONFIRMATION)
+        self.assertEqual(response.data['purchase_mode'], 'new')
+        self.assertIn('estimated_new_starts_at', response.data)
+        self.assertIn('estimated_new_ends_at', response.data)
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_rejects_address_or_amount_failures(self, mock_verify):
+        user = self.create_user('manual-rejected@example.com')
+        self.client.force_authenticate(user=user)
+        mock_verify.return_value = {
+            'ok': False,
+            'reason': 'insufficient_amount',
+            'txid': 'manual-submit-rejected',
+            'confirmations': 3,
+            'required_confirmations': 2,
+            'expected_amount_lbc': Decimal('12.50000000'),
+            'actual_amount_lbc': Decimal('1.00000000'),
+            'pay_to_address': 'bManualPaymentAddress001',
+            'raw_tx': {'txid': 'manual-submit-rejected'},
+        }
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-rejected'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = ManualMembershipPayment.objects.get(txid='manual-submit-rejected')
+        self.assertEqual(payment.status, ManualMembershipPayment.STATUS_REJECTED)
+        self.assertEqual(payment.reject_reason, 'insufficient_amount')
+        self.assertFalse(UserMembership.objects.exists())
+
+    @patch('apps.accounts.views.ManualMembershipChainVerifier.verify')
+    def test_manual_tx_hint_submit_rejects_duplicate_txid_before_verification(self, mock_verify):
+        user = self.create_user('manual-duplicate@example.com')
+        self.client.force_authenticate(user=user)
+        ManualMembershipPayment.objects.create(
+            user=user,
+            plan=self.plan,
+            txid='manual-submit-duplicate',
+            expected_amount_lbc=self.plan.price_lbc,
+            actual_amount_lbc='12.50000000',
+            pay_to_address='bManualPaymentAddress001',
+            confirmations=3,
+            status=ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED,
+        )
+
+        response = self.client.post(
+            reverse('manual-membership-tx-hints'),
+            {'plan_code': MembershipPlan.CODE_MONTHLY, 'txid': 'manual-submit-duplicate'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        existing = ManualMembershipPayment.objects.get(txid='manual-submit-duplicate')
+        self.assertEqual(response.data['detail'], 'txid already submitted.')
+        self.assertEqual(response.data['manual_payment_id'], existing.id)
+        self.assertEqual(response.data['status'], ManualMembershipPayment.STATUS_DRY_RUN_VERIFIED)
+        self.assertIn('created_at', response.data)
+        self.assertIn('verified_at', response.data)
+        mock_verify.assert_not_called()
 
     @override_settings(
         LBRY_PLATFORM_RECEIVE_ADDRESS='bStablePlatformAddress001',
