@@ -182,6 +182,54 @@ class GiftFlowTestCase(APITestCase):
         self.assertEqual(wallet.balance, 70)
         self.assertTrue(GiftTransaction.objects.filter(sender=self.sender, stream=self.stream, total_points=30).exists())
 
+
+    def test_send_gift_is_debounced_for_duplicate_taps(self):
+        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        first_response = self.client.post(
+            reverse('live-gift-send', args=[self.stream.id]),
+            {'gift_code': 'rose', 'quantity': 1},
+            format='json',
+        )
+        second_response = self.client.post(
+            reverse('live-gift-send', args=[self.stream.id]),
+            {'gift_code': 'rose', 'quantity': 1},
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data['id'], second_response.data['id'])
+        wallet = MeowPointWallet.objects.get(user=self.sender)
+        self.assertEqual(wallet.balance, 90)
+        self.assertEqual(GiftTransaction.objects.filter(sender=self.sender, stream=self.stream).count(), 1)
+
+    def test_send_gift_blocked_when_live_stream_has_ended(self):
+        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.stream.status = LiveStream.STATUS_ENDED
+        self.stream.save(update_fields=['status'])
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('live-gift-send', args=[self.stream.id]),
+            {'gift_code': 'rose', 'quantity': 1},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'detail': 'Live stream has ended.'})
+        self.assertFalse(GiftTransaction.objects.filter(sender=self.sender, stream=self.stream).exists())
+
+    def test_unauthenticated_user_cannot_send_gift(self):
+        response = self.client.post(
+            reverse('live-gift-send', args=[self.stream.id]),
+            {'gift_code': 'rose', 'quantity': 1},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
     def test_inactive_gift_cannot_be_sent(self):
         MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
         self.client.force_authenticate(user=self.sender)
