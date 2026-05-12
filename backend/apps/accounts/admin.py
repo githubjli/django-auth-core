@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils import timezone
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from apps.accounts.models import (
@@ -44,6 +45,7 @@ from apps.accounts.models import (
     VideoView,
     WalletAddress,
 )
+from apps.accounts.services import MeowCreditRechargeService
 
 
 @admin.register(Category)
@@ -260,6 +262,28 @@ class MeowCreditRechargeAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at', 'paid_at', 'credited_at')
     autocomplete_fields = ('user', 'package', 'payment_order')
+    actions = ('mark_payment_paid_and_credit',)
+
+    @admin.action(description='Mark linked payment paid and credit wallet')
+    def mark_payment_paid_and_credit(self, request, queryset):
+        credited = 0
+        skipped = 0
+        service = MeowCreditRechargeService()
+        for recharge in queryset.select_related('payment_order'):
+            payment_order = recharge.payment_order
+            if payment_order is None:
+                skipped += 1
+                continue
+            if payment_order.status not in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+                payment_order.status = PaymentOrder.STATUS_PAID
+                payment_order.paid_at = payment_order.paid_at or timezone.now()
+                payment_order.save(update_fields=['status', 'paid_at', 'updated_at'])
+            credited_recharge = service.credit_paid_recharge(recharge)
+            if credited_recharge.credited_at is not None:
+                credited += 1
+            else:
+                skipped += 1
+        self.message_user(request, f'Meow Credit recharge action completed: credited={credited}, skipped={skipped}.')
 
 
 @admin.register(MeowCreditRedeemRequest)
