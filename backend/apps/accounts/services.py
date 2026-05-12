@@ -2675,6 +2675,217 @@ class MeowCreditService:
         raise ValidationError('Unable to generate unique Meow Credit redeem number.')
 
 
+class MeowCreditPaymentDetectionService:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client or self.daemon_client_class()
+        self.min_confirmations = int(settings.LBC_MIN_CONFIRMATIONS)
+
+    @transaction.atomic
+    def verify_recharge_once(self, *, recharge: MeowCreditRecharge, txid_hint: str | None = None) -> dict:
+        locked_recharge = (
+            MeowCreditRecharge.objects.select_for_update()
+            .select_related('payment_order', 'user')
+            .get(pk=recharge.pk)
+        )
+        payment_order = locked_recharge.payment_order
+        if payment_order is None or payment_order.order_type != PaymentOrder.TYPE_MEOW_CREDITS_RECHARGE:
+            return {'verified': False, 'message': 'unsupported_order_type'}
+
+        txid = (txid_hint or payment_order.txid or '').strip()
+        if not txid:
+            return {
+                'verified': False,
+                'matched': False,
+                'paid': False,
+                'status': payment_order.status,
+                'recharge_status': locked_recharge.status,
+                'confirmations': payment_order.confirmations,
+                'txid': payment_order.txid,
+                'reason': 'txid_required',
+            }
+
+        try:
+            tx_detail = self.daemon_client.transaction_show(txid)
+        except LbryDaemonError:
+            return {
+                'verified': False,
+                'matched': False,
+                'paid': False,
+                'status': payment_order.status,
+                'recharge_status': locked_recharge.status,
+                'confirmations': payment_order.confirmations,
+                'txid': payment_order.txid or txid,
+                'reason': 'chain_lookup_failed',
+            }
+
+        confirmations = self._extract_confirmations(tx_detail)
+        block_height = tx_detail.get('height') or tx_detail.get('block_height')
+        wallet_id = (tx_detail.get('wallet_id') or '').strip()
+        matched = False
+        reason = 'no_matching_output'
+        actual_amount = Decimal('0')
+
+        for output in self._extract_outputs(tx_detail):
+            address = (output.get('address') or '').strip()
+            if address != payment_order.pay_to_address:
+                continue
+            amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+            if amount is None:
+                continue
+            matched = True
+            actual_amount = amount
+            vout = output.get('nout') if output.get('nout') is not None else output.get('vout')
+            receipt = self._upsert_receipt(
+                txid=txid,
+                vout=vout,
+                address=address,
+                amount=amount,
+                confirmations=confirmations,
+                block_height=block_height,
+                raw_payload=tx_detail,
+                matched_order=payment_order,
+                wallet_id=wallet_id or (payment_order.wallet_address.wallet_id if payment_order.wallet_address else ''),
+            )
+            self._upsert_order_payment(
+                order=payment_order,
+                receipt=receipt,
+                txid=txid,
+                amount=amount,
+                confirmations=confirmations,
+            )
+            reason = self._apply_payment_state(order=payment_order, amount=amount, confirmations=confirmations, txid=txid)
+            break
+
+        payment_order.refresh_from_db()
+        if payment_order.status in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+            MeowCreditRechargeService().credit_paid_recharge(locked_recharge)
+            locked_recharge.refresh_from_db()
+        expected = payment_order.expected_amount_lbc or Decimal('0')
+        paid = payment_order.status in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}
+        return {
+            'verified': True,
+            'matched': matched,
+            'paid': paid,
+            'status': payment_order.status,
+            'recharge_status': locked_recharge.status,
+            'confirmations': payment_order.confirmations,
+            'txid': payment_order.txid,
+            'reason': 'ok' if paid else reason,
+            'expected_amount': f'{expected:.2f}',
+            'actual_amount': f'{(payment_order.actual_amount_lbc or actual_amount):.2f}',
+            'pay_to_address': payment_order.pay_to_address,
+        }
+
+    def _apply_payment_state(self, *, order: PaymentOrder, amount: Decimal, confirmations: int, txid: str) -> str:
+        expected = order.expected_amount_lbc or Decimal('0')
+        order.actual_amount_lbc = amount
+        order.txid = txid
+        order.confirmations = confirmations
+        update_fields = ['actual_amount_lbc', 'txid', 'confirmations', 'updated_at']
+        if amount < expected:
+            order.status = PaymentOrder.STATUS_UNDERPAID
+            update_fields.append('status')
+            order.save(update_fields=update_fields)
+            return 'insufficient_amount'
+        if confirmations < self.min_confirmations:
+            order.save(update_fields=update_fields)
+            return 'pending_confirmation'
+        order.status = PaymentOrder.STATUS_PAID if amount == expected else PaymentOrder.STATUS_OVERPAID
+        if order.paid_at is None:
+            order.paid_at = timezone.now()
+        update_fields.extend(['status', 'paid_at'])
+        order.save(update_fields=update_fields)
+        return 'ok'
+
+    def _upsert_receipt(
+        self,
+        *,
+        txid: str,
+        vout,
+        address: str,
+        amount: Decimal,
+        confirmations: int,
+        block_height,
+        raw_payload: dict,
+        matched_order: PaymentOrder,
+        wallet_id: str,
+    ) -> ChainReceipt:
+        receipt, _ = ChainReceipt.objects.update_or_create(
+            currency=ChainReceipt.CURRENCY_LBC,
+            txid=txid,
+            vout=vout,
+            defaults={
+                'wallet_id': wallet_id,
+                'address': address,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'block_height': block_height,
+                'seen_at': timezone.now(),
+                'confirmed_at': timezone.now() if confirmations >= self.min_confirmations else None,
+                'raw_payload': raw_payload,
+                'matched_order': matched_order,
+                'match_status': ChainReceipt.MATCH_MATCHED,
+            },
+        )
+        return receipt
+
+    def _upsert_order_payment(self, *, order: PaymentOrder, receipt: ChainReceipt, txid: str, amount: Decimal, confirmations: int) -> OrderPayment:
+        is_confirmed = confirmations >= self.min_confirmations and amount >= (order.expected_amount_lbc or Decimal('0'))
+        payment_status = OrderPayment.PAYMENT_CONFIRMED if is_confirmed else OrderPayment.PAYMENT_PENDING
+        order_payment, _ = OrderPayment.objects.update_or_create(
+            order=order,
+            receipt=receipt,
+            defaults={
+                'txid': txid,
+                'amount_lbc': amount,
+                'confirmations': confirmations,
+                'payment_status': payment_status,
+                'matched_at': timezone.now(),
+            },
+        )
+        return order_payment
+
+    def _extract_outputs(self, tx_detail: dict) -> list[dict]:
+        outputs = tx_detail.get('outputs')
+        if not isinstance(outputs, list):
+            return []
+        parsed = []
+        for idx, output in enumerate(outputs):
+            if not isinstance(output, dict):
+                continue
+            address = output.get('address')
+            if not address:
+                addresses = output.get('addresses')
+                if isinstance(addresses, list) and addresses:
+                    address = addresses[0]
+            parsed.append(
+                {
+                    'address': address,
+                    'amount': output.get('amount'),
+                    'amount_lbc': output.get('amount_lbc'),
+                    'vout': output.get('vout'),
+                    'nout': output.get('nout', idx),
+                }
+            )
+        return parsed
+
+    def _extract_confirmations(self, tx_detail: dict) -> int:
+        try:
+            return max(0, int(tx_detail.get('confirmations') or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+
+
 class MeowCreditRechargeService:
     @transaction.atomic
     def create_order(self, *, user, package_code: str):
@@ -2684,6 +2895,8 @@ class MeowCreditRechargeService:
         now = timezone.now()
         expires_at = now + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES)
         receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        if not receive_address:
+            raise ValidationError('Meow Credit payment address is not configured.')
         wallet_address = self._get_or_create_wallet_address(receive_address, order_no=order_no)
 
         recharge = MeowCreditRecharge.objects.create(
@@ -2732,6 +2945,17 @@ class MeowCreditRechargeService:
         )
         if existing is not None:
             return existing, False
+
+        duplicate_order = (
+            PaymentOrder.objects.filter(
+                order_type=PaymentOrder.TYPE_MEOW_CREDITS_RECHARGE,
+                txid=txid_value,
+            )
+            .exclude(user=user)
+            .first()
+        )
+        if duplicate_order is not None:
+            raise ValidationError({'txid': ['txid already submitted.']})
 
         order_no = self._generate_order_no()
         receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
