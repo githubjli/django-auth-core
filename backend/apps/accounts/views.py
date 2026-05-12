@@ -19,6 +19,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from apps.accounts.constants import TOKEN_SYMBOL
 from apps.accounts.models import (
     BillingPlan,
     BillingSubscription,
@@ -2295,15 +2296,21 @@ class ManualMembershipPaymentInfoAPIView(APIView):
             return Response({'detail': 'Manual membership payment address is not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         purchase_preview = build_membership_purchase_preview(request.user, plan)
+        currency = TOKEN_SYMBOL
+        notice = (
+            f'Send the exact {currency} amount to the platform address, '
+            'then wait for staff verification. '
+            'This endpoint does not create an order or accept txid submission.'
+        )
         return Response(
             {
                 'plan_code': plan.code,
                 'plan_name': plan.name,
                 'expected_amount_lbc': f'{plan.price_lbc:.8f}',
-                'currency': 'LBC',
+                'currency': currency,
                 'pay_to_address': pay_to_address,
                 'required_confirmations': int(settings.LBC_MIN_CONFIRMATIONS),
-                'notice': 'Send the exact LBC amount to the platform address, then wait for staff verification. This endpoint does not create an order or accept txid submission.',
+                'notice': notice,
                 **purchase_preview,
             },
             status=status.HTTP_200_OK,
@@ -2484,7 +2491,7 @@ class ManualMembershipTxHintListAPIView(APIView):
             paid_at=now,
             order_no=self._generate_manual_order_no(),
             amount='0.00',
-            currency='LBC',
+            currency=TOKEN_SYMBOL,
         )
         membership = MembershipActivationService().activate_for_order(order=payment_order)
         return payment_order, membership

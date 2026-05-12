@@ -735,7 +735,7 @@ class MembershipOrderService:
                 order_no=self._generate_order_no(),
                 expires_at=timezone.now() + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES),
                 amount='0.00',
-                currency='LBC',
+                currency=TOKEN_SYMBOL,
             )
 
             platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
