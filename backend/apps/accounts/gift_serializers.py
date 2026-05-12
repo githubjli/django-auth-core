@@ -40,10 +40,15 @@ class GiftSendSerializer(serializers.Serializer):
 
 
 class GiftTransactionSerializer(serializers.ModelSerializer):
+    stream_id = serializers.IntegerField(source='stream.id', read_only=True)
+    video_id = serializers.IntegerField(source='video.id', read_only=True)
+
     class Meta:
         model = GiftTransaction
         fields = (
             'id',
+            'stream_id',
+            'video_id',
             'gift_name_snapshot',
             'points_price_snapshot',
             'quantity',

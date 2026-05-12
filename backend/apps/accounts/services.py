@@ -25,9 +25,15 @@ from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKE
 from apps.accounts.models import (
     ChainReceipt,
     LiveStream,
+    Video,
     Gift,
     GiftTransaction,
     MembershipPlan,
+    MeowCreditLedger,
+    MeowCreditPackage,
+    MeowCreditRecharge,
+    MeowCreditRedeemRequest,
+    MeowCreditWallet,
     MeowPointLedger,
     MeowPointPackage,
     MeowPointPurchase,
@@ -61,20 +67,38 @@ class AntMediaLiveAdapter:
         'broadcasting': LiveStream.STATUS_LIVE,
         'finished': LiveStream.STATUS_ENDED,
     }
+    WAITING_STATUSES = {None, '', 'created', 'preparing'}
 
-    def normalize_stream_fields(self, stream: LiveStream) -> dict:
-        sync = self._fetch_broadcast_payload(stream.stream_key)
+    def normalize_stream_fields(
+        self,
+        stream: LiveStream,
+        *,
+        persist_no_signal: bool = False,
+        require_sync_enabled: bool = True,
+    ) -> dict:
+        sync = self._fetch_broadcast_payload(
+            stream.stream_key,
+            require_sync_enabled=require_sync_enabled,
+        )
         payload = sync.get('payload')
         ant_status = payload.get('status') if payload else None
-        mapped_status = self.STATUS_MAP.get(ant_status)
 
         django_status = stream.status
-        effective_status = self._normalize_status(django_status, ant_status)
-        status_source = 'ant_media' if ant_status is not None else 'django_control'
+        effective_status = self._normalize_status(django_status, ant_status, sync_ok=sync.get('sync_ok', False))
+        status_source = 'ant_media' if sync.get('sync_ok') else 'django_control'
+        no_signal_count = stream.ant_media_no_signal_count
+        should_end = False
+
+        if persist_no_signal and sync.get('sync_ok'):
+            no_signal_count = self._sync_no_signal_count(stream, ant_status)
+        threshold = getattr(settings, 'ANT_MEDIA_NO_SIGNAL_END_THRESHOLD', 3)
+        if django_status == LiveStream.STATUS_LIVE and effective_status != LiveStream.STATUS_LIVE:
+            should_end = no_signal_count >= threshold
 
         return {
             'status': effective_status,
             'django_status': django_status,
+            'ant_media_status': ant_status,
             'effective_status': effective_status,
             'status_source': status_source,
             'raw_ant_media_status': ant_status,
@@ -93,7 +117,20 @@ class AntMediaLiveAdapter:
             ),
             'can_start': effective_status != LiveStream.STATUS_LIVE,
             'can_end': effective_status != LiveStream.STATUS_ENDED,
+            'no_signal_count': no_signal_count,
+            'should_end': should_end,
         }
+
+    def get_broadcast_status(self, stream_key: str) -> dict:
+        sync = self._fetch_broadcast_payload(stream_key, require_sync_enabled=False)
+        ant_status = (sync.get('payload') or {}).get('status') if sync.get('sync_ok') else None
+        sync['ant_media_status'] = ant_status
+        sync['effective_status'] = self._normalize_status(
+            LiveStream.STATUS_IDLE,
+            ant_status,
+            sync_ok=sync.get('sync_ok', False),
+        )
+        return sync
 
     def get_browser_publish_config(self, stream: LiveStream) -> dict:
         stream_id = stream.stream_key
@@ -125,7 +162,14 @@ class AntMediaLiveAdapter:
                 'message': 'Ant Media REST app is not configured.',
             }
 
-        endpoint = (
+        broadcast_url = self._broadcast_url(stream.stream_key)
+        existing_result = self._get_existing_broadcast(broadcast_url, stream.stream_key)
+        if existing_result.get('ok'):
+            return existing_result
+        if existing_result.get('error') not in {'ant_media_broadcast_not_found'}:
+            return existing_result
+
+        create_url = (
             f"{settings.ANT_MEDIA_BASE_URL}/"
             f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/create"
         )
@@ -136,9 +180,9 @@ class AntMediaLiveAdapter:
             'type': 'liveStream',
         }
         body = json.dumps(payload).encode('utf-8')
-        logger.debug('ant_media create_broadcast request url=%s payload=%s', endpoint, payload)
+        logger.debug('ant_media create_broadcast request url=%s payload=%s', create_url, payload)
         request_obj = urllib_request.Request(
-            endpoint,
+            create_url,
             data=body,
             headers={'Content-Type': 'application/json'},
             method='POST',
@@ -147,8 +191,26 @@ class AntMediaLiveAdapter:
             with urllib_request.urlopen(request_obj, timeout=3) as response:
                 response_body = response.read().decode('utf-8')
                 status_code = getattr(response, 'status', response.getcode())
+        except error.HTTPError as exc:
+            response_body = self._read_error_body(exc)
+            logger.warning(
+                'ant_media create_broadcast http_error url=%s status=%s body=%s',
+                create_url,
+                exc.code,
+                response_body,
+            )
+            if exc.code in {400, 409} and self._is_duplicate_broadcast_error(response_body):
+                retry_result = self._get_existing_broadcast(broadcast_url, stream.stream_key)
+                if retry_result.get('ok'):
+                    return retry_result
+            return {
+                'ok': False,
+                'error': 'ant_media_create_failed',
+                'message': 'Unable to create broadcast on Ant Media.',
+            }
         except (error.URLError, TimeoutError) as exc:
-            logger.debug('ant_media create_broadcast failed url=%s error=%s', endpoint, exc)
+            reason = getattr(exc, 'reason', exc)
+            logger.warning('ant_media create_broadcast failed url=%s reason=%s', create_url, reason)
             return {
                 'ok': False,
                 'error': 'ant_media_create_failed',
@@ -160,6 +222,18 @@ class AntMediaLiveAdapter:
             status_code,
             response_body,
         )
+        if status_code not in {200, 201}:
+            logger.warning(
+                'ant_media create_broadcast unexpected_status url=%s status=%s body=%s',
+                create_url,
+                status_code,
+                response_body,
+            )
+            return {
+                'ok': False,
+                'error': 'ant_media_create_failed',
+                'message': 'Unable to create broadcast on Ant Media.',
+            }
         try:
             response_payload = json.loads(response_body)
         except (ValueError, json.JSONDecodeError):
@@ -175,20 +249,116 @@ class AntMediaLiveAdapter:
                 'message': 'Invalid Ant Media create broadcast response.',
             }
         stream_id = response_payload.get('streamId') or stream.stream_key
-        return {'ok': True, 'stream_id': stream_id}
+        return {'ok': True, 'stream_id': stream_id, 'reused': False}
 
-    def _normalize_status(self, db_status: str, ant_status: str | None) -> str:
-        if ant_status is not None:
+    def _broadcast_url(self, stream_key: str) -> str:
+        return (
+            f"{settings.ANT_MEDIA_BASE_URL}/"
+            f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}"
+        )
+
+    def _get_existing_broadcast(self, endpoint: str, stream_key: str) -> dict:
+        try:
+            with urllib_request.urlopen(endpoint, timeout=2) as response:
+                response_body = response.read().decode('utf-8')
+                status_code = getattr(response, 'status', response.getcode())
+        except error.HTTPError as exc:
+            response_body = self._read_error_body(exc)
+            if exc.code == 404:
+                logger.debug('ant_media broadcast not found url=%s body=%s', endpoint, response_body)
+                return {'ok': False, 'error': 'ant_media_broadcast_not_found'}
+            logger.warning(
+                'ant_media get_broadcast http_error url=%s status=%s body=%s',
+                endpoint,
+                exc.code,
+                response_body,
+            )
+            return {'ok': False, 'error': 'ant_media_unavailable', 'message': 'Unable to inspect Ant Media broadcast.'}
+        except (error.URLError, TimeoutError) as exc:
+            reason = getattr(exc, 'reason', exc)
+            logger.warning('ant_media get_broadcast failed url=%s reason=%s', endpoint, reason)
+            return {'ok': False, 'error': 'ant_media_unavailable', 'message': 'Unable to inspect Ant Media broadcast.'}
+        if status_code != 200:
+            logger.warning('ant_media get_broadcast unexpected_status url=%s status=%s body=%s', endpoint, status_code, response_body)
+            return {'ok': False, 'error': 'ant_media_unavailable', 'message': 'Unable to inspect Ant Media broadcast.'}
+        try:
+            payload = json.loads(response_body)
+        except (ValueError, json.JSONDecodeError):
+            return {'ok': False, 'error': 'invalid_ant_media_payload', 'message': 'Invalid Ant Media broadcast response.'}
+        if not isinstance(payload, dict):
+            return {'ok': False, 'error': 'invalid_ant_media_payload', 'message': 'Invalid Ant Media broadcast response.'}
+        return {
+            'ok': True,
+            'stream_id': stream_key,
+            'reused': True,
+            'ant_media_status': payload.get('status'),
+            'message': 'Ant Media broadcast already exists.',
+        }
+
+    def _read_error_body(self, exc: error.HTTPError) -> str:
+        try:
+            return exc.read().decode('utf-8')
+        except Exception:
+            return ''
+
+    def _is_duplicate_broadcast_error(self, response_body: str) -> bool:
+        normalized = (response_body or '').lower()
+        return any(
+            marker in normalized
+            for marker in ('already being used', 'already exists', 'duplicate')
+        )
+
+    def stop_broadcast(self, stream_key: str) -> dict:
+        if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
+            return {
+                'ok': False,
+                'warning': 'ant_media_not_configured',
+                'message': 'Ant Media REST app is not configured.',
+            }
+        endpoint = (
+            f"{settings.ANT_MEDIA_BASE_URL}/"
+            f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}/stop"
+        )
+        request_obj = urllib_request.Request(endpoint, data=b'', method='POST')
+        try:
+            with urllib_request.urlopen(request_obj, timeout=3) as response:
+                response_body = response.read().decode('utf-8')
+                status_code = getattr(response, 'status', response.getcode())
+        except (error.URLError, TimeoutError) as exc:
+            logger.warning('ant_media stop_broadcast failed stream_key=%s error=%s', stream_key, exc)
+            return {
+                'ok': False,
+                'warning': 'ant_media_stop_failed',
+                'message': 'Live stream ended in Django, but Ant Media stop failed.',
+            }
+        return {'ok': 200 <= status_code < 300, 'status_code': status_code, 'body': response_body}
+
+    def _normalize_status(self, db_status: str, ant_status: str | None, *, sync_ok: bool) -> str:
+        if sync_ok:
             if ant_status == 'broadcasting':
                 return LiveStream.STATUS_LIVE
             if ant_status == 'finished':
                 return LiveStream.STATUS_ENDED
+            if ant_status in self.WAITING_STATUSES or ant_status == 'no_signal':
+                return 'waiting_for_signal'
             return 'waiting_for_signal'
         if db_status == LiveStream.STATUS_LIVE:
             return LiveStream.STATUS_LIVE
         if db_status == LiveStream.STATUS_ENDED:
             return LiveStream.STATUS_ENDED
         return 'ready'
+
+    def _sync_no_signal_count(self, stream: LiveStream, ant_status: str | None) -> int:
+        if stream.status != LiveStream.STATUS_LIVE:
+            if stream.ant_media_no_signal_count != 0:
+                stream.ant_media_no_signal_count = 0
+                stream.save(update_fields=['ant_media_no_signal_count'])
+            return 0
+        next_count = 0 if ant_status == 'broadcasting' else stream.ant_media_no_signal_count + 1
+        if next_count != stream.ant_media_no_signal_count:
+            stream.ant_media_no_signal_count = next_count
+            stream.save(update_fields=['ant_media_no_signal_count'])
+        return next_count
 
     def _normalize_viewer_count(self, payload: dict | None, fallback: int) -> int:
         if not payload:
@@ -207,8 +377,8 @@ class AntMediaLiveAdapter:
                 continue
         return total if has_metric else fallback
 
-    def _fetch_broadcast_payload(self, stream_key: str) -> dict:
-        if not settings.ANT_MEDIA_SYNC_STATUS:
+    def _fetch_broadcast_payload(self, stream_key: str, *, require_sync_enabled: bool = True) -> dict:
+        if require_sync_enabled and not settings.ANT_MEDIA_SYNC_STATUS:
             return {'payload': None, 'sync_ok': False, 'sync_error': 'sync_disabled'}
         if not settings.ANT_MEDIA_BASE_URL or not settings.ANT_MEDIA_REST_APP_NAME:
             return {'payload': None, 'sync_ok': False, 'sync_error': 'ant_media_not_configured'}
@@ -264,10 +434,11 @@ class AntMediaLiveAdapter:
         if not base_url or not app_name:
             return None
         parsed = urlparse(base_url)
-        if parsed.scheme not in {'http', 'https', 'ws', 'wss'} or not parsed.netloc:
+        scheme = 'wss' if parsed.scheme == 'https' else 'ws'
+        netloc = parsed.netloc or parsed.path
+        if not netloc:
             return None
-        scheme = {'http': 'ws', 'https': 'wss'}.get(parsed.scheme, parsed.scheme)
-        return f'{scheme}://{parsed.netloc}/{app_name}/websocket'
+        return f"{scheme}://{netloc}/{app_name}/websocket"
 
     def _get_adaptor_script_url(self) -> str | None:
         explicit = getattr(settings, 'ANT_MEDIA_ADAPTOR_SCRIPT_URL', '')
@@ -277,7 +448,7 @@ class AntMediaLiveAdapter:
         app_name = settings.ANT_MEDIA_APP_NAME or ''
         if not base_url or not app_name:
             return None
-        return f'{base_url}/{app_name}/js/webrtc_adaptor.js'
+        return f"{base_url}/{app_name}/js/webrtc_adaptor.js"
 
 
 class LbryDaemonError(RuntimeError):
@@ -564,7 +735,7 @@ class MembershipOrderService:
                 order_no=self._generate_order_no(),
                 expires_at=timezone.now() + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES),
                 amount='0.00',
-                currency='LBC',
+                currency=TOKEN_SYMBOL,
             )
 
             platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
@@ -640,6 +811,113 @@ class MembershipOrderService:
             if not PaymentOrder.objects.filter(order_no=candidate).exists():
                 return candidate
         raise LbryDaemonError('Unable to generate unique membership order number.')
+
+
+class ManualMembershipChainVerifier:
+    daemon_client_class = LbryDaemonClient
+
+    def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
+        self.daemon_client = daemon_client
+
+    def verify(self, *, txid: str, plan: MembershipPlan) -> dict:
+        txid_value = (txid or '').strip()
+        platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        required_confirmations = int(settings.LBC_MIN_CONFIRMATIONS)
+        expected_amount = Decimal(str(plan.price_lbc))
+
+        base_result = {
+            'ok': False,
+            'reason': '',
+            'txid': txid_value,
+            'confirmations': 0,
+            'required_confirmations': required_confirmations,
+            'expected_amount_lbc': expected_amount,
+            'actual_amount_lbc': Decimal('0'),
+            'pay_to_address': platform_receive_address,
+            'raw_tx': None,
+        }
+
+        if not txid_value:
+            return {**base_result, 'reason': 'txid_required'}
+        if not platform_receive_address:
+            return {**base_result, 'reason': 'receive_address_not_configured'}
+
+        try:
+            daemon_client = self.daemon_client or self.daemon_client_class()
+            tx_detail = daemon_client.transaction_show(txid_value)
+            if not isinstance(tx_detail, dict):
+                raise LbryDaemonError('Unexpected transaction_show response from LBRY daemon.')
+        except Exception as exc:
+            logger.warning('manual_membership_chain_lookup_failed txid=%s error=%s', txid_value, exc)
+            return {**base_result, 'reason': 'chain_lookup_failed'}
+
+        confirmations = self._extract_confirmations(tx_detail)
+        matching_amount = Decimal('0')
+        matched_address = ''
+        for output in self._extract_outputs(tx_detail):
+            address = (output.get('address') or '').strip()
+            if address != platform_receive_address:
+                continue
+            amount = self._to_decimal(output.get('amount') or output.get('amount_lbc'))
+            if amount is None:
+                continue
+            matching_amount += amount
+            matched_address = address
+
+        result = {
+            **base_result,
+            'confirmations': confirmations,
+            'actual_amount_lbc': matching_amount,
+            'pay_to_address': matched_address or platform_receive_address,
+            'raw_tx': tx_detail,
+        }
+
+        if matching_amount <= 0:
+            return {**result, 'reason': 'no_matching_output'}
+        if matching_amount < expected_amount:
+            return {**result, 'reason': 'insufficient_amount'}
+        if confirmations < required_confirmations:
+            return {**result, 'reason': 'pending_confirmation'}
+        return {**result, 'ok': True, 'reason': 'ok'}
+
+    def _extract_outputs(self, tx_detail: dict) -> list[dict]:
+        outputs = tx_detail.get('outputs')
+        if not isinstance(outputs, list):
+            return []
+        parsed_outputs = []
+        for index, output in enumerate(outputs):
+            if not isinstance(output, dict):
+                continue
+            address = output.get('address')
+            if not address:
+                addresses = output.get('addresses')
+                if isinstance(addresses, list) and addresses:
+                    address = addresses[0]
+            parsed_outputs.append(
+                {
+                    'address': address,
+                    'amount': output.get('amount'),
+                    'amount_lbc': output.get('amount_lbc'),
+                    'vout': output.get('vout'),
+                    'nout': output.get('nout', index),
+                }
+            )
+        return parsed_outputs
+
+    def _extract_confirmations(self, tx_detail: dict) -> int:
+        value = tx_detail.get('confirmations')
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_decimal(self, value) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
 
 
 class MembershipActivationService:
@@ -2196,6 +2474,271 @@ class MeowPointPurchaseService:
         raise ValidationError('Unable to generate unique Meow Points order number.')
 
 
+class MeowCreditService:
+    @staticmethod
+    def get_or_create_wallet(user):
+        wallet, _created = MeowCreditWallet.objects.get_or_create(user=user)
+        return wallet
+
+    @staticmethod
+    def credit_recharge(*, user, amount: int, payment_order: PaymentOrder, target):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        target_id = getattr(target, 'id', None)
+        with transaction.atomic():
+            existing = MeowCreditLedger.objects.filter(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_RECHARGE,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                payment_order=payment_order,
+                target_type='meow_credit_recharge',
+                target_id=target_id,
+            ).first()
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if existing is not None:
+                return wallet, existing
+
+            balance_before = wallet.balance
+            balance_after = balance_before + amount
+            wallet.balance = balance_after
+            wallet.total_recharged += amount
+            wallet.save(update_fields=['balance', 'total_recharged', 'updated_at'])
+
+            ledger = MeowCreditLedger.objects.create(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_RECHARGE,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                amount=amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type='meow_credit_recharge',
+                target_id=target_id,
+                payment_order=payment_order,
+                note=f'Recharge credit for order {getattr(target, "order_no", "")}',
+            )
+        return wallet, ledger
+
+    @staticmethod
+    def spend_credit(*, user, amount: int, target_type: str = '', target_id: int | None = None, note: str = ''):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        with transaction.atomic():
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if wallet.balance < amount:
+                raise ValidationError('Insufficient Meow Credit balance.')
+            balance_before = wallet.balance
+            balance_after = balance_before - amount
+            wallet.balance = balance_after
+            wallet.total_spent += amount
+            wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+            ledger = MeowCreditLedger.objects.create(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_SPEND,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                amount=-amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type=target_type,
+                target_id=target_id,
+                note=note,
+            )
+        return wallet, ledger
+
+    @staticmethod
+    def create_redeem_request(*, user, amount: int, redeem_method: str, account_snapshot: dict):
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        if not redeem_method:
+            raise ValidationError({'redeem_method': ['redeem_method is required.']})
+        with transaction.atomic():
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+            if wallet.balance < amount:
+                raise ValidationError('Insufficient Meow Credit balance.')
+            redeem = MeowCreditRedeemRequest.objects.create(
+                user=user,
+                redeem_no=MeowCreditService._generate_redeem_no(),
+                amount=amount,
+                status=MeowCreditRedeemRequest.STATUS_PENDING,
+                redeem_method=redeem_method,
+                account_snapshot=account_snapshot or {},
+            )
+            balance_before = wallet.balance
+            balance_after = balance_before - amount
+            wallet.balance = balance_after
+            wallet.total_redeemed += amount
+            wallet.save(update_fields=['balance', 'total_redeemed', 'updated_at'])
+            MeowCreditLedger.objects.create(
+                user=user,
+                entry_type=MeowCreditLedger.TYPE_REDEEM,
+                status=MeowCreditLedger.STATUS_PENDING,
+                amount=-amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+                note=f'Redeem request {redeem.redeem_no}',
+            )
+        return redeem
+
+    @staticmethod
+    def approve_redeem_request(request, reviewer):
+        with transaction.atomic():
+            redeem = MeowCreditRedeemRequest.objects.select_for_update().get(pk=request.pk)
+            if redeem.status == MeowCreditRedeemRequest.STATUS_COMPLETED:
+                return redeem
+            if redeem.status != MeowCreditRedeemRequest.STATUS_PENDING:
+                raise ValidationError('Only pending redeem requests can be completed.')
+            MeowCreditLedger.objects.filter(
+                entry_type=MeowCreditLedger.TYPE_REDEEM,
+                status=MeowCreditLedger.STATUS_PENDING,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+            ).update(status=MeowCreditLedger.STATUS_COMPLETED)
+            redeem.status = MeowCreditRedeemRequest.STATUS_COMPLETED
+            redeem.reviewed_by = reviewer
+            redeem.reviewed_at = timezone.now()
+            redeem.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'updated_at'])
+        return redeem
+
+    @staticmethod
+    def reject_redeem_request(request, reviewer, reason: str = ''):
+        with transaction.atomic():
+            redeem = MeowCreditRedeemRequest.objects.select_for_update().get(pk=request.pk)
+            if redeem.status == MeowCreditRedeemRequest.STATUS_REJECTED:
+                return redeem
+            if redeem.status != MeowCreditRedeemRequest.STATUS_PENDING:
+                raise ValidationError('Only pending redeem requests can be rejected.')
+            wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=redeem.user)[0]
+            existing_refund = MeowCreditLedger.objects.filter(
+                user=redeem.user,
+                entry_type=MeowCreditLedger.TYPE_REFUND,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+            ).first()
+            if existing_refund is None:
+                balance_before = wallet.balance
+                balance_after = balance_before + redeem.amount
+                wallet.balance = balance_after
+                wallet.save(update_fields=['balance', 'updated_at'])
+                MeowCreditLedger.objects.create(
+                    user=redeem.user,
+                    entry_type=MeowCreditLedger.TYPE_REFUND,
+                    status=MeowCreditLedger.STATUS_COMPLETED,
+                    amount=redeem.amount,
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                    target_type='meow_credit_redeem_request',
+                    target_id=redeem.id,
+                    note=f'Refund rejected redeem request {redeem.redeem_no}',
+                )
+            MeowCreditLedger.objects.filter(
+                entry_type=MeowCreditLedger.TYPE_REDEEM,
+                status=MeowCreditLedger.STATUS_PENDING,
+                target_type='meow_credit_redeem_request',
+                target_id=redeem.id,
+            ).update(status=MeowCreditLedger.STATUS_REJECTED)
+            redeem.status = MeowCreditRedeemRequest.STATUS_REJECTED
+            redeem.reviewed_by = reviewer
+            redeem.reviewed_at = timezone.now()
+            redeem.reject_reason = reason or ''
+            redeem.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reject_reason', 'updated_at'])
+        return redeem
+
+    @staticmethod
+    def _generate_redeem_no():
+        for _ in range(8):
+            candidate = f'MCR{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not MeowCreditRedeemRequest.objects.filter(redeem_no=candidate).exists():
+                return candidate
+        raise ValidationError('Unable to generate unique Meow Credit redeem number.')
+
+
+class MeowCreditRechargeService:
+    @transaction.atomic
+    def create_order(self, *, user, package_code: str):
+        package = MeowCreditPackage.objects.filter(code=package_code, status=MeowCreditPackage.STATUS_ACTIVE).first()
+        if package is None:
+            raise ValidationError({'package_code': ['Active Meow Credit package not found.']})
+
+        order_no = self._generate_order_no()
+        now = timezone.now()
+        expires_at = now + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES)
+        receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        wallet_address = None
+        if receive_address:
+            wallet_address = WalletAddress.objects.filter(address=receive_address).first()
+            if wallet_address is None:
+                wallet_address = WalletAddress.objects.create(
+                    address=receive_address,
+                    label=f'meow-credit:{order_no}',
+                    usage_type=WalletAddress.USAGE_MEMBERSHIP,
+                    status=WalletAddress.STATUS_ASSIGNED,
+                    wallet_id=(settings.LBRY_PLATFORM_WALLET_ID or '').strip(),
+                    account_id=(settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip(),
+                )
+
+        recharge = MeowCreditRecharge.objects.create(
+            user=user,
+            package=package,
+            order_no=order_no,
+            package_code_snapshot=package.code,
+            package_name_snapshot=package.name,
+            credit_amount=package.credit_amount,
+            bonus_credit=package.bonus_credit,
+            total_credit=package.credit_amount + package.bonus_credit,
+            price_amount=package.price_amount,
+            price_currency=package.price_currency,
+            status=MeowCreditRecharge.STATUS_PENDING,
+        )
+        payment_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEOW_CREDITS_RECHARGE,
+            target_type='meow_credit_recharge',
+            target_id=recharge.id,
+            order_no=order_no,
+            amount=package.price_amount,
+            expected_amount_lbc=package.price_amount,
+            currency=package.price_currency,
+            status=PaymentOrder.STATUS_PENDING,
+            pay_to_address=receive_address,
+            wallet_address=wallet_address,
+            expires_at=expires_at,
+        )
+        recharge.payment_order = payment_order
+        recharge.save(update_fields=['payment_order', 'updated_at'])
+        return recharge
+
+    @transaction.atomic
+    def credit_paid_recharge(self, recharge: MeowCreditRecharge):
+        locked_recharge = MeowCreditRecharge.objects.select_for_update().select_related('payment_order', 'user').get(pk=recharge.pk)
+        if locked_recharge.credited_at is not None or locked_recharge.status == MeowCreditRecharge.STATUS_CREDITED:
+            return locked_recharge
+        payment_order = locked_recharge.payment_order
+        if payment_order is None:
+            raise ValidationError('Recharge does not have a linked payment order.')
+        if payment_order.status not in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+            return locked_recharge
+        MeowCreditService.credit_recharge(
+            user=locked_recharge.user,
+            amount=int(locked_recharge.total_credit),
+            payment_order=payment_order,
+            target=locked_recharge,
+        )
+        locked_recharge.status = MeowCreditRecharge.STATUS_CREDITED
+        locked_recharge.paid_at = payment_order.paid_at or timezone.now()
+        locked_recharge.credited_at = timezone.now()
+        locked_recharge.save(update_fields=['status', 'paid_at', 'credited_at', 'updated_at'])
+        return locked_recharge
+
+    def _generate_order_no(self):
+        for _ in range(8):
+            candidate = f'MC{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
+            if not MeowCreditRecharge.objects.filter(order_no=candidate).exists() and not PaymentOrder.objects.filter(order_no=candidate).exists():
+                return candidate
+        raise ValidationError('Unable to generate unique Meow Credit order number.')
+
+
 class DramaAccessService:
     @staticmethod
     def has_active_membership(user) -> bool:
@@ -2279,6 +2822,34 @@ class GiftService:
             sender=sender,
             receiver=receiver,
             stream=stream,
+            gift=gift,
+            gift_name_snapshot=gift.name,
+            points_price_snapshot=gift.points_price,
+            quantity=quantity,
+            total_points=total_points,
+            ledger_entry=ledger_entry,
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def send_video_gift(*, sender, receiver, video: Video, gift: Gift, quantity: int) -> GiftTransaction:
+        if quantity <= 0:
+            raise ValidationError({'quantity': ['Quantity must be greater than zero.']})
+        if not gift.is_active:
+            raise ValidationError({'gift_code': ['Gift is not active.']})
+        total_points = gift.points_price * quantity
+        _wallet, ledger_entry = MeowPointService.spend_points(
+            user=sender,
+            amount=total_points,
+            entry_type=MeowPointLedger.TYPE_SPEND,
+            target_type='video_gift',
+            target_id=video.id,
+            note=f'Gift {gift.code} x{quantity} to video {video.id}',
+        )
+        return GiftTransaction.objects.create(
+            sender=sender,
+            receiver=receiver,
+            video=video,
             gift=gift,
             gift_name_snapshot=gift.name,
             points_price_snapshot=gift.points_price,

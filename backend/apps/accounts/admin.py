@@ -20,6 +20,12 @@ from apps.accounts.models import (
     LiveChatMessage,
     LiveChatRoom,
     LiveStreamProduct,
+    ManualMembershipPayment,
+    MeowCreditLedger,
+    MeowCreditPackage,
+    MeowCreditRecharge,
+    MeowCreditRedeemRequest,
+    MeowCreditWallet,
     MembershipPlan,
     MeowPointLedger,
     MeowPointPackage,
@@ -216,6 +222,54 @@ class DramaUnlockAdmin(admin.ModelAdmin):
     ordering = ('-unlocked_at', '-id')
     readonly_fields = ('unlocked_at',)
     autocomplete_fields = ('user', 'series', 'episode', 'ledger_entry')
+
+
+@admin.register(MeowCreditWallet)
+class MeowCreditWalletAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'balance', 'total_recharged', 'total_spent', 'total_redeemed', 'total_adjusted', 'created_at', 'updated_at')
+    search_fields = ('user__email',)
+    ordering = ('-updated_at', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('user',)
+
+
+@admin.register(MeowCreditPackage)
+class MeowCreditPackageAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'credit_amount', 'bonus_credit', 'price_amount', 'price_currency', 'status', 'created_at', 'updated_at')
+    list_filter = ('status', 'price_currency')
+    search_fields = ('code', 'name', 'description')
+    ordering = ('sort_order', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(MeowCreditLedger)
+class MeowCreditLedgerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'entry_type', 'status', 'amount', 'balance_before', 'balance_after', 'payment_order', 'created_at')
+    list_filter = ('entry_type', 'status', 'created_at')
+    search_fields = ('user__email', 'target_type', 'note', 'payment_order__order_no')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ('user', 'payment_order')
+
+
+@admin.register(MeowCreditRecharge)
+class MeowCreditRechargeAdmin(admin.ModelAdmin):
+    list_display = ('id', 'order_no', 'user', 'package_code_snapshot', 'total_credit', 'price_amount', 'price_currency', 'status', 'payment_order', 'created_at', 'updated_at')
+    list_filter = ('status', 'price_currency', 'created_at')
+    search_fields = ('order_no', 'user__email', 'package_code_snapshot', 'package_name_snapshot', 'payment_order__order_no')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at', 'updated_at', 'paid_at', 'credited_at')
+    autocomplete_fields = ('user', 'package', 'payment_order')
+
+
+@admin.register(MeowCreditRedeemRequest)
+class MeowCreditRedeemRequestAdmin(admin.ModelAdmin):
+    list_display = ('id', 'redeem_no', 'user', 'amount', 'status', 'redeem_method', 'reviewed_by', 'created_at', 'updated_at')
+    list_filter = ('status', 'redeem_method', 'created_at')
+    search_fields = ('redeem_no', 'user__email', 'redeem_method', 'reject_reason')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at', 'updated_at', 'reviewed_at')
+    autocomplete_fields = ('user', 'reviewed_by')
 
 
 @admin.register(MeowPointWallet)
@@ -475,6 +529,37 @@ class MembershipPlanAdmin(admin.ModelAdmin):
     search_fields = ('code', 'name', 'description')
     ordering = ('sort_order', 'id')
     readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ManualMembershipPayment)
+class ManualMembershipPaymentAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'txid',
+        'user',
+        'plan',
+        'status',
+        'expected_amount_lbc',
+        'actual_amount_lbc',
+        'pay_to_address',
+        'confirmations',
+        'payment_order',
+        'membership',
+        'created_at',
+        'verified_at',
+    )
+    list_filter = ('status', 'plan__code', 'created_at', 'verified_at')
+    search_fields = (
+        'txid',
+        'pay_to_address',
+        'user__email',
+        'plan__code',
+        'plan__name',
+        'payment_order__order_no',
+    )
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('raw_tx', 'payment_order', 'membership', 'created_at', 'updated_at')
+    autocomplete_fields = ('user', 'plan')
 
 
 @admin.register(WalletAddress)
