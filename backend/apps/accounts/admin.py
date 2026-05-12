@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils.html import format_html
 from django.utils import timezone
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
@@ -17,6 +18,8 @@ from apps.accounts.models import (
     DailyLoginReward,
     Gift,
     GiftTransaction,
+    KycDocument,
+    KycProfile,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
@@ -224,6 +227,62 @@ class DramaUnlockAdmin(admin.ModelAdmin):
     ordering = ('-unlocked_at', '-id')
     readonly_fields = ('unlocked_at',)
     autocomplete_fields = ('user', 'series', 'episode', 'ledger_entry')
+
+
+@admin.register(KycProfile)
+class KycProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        'user',
+        'status',
+        'full_name',
+        'nationality',
+        'id_type',
+        'id_number',
+        'submitted_at',
+        'reviewed_at',
+        'reviewed_by',
+    )
+    list_filter = ('status', 'nationality', 'id_type')
+    search_fields = ('user__email', 'full_name', 'id_number')
+    readonly_fields = ('submitted_at', 'reviewed_at', 'reviewed_by', 'created_at', 'updated_at')
+    autocomplete_fields = ('user',)
+    actions = ('approve_selected_kyc', 'reject_selected_kyc')
+
+    @admin.action(description='Approve selected KYC')
+    def approve_selected_kyc(self, request, queryset):
+        updated = queryset.update(
+            status=KycProfile.STATUS_APPROVED,
+            reviewed_at=timezone.now(),
+            reviewed_by_id=request.user.pk,
+            reject_reason='',
+        )
+        self.message_user(request, f'Approved {updated} KYC profile(s).')
+
+    @admin.action(description='Reject selected KYC')
+    def reject_selected_kyc(self, request, queryset):
+        updated = queryset.update(
+            status=KycProfile.STATUS_REJECTED,
+            reviewed_at=timezone.now(),
+            reviewed_by_id=request.user.pk,
+            reject_reason='Rejected by admin',
+        )
+        self.message_user(request, f'Rejected {updated} KYC profile(s).')
+
+
+@admin.register(KycDocument)
+class KycDocumentAdmin(admin.ModelAdmin):
+    list_display = ('user', 'kyc_profile', 'document_type', 'image_link', 'uploaded_at')
+    list_filter = ('document_type', 'uploaded_at')
+    search_fields = ('user__email', 'kyc_profile__full_name', 'kyc_profile__id_number')
+    readonly_fields = ('uploaded_at', 'created_at', 'image_link')
+    autocomplete_fields = ('user', 'kyc_profile')
+
+    def image_link(self, obj):
+        if not obj.image:
+            return ''
+        return format_html('<a href="{}" target="_blank">View image</a>', obj.image.url)
+
+    image_link.short_description = 'Image'
 
 
 @admin.register(MeowCreditWallet)

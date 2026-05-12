@@ -28,6 +28,7 @@ from apps.accounts.models import (
     Video,
     Gift,
     GiftTransaction,
+    KycProfile,
     MembershipPlan,
     MeowCreditLedger,
     MeowCreditPackage,
@@ -2571,6 +2572,8 @@ class MeowCreditService:
             raise ValidationError('Amount must be greater than zero.')
         if not redeem_method:
             raise ValidationError({'redeem_method': ['redeem_method is required.']})
+        if not KycProfile.objects.filter(user=user, status=KycProfile.STATUS_APPROVED).exists():
+            raise ValidationError('KYC approval is required before redeeming credits.')
         with transaction.atomic():
             wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
             if wallet.balance < amount:

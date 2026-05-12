@@ -10,6 +10,7 @@ from rest_framework.test import APITestCase
 
 from apps.accounts.constants import TOKEN_SYMBOL
 from apps.accounts.models import (
+    KycProfile,
     MeowCreditLedger,
     MeowCreditPackage,
     MeowCreditRecharge,
@@ -35,6 +36,16 @@ class MeowCreditAPITests(APITestCase):
             price_amount=Decimal('50.00'),
             price_currency=TOKEN_SYMBOL,
             status=MeowCreditPackage.STATUS_ACTIVE,
+        )
+        KycProfile.objects.create(
+            user=self.user,
+            status=KycProfile.STATUS_APPROVED,
+            full_name='Credit User',
+            date_of_birth='1995-01-01',
+            nationality='US',
+            id_type=KycProfile.ID_TYPE_PASSPORT,
+            id_number='P123456',
+            id_expiry_date='2030-01-01',
         )
 
     def test_create_wallet_and_get_initial_balance(self):
