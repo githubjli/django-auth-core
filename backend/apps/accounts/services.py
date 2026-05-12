@@ -930,7 +930,7 @@ class MembershipActivationService:
 
         existing = UserMembership.objects.filter(source_order=order).select_related('plan').first()
         if existing is not None:
-            return existing
+            return existing, False
 
         plan = MembershipPlan.objects.filter(pk=order.target_id).first()
         if plan is None:
@@ -2466,6 +2466,27 @@ class MeowPointPurchaseService:
         locked_purchase.save(update_fields=['status', 'paid_at', 'credited_at', 'updated_at'])
         return locked_purchase
 
+    def _get_active_package(self, package_code: str) -> MeowCreditPackage:
+        package = MeowCreditPackage.objects.filter(code=package_code, status=MeowCreditPackage.STATUS_ACTIVE).first()
+        if package is None:
+            raise ValidationError({'package_code': ['Active Meow Credit package not found.']})
+        return package
+
+    def _get_or_create_wallet_address(self, receive_address: str, *, order_no: str):
+        if not receive_address:
+            return None
+        wallet_address = WalletAddress.objects.filter(address=receive_address).first()
+        if wallet_address is None:
+            wallet_address = WalletAddress.objects.create(
+                address=receive_address,
+                label=f'meow-credit:{order_no}',
+                usage_type=WalletAddress.USAGE_MEMBERSHIP,
+                status=WalletAddress.STATUS_ASSIGNED,
+                wallet_id=(settings.LBRY_PLATFORM_WALLET_ID or '').strip(),
+                account_id=(settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip(),
+            )
+        return wallet_address
+
     def _generate_order_no(self):
         for _ in range(8):
             candidate = f'MP{timezone.now():%Y%m%d}{secrets.token_hex(4).upper()}'
@@ -2657,26 +2678,13 @@ class MeowCreditService:
 class MeowCreditRechargeService:
     @transaction.atomic
     def create_order(self, *, user, package_code: str):
-        package = MeowCreditPackage.objects.filter(code=package_code, status=MeowCreditPackage.STATUS_ACTIVE).first()
-        if package is None:
-            raise ValidationError({'package_code': ['Active Meow Credit package not found.']})
+        package = self._get_active_package(package_code)
 
         order_no = self._generate_order_no()
         now = timezone.now()
         expires_at = now + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES)
         receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
-        wallet_address = None
-        if receive_address:
-            wallet_address = WalletAddress.objects.filter(address=receive_address).first()
-            if wallet_address is None:
-                wallet_address = WalletAddress.objects.create(
-                    address=receive_address,
-                    label=f'meow-credit:{order_no}',
-                    usage_type=WalletAddress.USAGE_MEMBERSHIP,
-                    status=WalletAddress.STATUS_ASSIGNED,
-                    wallet_id=(settings.LBRY_PLATFORM_WALLET_ID or '').strip(),
-                    account_id=(settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip(),
-                )
+        wallet_address = self._get_or_create_wallet_address(receive_address, order_no=order_no)
 
         recharge = MeowCreditRecharge.objects.create(
             user=user,
@@ -2710,6 +2718,58 @@ class MeowCreditRechargeService:
         return recharge
 
     @transaction.atomic
+    def submit_txid(self, *, user, package_code: str, txid: str):
+        package = self._get_active_package(package_code)
+        txid_value = (txid or '').strip()
+        if not txid_value:
+            raise ValidationError({'txid': ['txid is required.']})
+
+        existing = (
+            MeowCreditRecharge.objects.select_related('payment_order')
+            .filter(user=user, payment_order__txid=txid_value)
+            .order_by('-created_at', '-id')
+            .first()
+        )
+        if existing is not None:
+            return existing, False
+
+        order_no = self._generate_order_no()
+        receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        if not receive_address:
+            raise ValidationError('Meow Credit payment address is not configured.')
+        wallet_address = self._get_or_create_wallet_address(receive_address, order_no=order_no)
+
+        payment_order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEOW_CREDITS_RECHARGE,
+            target_type='meow_credit_package',
+            target_id=package.id,
+            order_no=order_no,
+            amount='0.00',
+            expected_amount_lbc=package.price_amount,
+            currency=TOKEN_SYMBOL,
+            status=PaymentOrder.STATUS_PENDING,
+            pay_to_address=receive_address,
+            wallet_address=wallet_address,
+            txid=txid_value,
+        )
+        recharge = MeowCreditRecharge.objects.create(
+            user=user,
+            package=package,
+            order_no=order_no,
+            package_code_snapshot=package.code,
+            package_name_snapshot=package.name,
+            credit_amount=package.credit_amount,
+            bonus_credit=package.bonus_credit,
+            total_credit=package.credit_amount + package.bonus_credit,
+            price_amount=package.price_amount,
+            price_currency=TOKEN_SYMBOL,
+            status=MeowCreditRecharge.STATUS_PENDING,
+            payment_order=payment_order,
+        )
+        return recharge, True
+
+    @transaction.atomic
     def credit_paid_recharge(self, recharge: MeowCreditRecharge):
         locked_recharge = MeowCreditRecharge.objects.select_for_update().select_related('payment_order', 'user').get(pk=recharge.pk)
         if locked_recharge.credited_at is not None or locked_recharge.status == MeowCreditRecharge.STATUS_CREDITED:
@@ -2730,6 +2790,27 @@ class MeowCreditRechargeService:
         locked_recharge.credited_at = timezone.now()
         locked_recharge.save(update_fields=['status', 'paid_at', 'credited_at', 'updated_at'])
         return locked_recharge
+
+    def _get_active_package(self, package_code: str) -> MeowCreditPackage:
+        package = MeowCreditPackage.objects.filter(code=package_code, status=MeowCreditPackage.STATUS_ACTIVE).first()
+        if package is None:
+            raise ValidationError({'package_code': ['Active Meow Credit package not found.']})
+        return package
+
+    def _get_or_create_wallet_address(self, receive_address: str, *, order_no: str):
+        if not receive_address:
+            return None
+        wallet_address = WalletAddress.objects.filter(address=receive_address).first()
+        if wallet_address is None:
+            wallet_address = WalletAddress.objects.create(
+                address=receive_address,
+                label=f'meow-credit:{order_no}',
+                usage_type=WalletAddress.USAGE_MEMBERSHIP,
+                status=WalletAddress.STATUS_ASSIGNED,
+                wallet_id=(settings.LBRY_PLATFORM_WALLET_ID or '').strip(),
+                account_id=(settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip(),
+            )
+        return wallet_address
 
     def _generate_order_no(self):
         for _ in range(8):

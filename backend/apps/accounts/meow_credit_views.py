@@ -1,15 +1,20 @@
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import generics, serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
+from apps.accounts.constants import TOKEN_SYMBOL
 from apps.accounts.models import MeowCreditLedger, MeowCreditPackage, MeowCreditRecharge, PaymentOrder
 from apps.accounts.drama_views import DramaSeriesPagination
 from apps.accounts.meow_credit_serializers import (
     MeowCreditLedgerSerializer,
     MeowCreditPackageSerializer,
     MeowCreditRechargeCreateSerializer,
+    MeowCreditRechargeInfoQuerySerializer,
     MeowCreditRechargeSerializer,
+    MeowCreditRechargeSubmitTxidSerializer,
     MeowCreditRechargeTxHintSerializer,
     MeowCreditRedeemCreateSerializer,
     MeowCreditRedeemRequestSerializer,
@@ -41,6 +46,63 @@ class MeowCreditLedgerListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         return MeowCreditLedger.objects.filter(user=self.request.user).order_by('-created_at', '-id')
+
+
+class MeowCreditRechargeInfoAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = MeowCreditRechargeInfoQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        package = generics.get_object_or_404(
+            MeowCreditPackage.objects.filter(status=MeowCreditPackage.STATUS_ACTIVE),
+            code=serializer.validated_data['package_code'],
+        )
+        pay_to_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
+        if not pay_to_address:
+            return Response({'detail': 'Meow Credit payment address is not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        expected_amount = f'{package.price_amount:.2f}'
+        currency = TOKEN_SYMBOL
+        return Response(
+            {
+                'package_code': package.code,
+                'package_name': package.name,
+                'credit_amount': package.credit_amount,
+                'bonus_credit': package.bonus_credit,
+                'total_credit': package.credit_amount + package.bonus_credit,
+                'price_amount': expected_amount,
+                'price_currency': currency,
+                'display_currency': currency,
+                'expected_amount': expected_amount,
+                'pay_to_address': pay_to_address,
+                'required_confirmations': 0,
+                'notice': (
+                    f'Send the exact {expected_amount} {currency} amount to the platform address, '
+                    'then submit your txid for verification.'
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MeowCreditRechargeSubmitTxidAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeowCreditRechargeSubmitTxidSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            recharge, created = MeowCreditRechargeService().submit_txid(
+                user=request.user,
+                package_code=serializer.validated_data['package_code'],
+                txid=serializer.validated_data['txid'],
+            )
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(getattr(exc, 'message_dict', getattr(exc, 'messages', str(exc))))
+        response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(MeowCreditRechargeSerializer(recharge).data, status=response_status)
 
 
 class MeowCreditRechargeListCreateAPIView(generics.ListAPIView):

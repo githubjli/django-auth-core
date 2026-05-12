@@ -69,6 +69,33 @@ class MeowCreditLedgerSerializer(serializers.ModelSerializer):
         )
 
 
+class MeowCreditRechargeInfoQuerySerializer(serializers.Serializer):
+    package_code = serializers.CharField(max_length=64)
+
+    def validate_package_code(self, value):
+        package_code = value.strip()
+        if not package_code:
+            raise serializers.ValidationError('package_code is required.')
+        return package_code
+
+
+class MeowCreditRechargeSubmitTxidSerializer(serializers.Serializer):
+    package_code = serializers.CharField(max_length=64)
+    txid = serializers.CharField(max_length=128)
+
+    def validate_package_code(self, value):
+        package_code = value.strip()
+        if not package_code:
+            raise serializers.ValidationError('package_code is required.')
+        return package_code
+
+    def validate_txid(self, value):
+        txid = value.strip()
+        if not txid:
+            raise serializers.ValidationError('txid is required.')
+        return txid
+
+
 class MeowCreditRechargeCreateSerializer(serializers.Serializer):
     package_code = serializers.CharField(max_length=64)
 
