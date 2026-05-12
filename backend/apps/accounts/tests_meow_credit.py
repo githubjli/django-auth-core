@@ -4,11 +4,13 @@ from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
+from unittest.mock import patch
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.constants import TOKEN_SYMBOL
 from apps.accounts.models import (
+    KycProfile,
     MeowCreditLedger,
     MeowCreditPackage,
     MeowCreditRecharge,
@@ -34,6 +36,16 @@ class MeowCreditAPITests(APITestCase):
             price_amount=Decimal('50.00'),
             price_currency=TOKEN_SYMBOL,
             status=MeowCreditPackage.STATUS_ACTIVE,
+        )
+        KycProfile.objects.create(
+            user=self.user,
+            status=KycProfile.STATUS_APPROVED,
+            full_name='Credit User',
+            date_of_birth='1995-01-01',
+            nationality='US',
+            id_type=KycProfile.ID_TYPE_PASSPORT,
+            id_number='P123456',
+            id_expiry_date='2030-01-01',
         )
 
     def test_create_wallet_and_get_initial_balance(self):
@@ -141,7 +153,8 @@ class MeowCreditAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['price_currency'], TOKEN_SYMBOL)
         self.assertEqual(response.data['display_currency'], TOKEN_SYMBOL)
-        self.assertEqual(str(response.data['expected_amount']), '50.00')
+        self.assertEqual(response.data['expected_amount'], '50.00')
+        self.assertIsInstance(response.data['expected_amount'], str)
         self.assertEqual(response.data['pay_to_address'], 'bTestMeowCreditAddress')
         self.assertNotIn('expected_amount_lbc', response.data)
         payment_order = PaymentOrder.objects.get(order_no=response.data['order_no'])
@@ -173,6 +186,93 @@ class MeowCreditAPITests(APITestCase):
         self.assertEqual(ledger.amount, 110)
         self.assertEqual(ledger.balance_before, 0)
         self.assertEqual(ledger.balance_after, 110)
+
+
+    @override_settings(LBRY_DAEMON_URL='http://daemon.test', LBC_MIN_CONFIRMATIONS=1)
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    def test_submit_txid_auto_verifies_and_credits_wallet(self, mock_transaction_show):
+        mock_transaction_show.return_value = {
+            'txid': 'tx-credit-auto-paid',
+            'confirmations': 1,
+            'outputs': [
+                {
+                    'address': 'bTestMeowCreditAddress',
+                    'amount': '50.00',
+                    'nout': 0,
+                }
+            ],
+        }
+
+        response = self.client.post(
+            reverse('meow-credit-recharge-submit-txid'),
+            {'package_code': 'starter', 'txid': 'tx-credit-auto-paid'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], MeowCreditRecharge.STATUS_CREDITED)
+        self.assertEqual(response.data['payment_order_status'], PaymentOrder.STATUS_PAID)
+        self.assertEqual(response.data['verification']['reason'], 'ok')
+        self.assertTrue(response.data['verification']['paid'])
+        wallet = MeowCreditWallet.objects.get(user=self.user)
+        self.assertEqual(wallet.balance, 110)
+        self.assertEqual(MeowCreditLedger.objects.filter(user=self.user, entry_type=MeowCreditLedger.TYPE_RECHARGE).count(), 1)
+
+    @override_settings(LBRY_DAEMON_URL='http://daemon.test', LBC_MIN_CONFIRMATIONS=2)
+    @patch('apps.accounts.services.LbryDaemonClient.transaction_show')
+    def test_recharge_verify_now_records_pending_confirmation_without_crediting(self, mock_transaction_show):
+        created = self.client.post(
+            reverse('meow-credit-recharge-list-create'),
+            {'package_code': 'starter'},
+            format='json',
+        )
+        order_no = created.data['order_no']
+        payment_order = PaymentOrder.objects.get(order_no=order_no)
+        payment_order.txid = 'tx-credit-pending-confirmation'
+        payment_order.save(update_fields=['txid', 'updated_at'])
+        mock_transaction_show.return_value = {
+            'txid': 'tx-credit-pending-confirmation',
+            'confirmations': 1,
+            'outputs': [
+                {
+                    'address': 'bTestMeowCreditAddress',
+                    'amount_lbc': '50.00',
+                    'nout': 0,
+                }
+            ],
+        }
+
+        response = self.client.post(reverse('meow-credit-recharge-verify-now', kwargs={'order_no': order_no}), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['verification']['reason'], 'pending_confirmation')
+        self.assertFalse(response.data['verification']['paid'])
+        payment_order.refresh_from_db()
+        self.assertEqual(payment_order.status, PaymentOrder.STATUS_PENDING)
+        self.assertEqual(payment_order.confirmations, 1)
+        self.assertEqual(payment_order.actual_amount_lbc, Decimal('50.00'))
+        self.assertFalse(MeowCreditWallet.objects.filter(user=self.user).exists())
+
+    def test_submit_txid_rejects_duplicate_txid_from_another_user(self):
+        first = self.client.post(
+            reverse('meow-credit-recharge-submit-txid'),
+            {'package_code': 'starter', 'txid': 'tx-credit-cross-user'},
+            format='json',
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        other_user = User.objects.create_user(email='credit-other@example.com', password='pass12345')
+        self.client.force_authenticate(other_user)
+        response = self.client.post(
+            reverse('meow-credit-recharge-submit-txid'),
+            {'package_code': 'starter', 'txid': 'tx-credit-cross-user'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('txid', response.data)
+        self.assertEqual(MeowCreditRecharge.objects.count(), 1)
+        self.assertEqual(PaymentOrder.objects.count(), 1)
 
     def test_redeem_submit_deducts_balance(self):
         MeowCreditService.credit_recharge(user=self.user, amount=100, payment_order=self._payment_order(), target=self.package)

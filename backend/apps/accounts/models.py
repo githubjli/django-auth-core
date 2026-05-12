@@ -1725,6 +1725,92 @@ class MeowPointLedger(models.Model):
         ordering = ['-created_at', '-id']
 
 
+class KycProfile(models.Model):
+    STATUS_NOT_SUBMITTED = 'not_submitted'
+    STATUS_PENDING = 'pending'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_NOT_SUBMITTED, 'Not Submitted'),
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_APPROVED, 'Approved'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    ID_TYPE_PASSPORT = 'passport'
+    ID_TYPE_NATIONAL_ID = 'national_id'
+    ID_TYPE_DRIVER_LICENSE = 'driver_license'
+    ID_TYPE_CHOICES = [
+        (ID_TYPE_PASSPORT, 'Passport'),
+        (ID_TYPE_NATIONAL_ID, 'National ID'),
+        (ID_TYPE_DRIVER_LICENSE, 'Driver License'),
+    ]
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='kyc_profile',
+    )
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_NOT_SUBMITTED)
+    full_name = models.CharField(max_length=255, blank=True, default='')
+    date_of_birth = models.DateField(null=True, blank=True)
+    nationality = models.CharField(max_length=8, blank=True, default='')
+    id_type = models.CharField(max_length=32, choices=ID_TYPE_CHOICES, blank=True, default='')
+    id_number = models.CharField(max_length=128, blank=True, default='')
+    id_expiry_date = models.DateField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    reject_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-id']
+
+    def __str__(self) -> str:
+        return f'{self.user} KYC ({self.status})'
+
+
+class KycDocument(models.Model):
+    TYPE_ID_FRONT = 'id_front'
+    TYPE_SELFIE = 'selfie'
+    DOCUMENT_TYPE_CHOICES = [
+        (TYPE_ID_FRONT, 'ID Front'),
+        (TYPE_SELFIE, 'Selfie'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='kyc_documents',
+    )
+    kyc_profile = models.ForeignKey(
+        KycProfile,
+        on_delete=models.CASCADE,
+        related_name='documents',
+    )
+    document_type = models.CharField(max_length=24, choices=DOCUMENT_TYPE_CHOICES)
+    image = models.ImageField(upload_to='kyc/')
+    uploaded_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-uploaded_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['kyc_profile', 'document_type'], name='unique_kyc_document_type_per_profile'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.kyc_profile_id}:{self.document_type}'
+
+
 class DailyLoginReward(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

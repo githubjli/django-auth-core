@@ -1,4 +1,6 @@
 from django.contrib import admin
+from django.utils.html import format_html
+from django.utils import timezone
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from apps.accounts.models import (
@@ -16,6 +18,8 @@ from apps.accounts.models import (
     DailyLoginReward,
     Gift,
     GiftTransaction,
+    KycDocument,
+    KycProfile,
     LiveStream,
     LiveChatMessage,
     LiveChatRoom,
@@ -44,6 +48,7 @@ from apps.accounts.models import (
     VideoView,
     WalletAddress,
 )
+from apps.accounts.services import MeowCreditRechargeService
 
 
 @admin.register(Category)
@@ -224,6 +229,62 @@ class DramaUnlockAdmin(admin.ModelAdmin):
     autocomplete_fields = ('user', 'series', 'episode', 'ledger_entry')
 
 
+@admin.register(KycProfile)
+class KycProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        'user',
+        'status',
+        'full_name',
+        'nationality',
+        'id_type',
+        'id_number',
+        'submitted_at',
+        'reviewed_at',
+        'reviewed_by',
+    )
+    list_filter = ('status', 'nationality', 'id_type')
+    search_fields = ('user__email', 'full_name', 'id_number')
+    readonly_fields = ('submitted_at', 'reviewed_at', 'reviewed_by', 'created_at', 'updated_at')
+    autocomplete_fields = ('user',)
+    actions = ('approve_selected_kyc', 'reject_selected_kyc')
+
+    @admin.action(description='Approve selected KYC')
+    def approve_selected_kyc(self, request, queryset):
+        updated = queryset.update(
+            status=KycProfile.STATUS_APPROVED,
+            reviewed_at=timezone.now(),
+            reviewed_by_id=request.user.pk,
+            reject_reason='',
+        )
+        self.message_user(request, f'Approved {updated} KYC profile(s).')
+
+    @admin.action(description='Reject selected KYC')
+    def reject_selected_kyc(self, request, queryset):
+        updated = queryset.update(
+            status=KycProfile.STATUS_REJECTED,
+            reviewed_at=timezone.now(),
+            reviewed_by_id=request.user.pk,
+            reject_reason='Rejected by admin',
+        )
+        self.message_user(request, f'Rejected {updated} KYC profile(s).')
+
+
+@admin.register(KycDocument)
+class KycDocumentAdmin(admin.ModelAdmin):
+    list_display = ('user', 'kyc_profile', 'document_type', 'image_link', 'uploaded_at')
+    list_filter = ('document_type', 'uploaded_at')
+    search_fields = ('user__email', 'kyc_profile__full_name', 'kyc_profile__id_number')
+    readonly_fields = ('uploaded_at', 'created_at', 'image_link')
+    autocomplete_fields = ('user', 'kyc_profile')
+
+    def image_link(self, obj):
+        if not obj.image:
+            return ''
+        return format_html('<a href="{}" target="_blank">View image</a>', obj.image.url)
+
+    image_link.short_description = 'Image'
+
+
 @admin.register(MeowCreditWallet)
 class MeowCreditWalletAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'balance', 'total_recharged', 'total_spent', 'total_redeemed', 'total_adjusted', 'created_at', 'updated_at')
@@ -260,6 +321,28 @@ class MeowCreditRechargeAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at', 'paid_at', 'credited_at')
     autocomplete_fields = ('user', 'package', 'payment_order')
+    actions = ('mark_payment_paid_and_credit',)
+
+    @admin.action(description='Mark linked payment paid and credit wallet')
+    def mark_payment_paid_and_credit(self, request, queryset):
+        credited = 0
+        skipped = 0
+        service = MeowCreditRechargeService()
+        for recharge in queryset.select_related('payment_order'):
+            payment_order = recharge.payment_order
+            if payment_order is None:
+                skipped += 1
+                continue
+            if payment_order.status not in {PaymentOrder.STATUS_PAID, PaymentOrder.STATUS_OVERPAID}:
+                payment_order.status = PaymentOrder.STATUS_PAID
+                payment_order.paid_at = payment_order.paid_at or timezone.now()
+                payment_order.save(update_fields=['status', 'paid_at', 'updated_at'])
+            credited_recharge = service.credit_paid_recharge(recharge)
+            if credited_recharge.credited_at is not None:
+                credited += 1
+            else:
+                skipped += 1
+        self.message_user(request, f'Meow Credit recharge action completed: credited={credited}, skipped={skipped}.')
 
 
 @admin.register(MeowCreditRedeemRequest)
