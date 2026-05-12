@@ -20,7 +20,7 @@ from apps.accounts.meow_credit_serializers import (
     MeowCreditRedeemRequestSerializer,
     MeowCreditWalletSerializer,
 )
-from apps.accounts.services import MeowCreditRechargeService, MeowCreditService
+from apps.accounts.services import LbryDaemonError, MeowCreditPaymentDetectionService, MeowCreditRechargeService, MeowCreditService
 
 
 class MeowCreditWalletAPIView(generics.RetrieveAPIView):
@@ -101,8 +101,29 @@ class MeowCreditRechargeSubmitTxidAPIView(generics.GenericAPIView):
             )
         except DjangoValidationError as exc:
             raise serializers.ValidationError(getattr(exc, 'message_dict', getattr(exc, 'messages', str(exc))))
+        verification = self._verify_recharge_once(recharge)
+        if verification.get('verified'):
+            recharge = MeowCreditRecharge.objects.select_related('payment_order').get(pk=recharge.pk)
         response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        return Response(MeowCreditRechargeSerializer(recharge).data, status=response_status)
+        payload = dict(MeowCreditRechargeSerializer(recharge).data)
+        payload['verification'] = verification
+        return Response(payload, status=response_status)
+
+    def _verify_recharge_once(self, recharge):
+        try:
+            return MeowCreditPaymentDetectionService().verify_recharge_once(recharge=recharge)
+        except LbryDaemonError:
+            payment_order = recharge.payment_order
+            return {
+                'verified': False,
+                'matched': False,
+                'paid': False,
+                'status': payment_order.status if payment_order else recharge.status,
+                'recharge_status': recharge.status,
+                'confirmations': payment_order.confirmations if payment_order else 0,
+                'txid': payment_order.txid if payment_order else '',
+                'reason': 'chain_lookup_failed',
+            }
 
 
 class MeowCreditRechargeListCreateAPIView(generics.ListAPIView):
@@ -168,6 +189,39 @@ class MeowCreditRechargeTxHintAPIView(generics.GenericAPIView):
                 'txid_hint': txid_hint,
                 'status': recharge.status,
                 'detail': 'txid hint recorded; payment confirmation is still required.',
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MeowCreditRechargeVerifyNowAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = MeowCreditRechargeTxHintSerializer
+
+    def post(self, request, order_no):
+        recharge = generics.get_object_or_404(
+            MeowCreditRecharge.objects.select_related('payment_order'),
+            user=request.user,
+            order_no=order_no,
+        )
+        txid_hint = None
+        if request.data:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            txid_hint = serializer.validated_data['txid']
+        try:
+            verification = MeowCreditPaymentDetectionService().verify_recharge_once(
+                recharge=recharge,
+                txid_hint=txid_hint,
+            )
+        except LbryDaemonError:
+            return Response({'detail': 'Verification attempt failed.'}, status=status.HTTP_502_BAD_GATEWAY)
+        recharge = MeowCreditRecharge.objects.select_related('payment_order').get(pk=recharge.pk)
+        return Response(
+            {
+                'recharge': MeowCreditRechargeSerializer(recharge).data,
+                'verification': verification,
+                'detail': 'Verification attempted. Crediting depends on chain confirmations and output matching.',
             },
             status=status.HTTP_200_OK,
         )

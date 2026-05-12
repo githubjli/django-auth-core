@@ -142,9 +142,10 @@ class MeowCreditRechargeSerializer(serializers.ModelSerializer):
 
     def get_expected_amount(self, obj):
         payment_order = getattr(obj, 'payment_order', None)
+        value = obj.price_amount
         if payment_order and payment_order.expected_amount_lbc is not None:
-            return payment_order.expected_amount_lbc
-        return obj.price_amount
+            value = payment_order.expected_amount_lbc
+        return f'{value:.2f}'
 
 
 class MeowCreditRechargeTxHintSerializer(serializers.Serializer):

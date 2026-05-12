@@ -8,6 +8,7 @@ from apps.accounts.meow_credit_views import (
     MeowCreditRechargeListCreateAPIView,
     MeowCreditRechargeSubmitTxidAPIView,
     MeowCreditRechargeTxHintAPIView,
+    MeowCreditRechargeVerifyNowAPIView,
     MeowCreditRedeemListCreateAPIView,
     MeowCreditWalletAPIView,
 )
@@ -21,5 +22,6 @@ urlpatterns = [
     path('recharges/submit-txid/', MeowCreditRechargeSubmitTxidAPIView.as_view(), name='meow-credit-recharge-submit-txid'),
     path('recharges/<str:order_no>/', MeowCreditRechargeDetailAPIView.as_view(), name='meow-credit-recharge-detail'),
     path('recharges/<str:order_no>/tx-hint/', MeowCreditRechargeTxHintAPIView.as_view(), name='meow-credit-recharge-tx-hint'),
+    path('recharges/<str:order_no>/verify-now/', MeowCreditRechargeVerifyNowAPIView.as_view(), name='meow-credit-recharge-verify-now'),
     path('redeems/', MeowCreditRedeemListCreateAPIView.as_view(), name='meow-credit-redeem-list-create'),
 ]
