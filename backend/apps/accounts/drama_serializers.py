@@ -359,21 +359,27 @@ class CreatorDramaSeriesSerializer(serializers.ModelSerializer):
     cover_url = serializers.SerializerMethodField(read_only=True)
     category_name = serializers.CharField(source='category.name', read_only=True)
     category_slug = serializers.CharField(source='category.slug', read_only=True)
+    subscriber_count = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = DramaSeries
         fields = (
             'id', 'owner_id', 'title', 'description', 'cover', 'cover_url', 'category', 'category_name',
             'category_slug', 'tags', 'total_episodes', 'status', 'is_active', 'view_count', 'favorite_count',
-            'created_at', 'updated_at',
+            'comment_count', 'share_count', 'subscriber_count', 'created_at', 'updated_at',
         )
-        read_only_fields = ('id', 'owner_id', 'view_count', 'favorite_count', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'owner_id', 'view_count', 'favorite_count', 'comment_count', 'share_count', 'subscriber_count', 'created_at', 'updated_at')
 
     def get_cover_url(self, obj):
         request = self.context.get('request')
         if not obj.cover:
             return None
         return request.build_absolute_uri(obj.cover.url) if request else obj.cover.url
+
+    def get_subscriber_count(self, obj):
+        if obj.owner_id is None or obj.owner is None:
+            return 0
+        return obj.owner.subscriber_count
 
     def validate_tags(self, value):
         if isinstance(value, str):
@@ -385,12 +391,13 @@ class CreatorDramaEpisodeSerializer(serializers.ModelSerializer):
     series_id = serializers.IntegerField(source='series.id', read_only=True)
     points_price = serializers.IntegerField(source='meow_points_price', required=False)
     coin_price = serializers.IntegerField(write_only=True, required=False)
+    meow_credit_price = serializers.IntegerField(required=False, min_value=0)
 
     class Meta:
         model = DramaEpisode
         fields = (
             'id', 'series_id', 'episode_no', 'title', 'description', 'video_file', 'video_url', 'hls_url', 'thumbnail',
-            'duration_seconds', 'is_free', 'unlock_type', 'meow_points_price', 'points_price', 'coin_price', 'sort_order',
+            'duration_seconds', 'is_free', 'unlock_type', 'meow_points_price', 'meow_credit_price', 'points_price', 'coin_price', 'sort_order',
             'status', 'is_active', 'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'series_id', 'created_at', 'updated_at')
@@ -402,7 +409,9 @@ class CreatorDramaEpisodeSerializer(serializers.ModelSerializer):
         if unlock_type == DramaEpisode.UNLOCK_FREE:
             attrs['is_free'] = True
             attrs['meow_points_price'] = 0
+            attrs['meow_credit_price'] = 0
         elif unlock_type == DramaEpisode.UNLOCK_MEOW_POINTS:
             attrs['is_free'] = False
             attrs['meow_points_price'] = attrs.get('meow_points_price', getattr(self.instance, 'meow_points_price', 0))
+            attrs['meow_credit_price'] = attrs.get('meow_credit_price', getattr(self.instance, 'meow_credit_price', 0))
         return attrs

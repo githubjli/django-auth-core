@@ -3,6 +3,7 @@ from django.urls import path
 from apps.accounts.drama_views import (
     DramaCommentListCreateAPIView,
     DramaFavoriteAPIView,
+    DramaGiftSendAPIView,
     DramaEpisodeUnlockAPIView,
     DramaEpisodeDetailAPIView,
     DramaEpisodeListAPIView,
@@ -24,6 +25,7 @@ urlpatterns = [
     path('<int:pk>/progress/', DramaProgressUpsertAPIView.as_view(), name='drama-progress-upsert'),
     path('episodes/<int:episode_id>/progress/', DramaEpisodeProgressUpsertAPIView.as_view(), name='drama-episode-progress-upsert'),
     path('<int:pk>/favorite/', DramaFavoriteAPIView.as_view(), name='drama-favorite'),
+    path('<int:pk>/gifts/send/', DramaGiftSendAPIView.as_view(), name='drama-gift-send'),
     path('<int:pk>/comments/', DramaCommentListCreateAPIView.as_view(), name='drama-comments'),
     path('<int:pk>/share/', DramaShareAPIView.as_view(), name='drama-share'),
     path('<int:pk>/interaction-summary/', DramaInteractionSummaryAPIView.as_view(), name='drama-interaction-summary'),
