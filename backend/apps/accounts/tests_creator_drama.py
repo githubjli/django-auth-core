@@ -117,25 +117,40 @@ class CreatorDramaAPITestCase(APITestCase):
                 'title': 'Credit Ep',
                 'unlock_type': 'meow_points',
                 'meow_points_price': 30,
-                'meow_credit_price': 8,
+                'credits_price': 8,
             },
             format='json',
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(create_response.data['meow_credit_price'], 8)
+        self.assertEqual(create_response.data['credits_price'], 8)
         episode = DramaEpisode.objects.get(pk=create_response.data['id'])
         self.assertEqual(episode.meow_credit_price, 8)
 
         update_response = self.client.patch(
             f'/api/creator/dramas/{self.own_series.id}/episodes/{episode.id}/',
-            {'meow_credit_price': 12},
+            {'credits_price': 12},
             format='json',
         )
 
         self.assertEqual(update_response.status_code, status.HTTP_200_OK)
         self.assertEqual(update_response.data['meow_credit_price'], 12)
+        self.assertEqual(update_response.data['credits_price'], 12)
         episode.refresh_from_db()
         self.assertEqual(episode.meow_credit_price, 12)
+
+
+        priority_response = self.client.patch(
+            f'/api/creator/dramas/{self.own_series.id}/episodes/{episode.id}/',
+            {'meow_credit_price': 14, 'credits_price': 99},
+            format='json',
+        )
+
+        self.assertEqual(priority_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(priority_response.data['meow_credit_price'], 14)
+        self.assertEqual(priority_response.data['credits_price'], 14)
+        episode.refresh_from_db()
+        self.assertEqual(episode.meow_credit_price, 14)
 
     def test_free_unlock_zeroes_points_and_credit_price(self):
         self.client.force_authenticate(self.creator)
@@ -155,6 +170,7 @@ class CreatorDramaAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['meow_points_price'], 0)
         self.assertEqual(response.data['meow_credit_price'], 0)
+        self.assertEqual(response.data['credits_price'], 0)
         episode = DramaEpisode.objects.get(pk=response.data['id'])
         self.assertTrue(episode.is_free)
         self.assertEqual(episode.meow_points_price, 0)

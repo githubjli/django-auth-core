@@ -68,6 +68,7 @@ class DramaReadOnlyAPITestCase(APITestCase):
             is_free=False,
             unlock_type=DramaEpisode.UNLOCK_MEOW_POINTS,
             meow_points_price=30,
+            meow_credit_price=7,
             sort_order=2,
             video_url='https://cdn.example.com/dramas/active/e02.mp4',
             hls_url='https://cdn.example.com/dramas/active/e02.m3u8',
@@ -137,6 +138,8 @@ class DramaReadOnlyAPITestCase(APITestCase):
 
         second = response.data['episodes'][1]
         self.assertEqual(second['id'], self.locked_episode.id)
+        self.assertEqual(second['meow_credit_price'], 7)
+        self.assertEqual(second['credits_price'], 7)
         self.assertTrue(second['is_locked'])
         self.assertFalse(second['is_unlocked'])
         self.assertIsNone(second['video_url'])
@@ -152,6 +155,8 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertEqual(response.data['id'], self.locked_episode.id)
         self.assertEqual(response.data['series_id'], self.active_series.id)
         self.assertEqual(response.data['episode_no'], 2)
+        self.assertEqual(response.data['meow_credit_price'], 7)
+        self.assertEqual(response.data['credits_price'], 7)
         self.assertTrue(response.data['is_locked'])
         self.assertFalse(response.data['is_unlocked'])
         self.assertIsNone(response.data['video_url'])
@@ -215,6 +220,7 @@ class DramaPhase2APITestCase(APITestCase):
             is_free=False,
             unlock_type=DramaEpisode.UNLOCK_MEOW_POINTS,
             meow_points_price=30,
+            meow_credit_price=7,
             sort_order=2,
             is_active=True,
         )

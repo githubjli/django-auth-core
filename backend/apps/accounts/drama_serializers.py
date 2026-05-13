@@ -114,6 +114,7 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
     is_locked = serializers.SerializerMethodField()
     is_unlocked = serializers.SerializerMethodField()
     points_price = serializers.IntegerField(source='meow_points_price', read_only=True)
+    credits_price = serializers.IntegerField(source='meow_credit_price', read_only=True)
     playback_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
     hls_url = serializers.SerializerMethodField()
@@ -139,6 +140,7 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
             'meow_points_price',
             'meow_credit_price',
             'points_price',
+            'credits_price',
             'is_locked',
             'is_unlocked',
         )
@@ -445,12 +447,13 @@ class CreatorDramaEpisodeSerializer(serializers.ModelSerializer):
     points_price = serializers.IntegerField(source='meow_points_price', required=False)
     coin_price = serializers.IntegerField(write_only=True, required=False)
     meow_credit_price = serializers.IntegerField(required=False, min_value=0)
+    credits_price = serializers.IntegerField(source='meow_credit_price', required=False, min_value=0)
 
     class Meta:
         model = DramaEpisode
         fields = (
             'id', 'series_id', 'episode_no', 'title', 'description', 'video_file', 'video_url', 'hls_url', 'thumbnail',
-            'duration_seconds', 'is_free', 'unlock_type', 'meow_points_price', 'meow_credit_price', 'points_price', 'coin_price', 'sort_order',
+            'duration_seconds', 'is_free', 'unlock_type', 'meow_points_price', 'meow_credit_price', 'points_price', 'credits_price', 'coin_price', 'sort_order',
             'status', 'is_active', 'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'series_id', 'created_at', 'updated_at')
@@ -458,6 +461,10 @@ class CreatorDramaEpisodeSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if 'coin_price' in attrs and 'meow_points_price' not in attrs:
             attrs['meow_points_price'] = attrs.pop('coin_price')
+        if 'meow_credit_price' in getattr(self, 'initial_data', {}) and 'credits_price' in getattr(self, 'initial_data', {}):
+            attrs['meow_credit_price'] = serializers.IntegerField(min_value=0).run_validation(
+                self.initial_data.get('meow_credit_price')
+            )
         unlock_type = attrs.get('unlock_type', getattr(self.instance, 'unlock_type', DramaEpisode.UNLOCK_MEOW_POINTS))
         if unlock_type == DramaEpisode.UNLOCK_FREE:
             attrs['is_free'] = True
