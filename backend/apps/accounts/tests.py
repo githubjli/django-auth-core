@@ -28,10 +28,12 @@ from apps.accounts.models import (
     BillingSubscription,
     Category,
     ChainReceipt,
+    ChannelSubscription,
     LiveChatMessage,
     LiveChatRoom,
     LiveStream,
     LiveStreamProduct,
+    GiftTransaction,
     ManualMembershipPayment,
     MembershipPlan,
     OrderPayment,
@@ -47,6 +49,7 @@ from apps.accounts.models import (
     UserMembership,
     UserShippingAddress,
     Video,
+    VideoLike,
     WalletAddress,
 )
 from apps.accounts.serializers import LiveStreamSerializer
@@ -425,8 +428,26 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertIsNone(get_response.data['seller_store'])
         self.assertEqual(
             get_response.data['counts'],
-            {'videos': 0, 'live_streams': 0, 'products': 0, 'payment_methods': 0, 'orders': 0},
+            {
+                'videos': 0,
+                'followers': 0,
+                'subscribers': 0,
+                'likes': 0,
+                'gifts': 0,
+                'live_streams': 0,
+                'products': 0,
+                'payment_methods': 0,
+                'orders': 0,
+            },
         )
+        self.assertEqual(get_response.data['follower_count'], 0)
+        self.assertEqual(get_response.data['subscriber_count'], 0)
+        self.assertEqual(get_response.data['like_count'], 0)
+        self.assertEqual(get_response.data['total_likes'], 0)
+        self.assertEqual(get_response.data['gift_count'], 0)
+        self.assertEqual(get_response.data['total_gifts'], 0)
+        self.assertEqual(get_response.data['video_count'], 0)
+        self.assertEqual(get_response.data['total_videos'], 0)
         self.assertEqual(get_response.data['display_name'], 'Menu User')
         self.assertIsNone(get_response.data['avatar_url'])
 
@@ -446,6 +467,46 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertIn('/media/avatars/', patch_response.data['avatar_url'])
         self.assertEqual(patch_response.data['id'], user.id)
         self.assertEqual(patch_response.data['email'], user.email)
+
+
+    def test_profile_includes_mobile_stats(self):
+        user = self.create_user('profile-stats@example.com')
+        follower = self.create_user('profile-follower@example.com')
+        liker_one = self.create_user('profile-liker1@example.com')
+        liker_two = self.create_user('profile-liker2@example.com')
+        gift_sender = self.create_user('profile-gifter@example.com')
+        video_one = Video.objects.create(
+            owner=user,
+            title='Stats video 1',
+            file=SimpleUploadedFile('stats1.mp4', b'video-bytes', content_type='video/mp4'),
+        )
+        video_two = Video.objects.create(
+            owner=user,
+            title='Stats video 2',
+            file=SimpleUploadedFile('stats2.mp4', b'video-bytes', content_type='video/mp4'),
+        )
+        ChannelSubscription.objects.create(channel=user, subscriber=follower)
+        VideoLike.objects.create(video=video_one, user=liker_one)
+        VideoLike.objects.create(video=video_two, user=liker_two)
+        GiftTransaction.objects.create(sender=gift_sender, receiver=user, video=video_one, amount=30)
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(reverse('account-profile'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['follower_count'], 1)
+        self.assertEqual(response.data['subscriber_count'], 1)
+        self.assertEqual(response.data['like_count'], 2)
+        self.assertEqual(response.data['total_likes'], 2)
+        self.assertEqual(response.data['gift_count'], 1)
+        self.assertEqual(response.data['total_gifts'], 1)
+        self.assertEqual(response.data['video_count'], 2)
+        self.assertEqual(response.data['total_videos'], 2)
+        self.assertEqual(response.data['counts']['videos'], 2)
+        self.assertEqual(response.data['counts']['followers'], 1)
+        self.assertEqual(response.data['counts']['subscribers'], 1)
+        self.assertEqual(response.data['counts']['likes'], 2)
+        self.assertEqual(response.data['counts']['gifts'], 1)
 
     def test_profile_creator_without_store_shows_capabilities(self):
         user = self.create_user('creator@example.com', is_creator=True)
