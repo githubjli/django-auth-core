@@ -42,6 +42,7 @@ from apps.accounts.models import (
     DailyLoginReward,
     DramaUnlock,
     DramaEpisode,
+    DramaSeries,
     UserMembership,
     OrderPayment,
     PaymentOrder,
@@ -3111,38 +3112,47 @@ class DramaAccessService:
     @staticmethod
     @transaction.atomic
     def unlock_with_meow_credit(*, user, episode: DramaEpisode):
-        existing_unlock = DramaUnlock.objects.select_for_update().filter(user=user, episode=episode).select_related('credit_ledger_entry').first()
-        if existing_unlock is not None:
-            return existing_unlock, False
-
         if episode.is_free:
             return None, False
 
         if episode.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and DramaAccessService.has_active_membership(user):
             return None, False
 
+        wallet, _created = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)
+        existing_unlock = DramaUnlock.objects.select_for_update().filter(user=user, episode=episode).select_related('credit_ledger_entry').first()
+        if existing_unlock is not None:
+            return existing_unlock, False
+
+        amount = episode.meow_credit_price
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        if wallet.balance < amount:
+            raise ValidationError('Insufficient Meow Credit balance.')
+
+        balance_before = wallet.balance
+        balance_after = balance_before - amount
+        wallet.balance = balance_after
+        wallet.total_spent += amount
+        wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+        ledger_entry = MeowCreditLedger.objects.create(
+            user=user,
+            entry_type=MeowCreditLedger.TYPE_SPEND,
+            status=MeowCreditLedger.STATUS_COMPLETED,
+            amount=-amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            target_type='drama_episode',
+            target_id=episode.id,
+            note=f'Drama unlock for series {episode.series_id} episode {episode.id}',
+        )
         unlock = DramaUnlock.objects.create(
             user=user,
             series=episode.series,
             episode=episode,
             source=DramaUnlock.SOURCE_MEOW_CREDIT,
-            credit_amount=0,
+            credit_amount=amount,
+            credit_ledger_entry=ledger_entry,
         )
-        try:
-            _wallet, ledger_entry = MeowCreditService.spend_credit(
-                user=user,
-                amount=episode.meow_credit_price,
-                target_type='drama_episode',
-                target_id=episode.id,
-                note=f'Drama unlock for episode {episode.id}',
-            )
-        except ValidationError:
-            unlock.delete()
-            raise
-
-        unlock.credit_amount = episode.meow_credit_price
-        unlock.credit_ledger_entry = ledger_entry
-        unlock.save(update_fields=['credit_amount', 'credit_ledger_entry'])
         return unlock, True
 
 
@@ -3172,6 +3182,9 @@ class GiftService:
             points_price_snapshot=gift.points_price,
             quantity=quantity,
             total_points=total_points,
+            payment_method=GiftTransaction.PAYMENT_MEOW_POINTS,
+            points_amount=total_points,
+            credits_amount=0,
             ledger_entry=ledger_entry,
         )
 
@@ -3200,5 +3213,69 @@ class GiftService:
             points_price_snapshot=gift.points_price,
             quantity=quantity,
             total_points=total_points,
+            payment_method=GiftTransaction.PAYMENT_MEOW_POINTS,
+            points_amount=total_points,
+            credits_amount=0,
             ledger_entry=ledger_entry,
         )
+
+    @staticmethod
+    @transaction.atomic
+    def send_drama_gift(*, sender, receiver, drama_series: DramaSeries, amount: int, payment_method: str) -> tuple[GiftTransaction, int]:
+        allowed_amounts = {1, 10, 30, 100, 200, 500}
+        if amount not in allowed_amounts:
+            raise ValidationError({'amount': ['Invalid amount.']})
+        if payment_method not in {GiftTransaction.PAYMENT_MEOW_POINTS, GiftTransaction.PAYMENT_MEOW_CREDIT}:
+            raise ValidationError({'payment_method': ['Invalid payment_method.']})
+        if receiver is None:
+            raise ValidationError('Drama series has no owner.')
+        if not drama_series.is_active or drama_series.status != DramaSeries.STATUS_PUBLISHED:
+            raise ValidationError('Drama series is not available for gifts.')
+
+        DramaSeries.objects.select_for_update().get(pk=drama_series.pk)
+        ledger_entry = None
+        credit_ledger_entry = None
+        points_amount = 0
+        credits_amount = 0
+        note = f'Drama gift for drama_series_id={drama_series.id}'
+
+        if payment_method == GiftTransaction.PAYMENT_MEOW_CREDIT:
+            wallet, credit_ledger_entry = MeowCreditService.spend_credit(
+                user=sender,
+                amount=amount,
+                target_type='drama_series_gift',
+                target_id=drama_series.id,
+                note=note,
+            )
+            credits_amount = amount
+        else:
+            wallet, ledger_entry = MeowPointService.spend_points(
+                user=sender,
+                amount=amount,
+                entry_type=MeowPointLedger.TYPE_SPEND,
+                target_type='drama_series_gift',
+                target_id=drama_series.id,
+                note=note,
+            )
+            points_amount = amount
+
+        tx = GiftTransaction.objects.create(
+            sender=sender,
+            receiver=receiver,
+            drama_series=drama_series,
+            gift=None,
+            gift_name_snapshot='Drama Gift',
+            points_price_snapshot=points_amount,
+            quantity=1,
+            total_points=points_amount,
+            payment_method=payment_method,
+            points_amount=points_amount,
+            credits_amount=credits_amount,
+            ledger_entry=ledger_entry,
+            credit_ledger_entry=credit_ledger_entry,
+        )
+        DramaSeries.objects.filter(pk=drama_series.pk).update(
+            gift_count=F('gift_count') + 1,
+            gift_amount_total=F('gift_amount_total') + amount,
+        )
+        return tx, wallet.balance

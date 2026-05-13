@@ -198,6 +198,8 @@ class DramaSeries(models.Model):
     favorite_count = models.PositiveIntegerField(default=0)
     comment_count = models.PositiveIntegerField(default=0)
     share_count = models.PositiveIntegerField(default=0)
+    gift_count = models.PositiveIntegerField(default=0)
+    gift_amount_total = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -989,6 +991,13 @@ class Gift(models.Model):
 
 
 class GiftTransaction(models.Model):
+    PAYMENT_MEOW_POINTS = 'meow_points'
+    PAYMENT_MEOW_CREDIT = 'meow_credit'
+    PAYMENT_METHOD_CHOICES = [
+        (PAYMENT_MEOW_POINTS, 'Meow Points'),
+        (PAYMENT_MEOW_CREDIT, 'Meow Credit'),
+    ]
+
     sender = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -1013,6 +1022,13 @@ class GiftTransaction(models.Model):
         blank=True,
         related_name='gift_transactions',
     )
+    drama_series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transactions',
+    )
     gift = models.ForeignKey(
         Gift,
         on_delete=models.SET_NULL,
@@ -1024,8 +1040,18 @@ class GiftTransaction(models.Model):
     points_price_snapshot = models.PositiveIntegerField(default=0)
     quantity = models.PositiveIntegerField(default=1)
     total_points = models.PositiveIntegerField(default=0)
+    payment_method = models.CharField(max_length=24, choices=PAYMENT_METHOD_CHOICES, default=PAYMENT_MEOW_POINTS)
+    points_amount = models.PositiveIntegerField(default=0)
+    credits_amount = models.PositiveIntegerField(default=0)
     ledger_entry = models.OneToOneField(
         'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transaction',
+    )
+    credit_ledger_entry = models.OneToOneField(
+        'MeowCreditLedger',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,

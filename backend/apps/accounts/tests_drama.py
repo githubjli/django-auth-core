@@ -12,12 +12,14 @@ from apps.accounts.models import (
     DramaShare,
     DramaUnlock,
     DramaWatchProgress,
+    GiftTransaction,
     MeowCreditLedger,
     MeowCreditWallet,
     MeowPointLedger,
     MeowPointWallet,
     User,
 )
+from apps.accounts.services import MeowPointService
 
 
 class DramaReadOnlyAPITestCase(APITestCase):
@@ -32,6 +34,10 @@ class DramaReadOnlyAPITestCase(APITestCase):
             is_active=True,
             view_count=123,
             favorite_count=10,
+            comment_count=2,
+            share_count=3,
+            gift_count=4,
+            gift_amount_total=130,
         )
         self.inactive_series = DramaSeries.objects.create(
             title='Hidden Drama',
@@ -62,6 +68,7 @@ class DramaReadOnlyAPITestCase(APITestCase):
             is_free=False,
             unlock_type=DramaEpisode.UNLOCK_MEOW_POINTS,
             meow_points_price=30,
+            meow_credit_price=7,
             sort_order=2,
             video_url='https://cdn.example.com/dramas/active/e02.mp4',
             hls_url='https://cdn.example.com/dramas/active/e02.m3u8',
@@ -90,6 +97,10 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertEqual(item['total_episodes'], 2)
         self.assertEqual(item['free_episode_count'], 1)
         self.assertEqual(item['locked_episode_count'], 1)
+        self.assertEqual(item['comment_count'], 2)
+        self.assertEqual(item['share_count'], 3)
+        self.assertEqual(item['gift_count'], 4)
+        self.assertEqual(item['gift_amount_total'], 130)
         self.assertFalse(item['is_favorited'])
         self.assertIsNone(item['continue_episode_no'])
         self.assertIsNone(item['continue_progress_seconds'])
@@ -101,6 +112,10 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertEqual(response.data['title'], self.active_series.title)
         self.assertEqual(response.data['free_episode_count'], 1)
         self.assertEqual(response.data['locked_episode_count'], 1)
+        self.assertEqual(response.data['comment_count'], 2)
+        self.assertEqual(response.data['share_count'], 3)
+        self.assertEqual(response.data['gift_count'], 4)
+        self.assertEqual(response.data['gift_amount_total'], 130)
         self.assertFalse(response.data['is_favorited'])
         self.assertIsNone(response.data['continue_episode_no'])
         self.assertIsNone(response.data['continue_progress_seconds'])
@@ -118,13 +133,19 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertTrue(first['is_unlocked'])
         self.assertEqual(first['video_url'], self.free_episode.video_url)
         self.assertEqual(first['hls_url'], self.free_episode.hls_url)
+        self.assertIsNone(first['previous_episode_no'])
+        self.assertEqual(first['next_episode_no'], 2)
 
         second = response.data['episodes'][1]
         self.assertEqual(second['id'], self.locked_episode.id)
+        self.assertEqual(second['meow_credit_price'], 7)
+        self.assertEqual(second['credits_price'], 7)
         self.assertTrue(second['is_locked'])
         self.assertFalse(second['is_unlocked'])
         self.assertIsNone(second['video_url'])
         self.assertIsNone(second['hls_url'])
+        self.assertEqual(second['previous_episode_no'], 1)
+        self.assertIsNone(second['next_episode_no'])
 
     def test_get_drama_episode_detail_by_episode_no(self):
         response = self.client.get(
@@ -134,10 +155,14 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertEqual(response.data['id'], self.locked_episode.id)
         self.assertEqual(response.data['series_id'], self.active_series.id)
         self.assertEqual(response.data['episode_no'], 2)
+        self.assertEqual(response.data['meow_credit_price'], 7)
+        self.assertEqual(response.data['credits_price'], 7)
         self.assertTrue(response.data['is_locked'])
         self.assertFalse(response.data['is_unlocked'])
         self.assertIsNone(response.data['video_url'])
         self.assertIsNone(response.data['hls_url'])
+        self.assertEqual(response.data['previous_episode_no'], 1)
+        self.assertIsNone(response.data['next_episode_no'])
 
     def test_https_forwarded_proto_generates_https_media_urls(self):
         self.free_episode.video_url = ''
@@ -195,6 +220,7 @@ class DramaPhase2APITestCase(APITestCase):
             is_free=False,
             unlock_type=DramaEpisode.UNLOCK_MEOW_POINTS,
             meow_points_price=30,
+            meow_credit_price=7,
             sort_order=2,
             is_active=True,
         )
@@ -320,7 +346,7 @@ class DramaInteractionAPITestCase(APITestCase):
             is_active=True,
         )
 
-    def test_comment_list_and_create(self):
+    def test_comment_create_list_and_reply_count(self):
         self.client.force_authenticate(user=self.user)
         create_response = self.client.post(
             reverse('drama-comments', args=[self.series.id]),
@@ -332,10 +358,24 @@ class DramaInteractionAPITestCase(APITestCase):
         self.series.refresh_from_db()
         self.assertEqual(self.series.comment_count, 1)
 
-        list_response = self.client.get(reverse('drama-comments', args=[self.series.id]))
+        parent_id = create_response.data['id']
+        reply_response = self.client.post(
+            reverse('drama-comments', args=[self.series.id]),
+            {'content': 'Agree!', 'parent_id': parent_id},
+            format='json',
+        )
+        self.assertEqual(reply_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(reply_response.data['parent_id'], parent_id)
+        parent = DramaComment.objects.get(pk=parent_id)
+        self.assertEqual(parent.reply_count, 1)
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.comment_count, 2)
+
+        list_response = self.client.get(reverse('drama-comments', args=[self.series.id]), {'page': 1})
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(list_response.data['results'][0]['content'], 'So good!')
+        self.assertEqual(list_response.data['results'][0]['reply_count'], 1)
 
     def test_share_increments_count(self):
         response = self.client.post(
@@ -355,7 +395,7 @@ class DramaInteractionAPITestCase(APITestCase):
 
     def test_interaction_summary_anonymous(self):
         DramaComment.objects.create(series=self.series, user=self.user, content='Hello')
-        DramaSeries.objects.filter(pk=self.series.pk).update(comment_count=1, share_count=2, favorite_count=3, view_count=4)
+        DramaSeries.objects.filter(pk=self.series.pk).update(comment_count=1, share_count=2, gift_count=5, gift_amount_total=60, favorite_count=3, view_count=4)
         response = self.client.get(reverse('drama-interaction-summary', args=[self.series.id]))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -363,6 +403,8 @@ class DramaInteractionAPITestCase(APITestCase):
         self.assertEqual(response.data['favorite_count'], 3)
         self.assertEqual(response.data['comment_count'], 1)
         self.assertEqual(response.data['share_count'], 2)
+        self.assertEqual(response.data['gift_count'], 5)
+        self.assertEqual(response.data['gift_amount_total'], 60)
         self.assertEqual(response.data['view_count'], 4)
         self.assertFalse(response.data['viewer_is_favorited'])
         self.assertFalse(response.data['viewer_is_subscribed'])
@@ -582,3 +624,186 @@ class DramaViewTrackingAPITestCase(APITestCase):
         detail_response = self.client.get(reverse('drama-series-detail', args=[self.series.id]))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+
+
+
+class DramaGiftAPITestCase(APITestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(email='drama-gift-owner@example.com', password='pass1234')
+        self.sender = User.objects.create_user(email='drama-gift-sender@example.com', password='pass1234')
+        self.series = DramaSeries.objects.create(
+            owner=self.owner,
+            title='Giftable Drama',
+            status=DramaSeries.STATUS_PUBLISHED,
+            is_active=True,
+        )
+        self.ownerless_series = DramaSeries.objects.create(
+            title='Ownerless Drama',
+            status=DramaSeries.STATUS_PUBLISHED,
+            is_active=True,
+        )
+        self.inactive_series = DramaSeries.objects.create(
+            owner=self.owner,
+            title='Inactive Drama',
+            status=DramaSeries.STATUS_PUBLISHED,
+            is_active=False,
+        )
+        self.unpublished_series = DramaSeries.objects.create(
+            owner=self.owner,
+            title='Draft Drama',
+            status=DramaSeries.STATUS_DRAFT,
+            is_active=True,
+        )
+
+    def test_points_gift_success_and_balance_deducted(self):
+        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'amount': 30, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['series_id'], self.series.id)
+        self.assertEqual(response.data['receiver_id'], self.owner.id)
+        self.assertEqual(response.data['amount'], 30)
+        self.assertEqual(response.data['payment_method'], 'meow_points')
+        self.assertEqual(response.data['points_charged'], 30)
+        self.assertEqual(response.data['credits_charged'], 0)
+        self.assertEqual(response.data['sender_balance'], 70)
+        wallet = MeowPointWallet.objects.get(user=self.sender)
+        self.assertEqual(wallet.balance, 70)
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.gift_count, 1)
+        self.assertEqual(self.series.gift_amount_total, 30)
+        tx = GiftTransaction.objects.get(sender=self.sender, drama_series=self.series)
+        self.assertEqual(tx.receiver, self.owner)
+        self.assertEqual(tx.payment_method, 'meow_points')
+        self.assertEqual(tx.points_amount, 30)
+        self.assertEqual(tx.credits_amount, 0)
+        ledger = MeowPointLedger.objects.get(pk=tx.ledger_entry_id)
+        self.assertEqual(ledger.target_type, 'drama_series_gift')
+        self.assertEqual(ledger.target_id, self.series.id)
+        self.assertIn(f'drama_series_id={self.series.id}', ledger.note)
+
+    def test_credit_gift_success(self):
+        MeowCreditWallet.objects.create(user=self.sender, balance=100)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'amount': 30, 'payment_method': 'meow_credit'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['payment_method'], 'meow_credit')
+        self.assertEqual(response.data['points_charged'], 0)
+        self.assertEqual(response.data['credits_charged'], 30)
+        self.assertEqual(response.data['sender_balance'], 70)
+        wallet = MeowCreditWallet.objects.get(user=self.sender)
+        self.assertEqual(wallet.balance, 70)
+        tx = GiftTransaction.objects.get(sender=self.sender, drama_series=self.series)
+        self.assertEqual(tx.payment_method, 'meow_credit')
+        self.assertEqual(tx.points_amount, 0)
+        self.assertEqual(tx.credits_amount, 30)
+        ledger = MeowCreditLedger.objects.get(pk=tx.credit_ledger_entry_id)
+        self.assertEqual(ledger.target_type, 'drama_series_gift')
+        self.assertEqual(ledger.target_id, self.series.id)
+        self.assertIn(f'drama_series_id={self.series.id}', ledger.note)
+
+    def test_default_payment_method_is_meow_points(self):
+        MeowPointService.add_points(user=self.sender, amount=10, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(reverse('drama-gift-send', args=[self.series.id]), {'amount': 10}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['payment_method'], 'meow_points')
+        self.assertEqual(response.data['sender_balance'], 0)
+
+    def test_invalid_amount_rejected(self):
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'amount': 2, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('amount', response.data)
+
+    def test_invalid_payment_method_rejected(self):
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'amount': 30, 'payment_method': 'cash'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('payment_method', response.data)
+
+    def test_drama_gift_insufficient_points(self):
+        MeowPointService.add_points(user=self.sender, amount=10, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'amount': 30, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
+
+    def test_drama_gift_insufficient_credit(self):
+        MeowCreditWallet.objects.create(user=self.sender, balance=10)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'amount': 30, 'payment_method': 'meow_credit'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
+
+    def test_ownerless_drama_gift_returns_clear_error(self):
+        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.ownerless_series.id]),
+            {'amount': 30, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'code': 'receiver_unavailable', 'detail': 'Drama series has no owner.'})
+
+    def test_inactive_and_unpublished_drama_rejected(self):
+        self.client.force_authenticate(user=self.sender)
+
+        inactive_response = self.client.post(
+            reverse('drama-gift-send', args=[self.inactive_series.id]),
+            {'amount': 30, 'payment_method': 'meow_points'},
+            format='json',
+        )
+        unpublished_response = self.client.post(
+            reverse('drama-gift-send', args=[self.unpublished_series.id]),
+            {'amount': 30, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(inactive_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(inactive_response.data['code'], 'drama_unavailable')
+        self.assertEqual(unpublished_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(unpublished_response.data['code'], 'drama_unavailable')
