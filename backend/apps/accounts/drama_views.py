@@ -12,6 +12,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.gift_serializers import GiftSendSerializer, GiftTransactionSerializer
 from apps.accounts.drama_serializers import (
     AccountDramaFavoriteItemSerializer,
     AccountDramaProgressItemSerializer,
