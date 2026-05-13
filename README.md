@@ -361,6 +361,7 @@ These endpoints are read-only and do not require authentication.
 - `GET /api/public/videos/<id>/interaction-summary/` returns `video_id`, `like_count`, `comment_count`, `viewer_has_liked`, `viewer_is_subscribed`, `channel_id`, and `subscriber_count`
 - `GET /api/public/videos/<id>/comments/` - paginated top-level non-deleted comments ordered newest first
 - `POST /api/public/videos/<id>/view/` - record a lightweight view event and return the updated video payload
+- `POST /api/public/videos/<id>/gifts/send/` - send a fixed amount gift using `meow_points` or `meow_credit` (`amount` must be one of `1`, `10`, `30`, `100`, `200`, `500`; legacy `gift_code` + `quantity` remains supported)
 
 The public list also supports the same `category`, `search`, `ordering`, `page`, and `page_size` query params.
 Public video responses also include presentation-friendly fields such as `owner_id`, `owner_name`, `owner_avatar_url`, `description_preview`, `category_name`, `category_slug`, `thumbnail_url`, `like_count`, `comment_count`, `view_count`, and `is_liked`.
@@ -474,6 +475,17 @@ curl -X POST http://127.0.0.1:8001/api/dramas/1/gifts/send/ \
   -H 'Content-Type: application/json' \
   -d '{"amount":30,"payment_method":"meow_credit"}'
 ```
+
+
+Send a public video gift with points or credits:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/public/videos/1/gifts/send/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"amount":30,"payment_method":"meow_credit"}'
+```
+
 
 
 ## Channel Subscription API

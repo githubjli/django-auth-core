@@ -139,6 +139,8 @@ class Video(models.Model):
     like_count = models.PositiveIntegerField(default=0)
     comment_count = models.PositiveIntegerField(default=0)
     share_count = models.PositiveIntegerField(default=0)
+    gift_count = models.PositiveIntegerField(default=0)
+    gift_amount_total = models.PositiveIntegerField(default=0)
     file = models.FileField(upload_to='videos/')
     thumbnail = models.FileField(upload_to='thumbnails/', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

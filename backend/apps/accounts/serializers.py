@@ -1727,6 +1727,7 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     share_count = serializers.IntegerField(read_only=True)
     gift_count = serializers.SerializerMethodField()
     gift_points_total = serializers.SerializerMethodField()
+    gift_amount_total = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
     viewer_has_liked = serializers.SerializerMethodField()
     viewer_is_following = serializers.SerializerMethodField()
@@ -1749,6 +1750,12 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     def get_gift_points_total(self, obj):
         value = GiftTransaction.objects.filter(video=obj).aggregate(total=Sum('total_points')).get('total')
         return value or 0
+
+    def get_gift_amount_total(self, obj):
+        return sum(
+            (tx.amount or tx.total_points or 0)
+            for tx in GiftTransaction.objects.filter(video=obj).only('amount', 'total_points')
+        )
 
     def get_is_liked(self, obj):
         return self.get_viewer_has_liked(obj)

@@ -3229,52 +3229,59 @@ class GiftService:
 
     @staticmethod
     @transaction.atomic
-    def send_drama_gift(*, sender, receiver, drama_series: DramaSeries, amount: int, payment_method: str) -> tuple[GiftTransaction, int, int]:
+    def send_content_gift(
+        *,
+        sender,
+        receiver,
+        target_type: str,
+        target_id: int,
+        amount: int,
+        payment_method: str,
+        drama_series: DramaSeries | None = None,
+        video: Video | None = None,
+        stream: LiveStream | None = None,
+    ) -> tuple[GiftTransaction, int, int]:
         allowed_amounts = {1, 10, 30, 100, 200, 500}
         if amount not in allowed_amounts:
             raise ValidationError({'amount': ['Invalid amount.']})
         if payment_method not in {GiftTransaction.PAYMENT_MEOW_POINTS, GiftTransaction.PAYMENT_MEOW_CREDIT}:
             raise ValidationError({'payment_method': ['Invalid payment_method.']})
         if receiver is None:
-            raise ValidationError('Drama series has no owner.')
-        if not drama_series.is_active or drama_series.status != DramaSeries.STATUS_PUBLISHED:
-            raise ValidationError('Drama series is not available for gifts.')
+            raise ValidationError('Gift receiver is unavailable.')
+        if target_type not in {GiftTransaction.TARGET_DRAMA_SERIES, GiftTransaction.TARGET_VIDEO, GiftTransaction.TARGET_LIVE_STREAM}:
+            raise ValidationError({'target_type': ['Invalid target_type.']})
 
-        locked_series = DramaSeries.objects.select_for_update().get(pk=drama_series.pk)
-        if locked_series.owner_id is None:
-            raise ValidationError('Drama series has no owner.')
-        if not locked_series.is_active or locked_series.status != DramaSeries.STATUS_PUBLISHED:
-            raise ValidationError('Drama series is not available for gifts.')
+        locked_series = None
+        locked_video = None
+        if target_type == GiftTransaction.TARGET_DRAMA_SERIES:
+            if drama_series is None:
+                raise ValidationError({'drama_series': ['drama_series is required.']})
+            locked_series = DramaSeries.objects.select_for_update().get(pk=drama_series.pk)
+            if locked_series.owner_id is None:
+                raise ValidationError('Drama series has no owner.')
+            if not locked_series.is_active or locked_series.status != DramaSeries.STATUS_PUBLISHED:
+                raise ValidationError('Drama series is not available for gifts.')
+            target_id = locked_series.id
+            receiver = locked_series.owner
+        elif target_type == GiftTransaction.TARGET_VIDEO:
+            if video is None:
+                raise ValidationError({'video': ['video is required.']})
+            locked_video = Video.objects.select_for_update().select_related('owner').get(pk=video.pk)
+            target_id = locked_video.id
+            receiver = locked_video.owner
+        else:
+            if stream is None:
+                raise ValidationError({'stream': ['stream is required.']})
+            target_id = stream.id
 
-        target_type = GiftTransaction.TARGET_DRAMA_SERIES
-        ledger_target_type = 'drama_series_gift'
-        tx = GiftTransaction.objects.create(
-            sender=sender,
-            receiver=receiver,
-            drama_series=locked_series,
-            target_type=target_type,
-            target_id=locked_series.id,
-            payment_method=payment_method,
-            amount=amount,
-            points_amount=amount if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS else 0,
-            credits_amount=amount if payment_method == GiftTransaction.PAYMENT_MEOW_CREDIT else 0,
-            gift=None,
-            gift_name_snapshot='Drama Gift',
-            points_price_snapshot=amount if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS else 0,
-            quantity=1,
-            total_points=amount if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS else 0,
-            status=GiftTransaction.STATUS_SUCCEEDED,
-        )
-
-        def gift_note(direction: str) -> str:
-            return (
-                f'gift_transaction_id={tx.id}; target_type={target_type}; target_id={locked_series.id}; '
-                f'drama_series_id={locked_series.id}; sender_id={sender.id}; receiver_id={receiver.id}; '
-                f'direction={direction}'
-            )
+        ledger_target_type = f'{target_type}_gift'
 
         if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS:
             sender_wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=sender)[0]
+            if sender.id == receiver.id:
+                receiver_wallet = sender_wallet
+            else:
+                receiver_wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=receiver)[0]
             if sender_wallet.balance < amount:
                 raise ValidationError('Insufficient Meow Points balance.')
 
@@ -3284,49 +3291,17 @@ class GiftService:
             sender_wallet.total_spent += amount
             sender_wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
 
-            if sender.id == receiver.id:
-                receiver_wallet = sender_wallet
-                receiver_before = sender_after
-                receiver_after = receiver_before + amount
-                receiver_wallet.balance = receiver_after
-                receiver_wallet.total_earned += amount
-                receiver_wallet.save(update_fields=['balance', 'total_earned', 'updated_at'])
-            else:
-                receiver_wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=receiver)[0]
-                receiver_before = receiver_wallet.balance
-                receiver_after = receiver_before + amount
-                receiver_wallet.balance = receiver_after
-                receiver_wallet.total_earned += amount
-                receiver_wallet.save(update_fields=['balance', 'total_earned', 'updated_at'])
-
-            sender_ledger = MeowPointLedger.objects.create(
-                user=sender,
-                entry_type=MeowPointLedger.TYPE_GIFT_SPEND,
-                amount=-amount,
-                balance_before=sender_before,
-                balance_after=sender_after,
-                target_type=ledger_target_type,
-                target_id=locked_series.id,
-                note=gift_note('spend'),
-            )
-            receiver_ledger = MeowPointLedger.objects.create(
-                user=receiver,
-                entry_type=MeowPointLedger.TYPE_GIFT_RECEIVED,
-                amount=amount,
-                balance_before=receiver_before,
-                balance_after=receiver_after,
-                target_type=ledger_target_type,
-                target_id=locked_series.id,
-                note=gift_note('receive'),
-            )
-            tx.sender_point_ledger = sender_ledger
-            tx.receiver_point_ledger = receiver_ledger
-            tx.ledger_entry = sender_ledger
-            tx.save(update_fields=['sender_point_ledger', 'receiver_point_ledger', 'ledger_entry'])
-            sender_balance = sender_after
-            receiver_balance = receiver_after
+            receiver_before = sender_after if sender.id == receiver.id else receiver_wallet.balance
+            receiver_after = receiver_before + amount
+            receiver_wallet.balance = receiver_after
+            receiver_wallet.total_earned += amount
+            receiver_wallet.save(update_fields=['balance', 'total_earned', 'updated_at'])
         else:
             sender_wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=sender)[0]
+            if sender.id == receiver.id:
+                receiver_wallet = sender_wallet
+            else:
+                receiver_wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=receiver)[0]
             if sender_wallet.balance < amount:
                 raise ValidationError('Insufficient Meow Credit balance.')
 
@@ -3336,19 +3311,65 @@ class GiftService:
             sender_wallet.total_spent += amount
             sender_wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
 
-            if sender.id == receiver.id:
-                receiver_wallet = sender_wallet
-                receiver_before = sender_after
-                receiver_after = receiver_before + amount
-                receiver_wallet.balance = receiver_after
-                receiver_wallet.save(update_fields=['balance', 'updated_at'])
-            else:
-                receiver_wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=receiver)[0]
-                receiver_before = receiver_wallet.balance
-                receiver_after = receiver_before + amount
-                receiver_wallet.balance = receiver_after
-                receiver_wallet.save(update_fields=['balance', 'updated_at'])
+            receiver_before = sender_after if sender.id == receiver.id else receiver_wallet.balance
+            receiver_after = receiver_before + amount
+            receiver_wallet.balance = receiver_after
+            receiver_wallet.save(update_fields=['balance', 'updated_at'])
 
+        tx = GiftTransaction.objects.create(
+            sender=sender,
+            receiver=receiver,
+            drama_series=locked_series,
+            video=locked_video,
+            stream=stream,
+            target_type=target_type,
+            target_id=target_id,
+            payment_method=payment_method,
+            amount=amount,
+            points_amount=amount if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS else 0,
+            credits_amount=amount if payment_method == GiftTransaction.PAYMENT_MEOW_CREDIT else 0,
+            gift=None,
+            gift_name_snapshot='Content Gift',
+            points_price_snapshot=amount if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS else 0,
+            quantity=1,
+            total_points=amount if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS else 0,
+            status=GiftTransaction.STATUS_SUCCEEDED,
+        )
+
+        def gift_note(direction: str) -> str:
+            drama_series_id = locked_series.id if locked_series is not None else ''
+            return (
+                f'gift_transaction_id={tx.id}; target_type={target_type}; target_id={target_id}; '
+                f'drama_series_id={drama_series_id}; sender_id={sender.id}; receiver_id={receiver.id}; '
+                f'direction={direction}'
+            )
+
+        if payment_method == GiftTransaction.PAYMENT_MEOW_POINTS:
+            sender_ledger = MeowPointLedger.objects.create(
+                user=sender,
+                entry_type=MeowPointLedger.TYPE_GIFT_SPEND,
+                amount=-amount,
+                balance_before=sender_before,
+                balance_after=sender_after,
+                target_type=ledger_target_type,
+                target_id=target_id,
+                note=gift_note('spend'),
+            )
+            receiver_ledger = MeowPointLedger.objects.create(
+                user=receiver,
+                entry_type=MeowPointLedger.TYPE_GIFT_RECEIVED,
+                amount=amount,
+                balance_before=receiver_before,
+                balance_after=receiver_after,
+                target_type=ledger_target_type,
+                target_id=target_id,
+                note=gift_note('receive'),
+            )
+            tx.sender_point_ledger = sender_ledger
+            tx.receiver_point_ledger = receiver_ledger
+            tx.ledger_entry = sender_ledger
+            tx.save(update_fields=['sender_point_ledger', 'receiver_point_ledger', 'ledger_entry'])
+        else:
             sender_ledger = MeowCreditLedger.objects.create(
                 user=sender,
                 entry_type=MeowCreditLedger.TYPE_GIFT_SPEND,
@@ -3357,7 +3378,7 @@ class GiftService:
                 balance_before=sender_before,
                 balance_after=sender_after,
                 target_type=ledger_target_type,
-                target_id=locked_series.id,
+                target_id=target_id,
                 note=gift_note('spend'),
             )
             receiver_ledger = MeowCreditLedger.objects.create(
@@ -3368,18 +3389,36 @@ class GiftService:
                 balance_before=receiver_before,
                 balance_after=receiver_after,
                 target_type=ledger_target_type,
-                target_id=locked_series.id,
+                target_id=target_id,
                 note=gift_note('receive'),
             )
             tx.sender_credit_ledger = sender_ledger
             tx.receiver_credit_ledger = receiver_ledger
             tx.credit_ledger_entry = sender_ledger
             tx.save(update_fields=['sender_credit_ledger', 'receiver_credit_ledger', 'credit_ledger_entry'])
-            sender_balance = sender_after
-            receiver_balance = receiver_after
 
-        DramaSeries.objects.filter(pk=locked_series.pk).update(
-            gift_count=F('gift_count') + 1,
-            gift_amount_total=F('gift_amount_total') + amount,
+        if locked_series is not None:
+            DramaSeries.objects.filter(pk=locked_series.pk).update(
+                gift_count=F('gift_count') + 1,
+                gift_amount_total=F('gift_amount_total') + amount,
+            )
+        if locked_video is not None:
+            update_kwargs = {
+                'gift_count': F('gift_count') + 1,
+                'gift_amount_total': F('gift_amount_total') + amount,
+            }
+            Video.objects.filter(pk=locked_video.pk).update(**update_kwargs)
+
+        return tx, sender_after, receiver_after
+
+    @staticmethod
+    def send_drama_gift(*, sender, receiver, drama_series: DramaSeries, amount: int, payment_method: str) -> tuple[GiftTransaction, int, int]:
+        return GiftService.send_content_gift(
+            sender=sender,
+            receiver=receiver,
+            target_type=GiftTransaction.TARGET_DRAMA_SERIES,
+            target_id=drama_series.id,
+            amount=amount,
+            payment_method=payment_method,
+            drama_series=drama_series,
         )
-        return tx, sender_balance, receiver_balance

@@ -1534,6 +1534,7 @@ class VideoAPITestCase(APITestCase):
                 'share_count',
                 'gift_count',
                 'gift_points_total',
+                'gift_amount_total',
                 'is_liked',
                 'viewer_has_liked',
                 'viewer_is_following',
