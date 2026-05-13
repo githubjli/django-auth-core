@@ -198,6 +198,8 @@ class DramaSeries(models.Model):
     favorite_count = models.PositiveIntegerField(default=0)
     comment_count = models.PositiveIntegerField(default=0)
     share_count = models.PositiveIntegerField(default=0)
+    gift_count = models.PositiveIntegerField(default=0)
+    gift_amount_total = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -989,6 +991,29 @@ class Gift(models.Model):
 
 
 class GiftTransaction(models.Model):
+    PAYMENT_MEOW_POINTS = 'meow_points'
+    PAYMENT_MEOW_CREDIT = 'meow_credit'
+    PAYMENT_METHOD_CHOICES = [
+        (PAYMENT_MEOW_POINTS, 'Meow Points'),
+        (PAYMENT_MEOW_CREDIT, 'Meow Credit'),
+    ]
+    TARGET_DRAMA_SERIES = 'drama_series'
+    TARGET_VIDEO = 'video'
+    TARGET_LIVE_STREAM = 'live_stream'
+    TARGET_TYPE_CHOICES = [
+        (TARGET_DRAMA_SERIES, 'Drama Series'),
+        (TARGET_VIDEO, 'Video'),
+        (TARGET_LIVE_STREAM, 'Live Stream'),
+    ]
+    STATUS_SUCCEEDED = 'succeeded'
+    STATUS_REFUNDED = 'refunded'
+    STATUS_REVERSED = 'reversed'
+    STATUS_CHOICES = [
+        (STATUS_SUCCEEDED, 'Succeeded'),
+        (STATUS_REFUNDED, 'Refunded'),
+        (STATUS_REVERSED, 'Reversed'),
+    ]
+
     sender = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -1013,6 +1038,13 @@ class GiftTransaction(models.Model):
         blank=True,
         related_name='gift_transactions',
     )
+    drama_series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transactions',
+    )
     gift = models.ForeignKey(
         Gift,
         on_delete=models.SET_NULL,
@@ -1024,12 +1056,54 @@ class GiftTransaction(models.Model):
     points_price_snapshot = models.PositiveIntegerField(default=0)
     quantity = models.PositiveIntegerField(default=1)
     total_points = models.PositiveIntegerField(default=0)
+    target_type = models.CharField(max_length=32, choices=TARGET_TYPE_CHOICES, blank=True, default='')
+    target_id = models.PositiveBigIntegerField(null=True, blank=True)
+    payment_method = models.CharField(max_length=24, choices=PAYMENT_METHOD_CHOICES, default=PAYMENT_MEOW_POINTS)
+    amount = models.PositiveIntegerField(default=0)
+    points_amount = models.PositiveIntegerField(default=0)
+    credits_amount = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_SUCCEEDED)
     ledger_entry = models.OneToOneField(
         'MeowPointLedger',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='gift_transaction',
+    )
+    credit_ledger_entry = models.OneToOneField(
+        'MeowCreditLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transaction',
+    )
+    sender_point_ledger = models.OneToOneField(
+        'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sent_gift_transaction',
+    )
+    receiver_point_ledger = models.OneToOneField(
+        'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='received_gift_transaction',
+    )
+    sender_credit_ledger = models.OneToOneField(
+        'MeowCreditLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sent_gift_transaction',
+    )
+    receiver_credit_ledger = models.OneToOneField(
+        'MeowCreditLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='received_gift_transaction',
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -1038,8 +1112,8 @@ class GiftTransaction(models.Model):
 
     def clean(self):
         super().clean()
-        if self.stream_id is None and self.video_id is None:
-            raise ValidationError('Gift transaction must be associated with a stream or video.')
+        if self.stream_id is None and self.video_id is None and self.drama_series_id is None:
+            raise ValidationError('Gift transaction must be associated with a stream, video, or drama series.')
 
 
 class StreamPaymentMethod(models.Model):
@@ -1512,12 +1586,16 @@ class MeowCreditLedger(models.Model):
     TYPE_REDEEM = 'redeem'
     TYPE_REFUND = 'refund'
     TYPE_ADMIN_ADJUST = 'admin_adjust'
+    TYPE_GIFT_SPEND = 'gift_spend'
+    TYPE_GIFT_RECEIVED = 'gift_received'
     ENTRY_TYPE_CHOICES = [
         (TYPE_RECHARGE, 'Recharge'),
         (TYPE_SPEND, 'Spend'),
         (TYPE_REDEEM, 'Redeem'),
         (TYPE_REFUND, 'Refund'),
         (TYPE_ADMIN_ADJUST, 'Admin Adjust'),
+        (TYPE_GIFT_SPEND, 'Gift Spend'),
+        (TYPE_GIFT_RECEIVED, 'Gift Received'),
     ]
 
     STATUS_PENDING = 'pending'
@@ -1755,6 +1833,8 @@ class MeowPointLedger(models.Model):
     TYPE_SPEND = 'spend'
     TYPE_REFUND = 'refund'
     TYPE_ADMIN_ADJUST = 'admin_adjust'
+    TYPE_GIFT_SPEND = 'gift_spend'
+    TYPE_GIFT_RECEIVED = 'gift_received'
     ENTRY_TYPE_CHOICES = [
         (TYPE_PURCHASE, 'Purchase'),
         (TYPE_BONUS, 'Bonus'),
@@ -1762,6 +1842,8 @@ class MeowPointLedger(models.Model):
         (TYPE_SPEND, 'Spend'),
         (TYPE_REFUND, 'Refund'),
         (TYPE_ADMIN_ADJUST, 'Admin Adjust'),
+        (TYPE_GIFT_SPEND, 'Gift Spend'),
+        (TYPE_GIFT_RECEIVED, 'Gift Received'),
     ]
 
     user = models.ForeignKey(

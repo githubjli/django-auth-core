@@ -23,14 +23,28 @@ from apps.accounts.drama_serializers import (
     DramaEpisodeUnlockRequestSerializer,
     DramaFavoriteStateSerializer,
     DramaInteractionSummarySerializer,
+    DramaGiftSendResponseSerializer,
+    DramaGiftSendSerializer,
     DramaUnlockResponseSerializer,
     DramaProgressSaveSerializer,
     DramaSeriesSerializer,
     DramaWatchProgressSerializer,
 )
 from apps.accounts.models import ChannelSubscription, DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaSeriesView, DramaShare, DramaUnlock, DramaWatchProgress
-from apps.accounts.services import DramaAccessService
+from apps.accounts.services import DramaAccessService, GiftService
 
+
+
+
+def build_episode_nav_by_id(episodes):
+    ordered = sorted(episodes, key=lambda episode: (episode.sort_order, episode.episode_no, episode.id))
+    nav_by_id = {}
+    for index, episode in enumerate(ordered):
+        nav_by_id[episode.id] = {
+            'previous_episode_no': ordered[index - 1].episode_no if index > 0 else None,
+            'next_episode_no': ordered[index + 1].episode_no if index < len(ordered) - 1 else None,
+        }
+    return nav_by_id
 
 def get_client_ip(request):
     forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
@@ -119,7 +133,7 @@ class DramaEpisodeListAPIView(APIView):
             DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
             pk=pk,
         )
-        episodes = DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id')
+        episodes = list(DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id'))
         unlocked_episode_ids: set[int] = set()
         has_active_membership = False
         if request.user.is_authenticated:
@@ -134,6 +148,7 @@ class DramaEpisodeListAPIView(APIView):
                 'request': request,
                 'unlocked_episode_ids': unlocked_episode_ids,
                 'has_active_membership': has_active_membership,
+                'episode_nav_by_id': build_episode_nav_by_id(episodes),
             },
         )
         return Response({'series_id': series.id, 'episodes': serializer.data})
@@ -156,12 +171,14 @@ class DramaEpisodeDetailAPIView(APIView):
                 DramaUnlock.objects.filter(user=request.user, series=series).values_list('episode_id', flat=True)
             )
             has_active_membership = DramaAccessService.has_active_membership(request.user)
+        series_episodes = list(DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id'))
         serializer = DramaEpisodeSerializer(
             episode,
             context={
                 'request': request,
                 'unlocked_episode_ids': unlocked_episode_ids,
                 'has_active_membership': has_active_membership,
+                'episode_nav_by_id': build_episode_nav_by_id(series_episodes),
             },
         )
         return Response(serializer.data)
@@ -306,6 +323,70 @@ class DramaInteractionSummaryAPIView(APIView):
             pk=pk,
         )
         return Response(DramaInteractionSummarySerializer(series, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+class DramaGiftSendAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        series = get_object_or_404(DramaSeries.objects.select_related('owner'), pk=pk)
+        if not series.is_active or series.status != DramaSeries.STATUS_PUBLISHED:
+            return Response(
+                {'code': 'drama_unavailable', 'detail': 'Drama series is not available for gifts.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if series.owner_id is None:
+            return Response(
+                {'code': 'receiver_unavailable', 'detail': 'Drama series has no owner.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = DramaGiftSendSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        amount = serializer.validated_data['amount']
+        payment_method = serializer.validated_data['payment_method']
+
+        try:
+            tx, sender_balance, receiver_balance = GiftService.send_drama_gift(
+                sender=request.user,
+                receiver=series.owner,
+                drama_series=series,
+                amount=amount,
+                payment_method=payment_method,
+            )
+        except DjangoValidationError as exc:
+            error_text = str(exc)
+            if 'Insufficient Meow Points balance.' in error_text or 'Insufficient Meow Credit balance.' in error_text:
+                return Response(
+                    {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if 'Drama series has no owner.' in error_text:
+                return Response(
+                    {'code': 'receiver_unavailable', 'detail': 'Drama series has no owner.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if 'Drama series is not available for gifts.' in error_text:
+                return Response(
+                    {'code': 'drama_unavailable', 'detail': 'Drama series is not available for gifts.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return Response({'detail': error_text}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_serializer = DramaGiftSendResponseSerializer(
+            {
+                'series_id': series.id,
+                'receiver_id': series.owner_id,
+                'amount': amount,
+                'payment_method': payment_method,
+                'points_charged': tx.points_amount,
+                'credits_charged': tx.credits_amount,
+                'sender_balance': sender_balance,
+                'receiver_balance': receiver_balance,
+                'gift_transaction_id': tx.id,
+            }
+        )
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 
 class AccountDramaProgressListAPIView(generics.ListAPIView):

@@ -441,12 +441,18 @@ class GiftAdmin(admin.ModelAdmin):
 
 @admin.register(GiftTransaction)
 class GiftTransactionAdmin(admin.ModelAdmin):
-    list_display = ('id', 'sender', 'receiver', 'stream', 'gift_name_snapshot', 'quantity', 'total_points', 'created_at')
-    list_filter = ('created_at',)
+    list_display = (
+        'id', 'sender', 'receiver', 'drama_series', 'target_type', 'target_id', 'payment_method',
+        'amount', 'points_amount', 'credits_amount', 'status', 'created_at',
+    )
+    list_filter = ('payment_method', 'status', 'target_type', 'created_at')
     search_fields = ('sender__email', 'receiver__email', 'gift_name_snapshot')
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at',)
-    autocomplete_fields = ('sender', 'receiver', 'stream', 'gift', 'ledger_entry')
+    autocomplete_fields = (
+        'sender', 'receiver', 'stream', 'video', 'drama_series', 'gift', 'ledger_entry', 'credit_ledger_entry',
+        'sender_point_ledger', 'receiver_point_ledger', 'sender_credit_ledger', 'receiver_credit_ledger',
+    )
 
 
 @admin.register(VideoLike)
