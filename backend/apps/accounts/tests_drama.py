@@ -655,8 +655,17 @@ class DramaGiftAPITestCase(APITestCase):
             is_active=True,
         )
 
-    def test_points_gift_success_and_balance_deducted(self):
-        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+    def _gift_ledgers_exist(self):
+        return (
+            MeowPointLedger.objects.filter(entry_type__in=[MeowPointLedger.TYPE_GIFT_SPEND, MeowPointLedger.TYPE_GIFT_RECEIVED]).exists()
+            or MeowCreditLedger.objects.filter(entry_type__in=[MeowCreditLedger.TYPE_GIFT_SPEND, MeowCreditLedger.TYPE_GIFT_RECEIVED]).exists()
+        )
+
+    def test_points_gift_success_transfers_points_to_receiver(self):
+        sender_points = MeowPointWallet.objects.create(user=self.sender, balance=100)
+        receiver_points = MeowPointWallet.objects.create(user=self.owner, balance=50)
+        sender_credits = MeowCreditWallet.objects.create(user=self.sender, balance=77)
+        receiver_credits = MeowCreditWallet.objects.create(user=self.owner, balance=88)
         self.client.force_authenticate(user=self.sender)
 
         response = self.client.post(
@@ -673,23 +682,54 @@ class DramaGiftAPITestCase(APITestCase):
         self.assertEqual(response.data['points_charged'], 30)
         self.assertEqual(response.data['credits_charged'], 0)
         self.assertEqual(response.data['sender_balance'], 70)
-        wallet = MeowPointWallet.objects.get(user=self.sender)
-        self.assertEqual(wallet.balance, 70)
+        self.assertEqual(response.data['receiver_balance'], 80)
+        self.assertIn('gift_transaction_id', response.data)
+
+        sender_points.refresh_from_db()
+        receiver_points.refresh_from_db()
+        sender_credits.refresh_from_db()
+        receiver_credits.refresh_from_db()
+        self.assertEqual(sender_points.balance, 70)
+        self.assertEqual(receiver_points.balance, 80)
+        self.assertEqual(sender_credits.balance, 77)
+        self.assertEqual(receiver_credits.balance, 88)
+
+        tx = GiftTransaction.objects.get(pk=response.data['gift_transaction_id'])
+        self.assertEqual(tx.sender, self.sender)
+        self.assertEqual(tx.receiver, self.owner)
+        self.assertEqual(tx.drama_series, self.series)
+        self.assertEqual(tx.target_type, GiftTransaction.TARGET_DRAMA_SERIES)
+        self.assertEqual(tx.target_id, self.series.id)
+        self.assertEqual(tx.payment_method, GiftTransaction.PAYMENT_MEOW_POINTS)
+        self.assertEqual(tx.amount, 30)
+        self.assertEqual(tx.points_amount, 30)
+        self.assertEqual(tx.credits_amount, 0)
+        self.assertEqual(tx.status, GiftTransaction.STATUS_SUCCEEDED)
+        self.assertIsNotNone(tx.sender_point_ledger)
+        self.assertIsNotNone(tx.receiver_point_ledger)
+        self.assertIsNone(tx.sender_credit_ledger)
+        self.assertIsNone(tx.receiver_credit_ledger)
+        self.assertEqual(tx.sender_point_ledger.sent_gift_transaction, tx)
+        self.assertEqual(tx.receiver_point_ledger.received_gift_transaction, tx)
+        self.assertEqual(tx.ledger_entry, tx.sender_point_ledger)
+        self.assertIn(f'gift_transaction_id={tx.id}', tx.sender_point_ledger.note)
+        self.assertIn(f'target_type={GiftTransaction.TARGET_DRAMA_SERIES}', tx.sender_point_ledger.note)
+        self.assertIn(f'target_id={self.series.id}', tx.sender_point_ledger.note)
+        self.assertIn(f'drama_series_id={self.series.id}', tx.sender_point_ledger.note)
+        self.assertIn(f'sender_id={self.sender.id}', tx.sender_point_ledger.note)
+        self.assertIn(f'receiver_id={self.owner.id}', tx.sender_point_ledger.note)
+        self.assertIn('direction=spend', tx.sender_point_ledger.note)
+        self.assertIn('direction=receive', tx.receiver_point_ledger.note)
+
         self.series.refresh_from_db()
         self.assertEqual(self.series.gift_count, 1)
         self.assertEqual(self.series.gift_amount_total, 30)
-        tx = GiftTransaction.objects.get(sender=self.sender, drama_series=self.series)
-        self.assertEqual(tx.receiver, self.owner)
-        self.assertEqual(tx.payment_method, 'meow_points')
-        self.assertEqual(tx.points_amount, 30)
-        self.assertEqual(tx.credits_amount, 0)
-        ledger = MeowPointLedger.objects.get(pk=tx.ledger_entry_id)
-        self.assertEqual(ledger.target_type, 'drama_series_gift')
-        self.assertEqual(ledger.target_id, self.series.id)
-        self.assertIn(f'drama_series_id={self.series.id}', ledger.note)
 
-    def test_credit_gift_success(self):
-        MeowCreditWallet.objects.create(user=self.sender, balance=100)
+    def test_credit_gift_success_transfers_credits_to_receiver(self):
+        sender_points = MeowPointWallet.objects.create(user=self.sender, balance=44)
+        receiver_points = MeowPointWallet.objects.create(user=self.owner, balance=55)
+        sender_credits = MeowCreditWallet.objects.create(user=self.sender, balance=100)
+        receiver_credits = MeowCreditWallet.objects.create(user=self.owner, balance=50)
         self.client.force_authenticate(user=self.sender)
 
         response = self.client.post(
@@ -703,19 +743,39 @@ class DramaGiftAPITestCase(APITestCase):
         self.assertEqual(response.data['points_charged'], 0)
         self.assertEqual(response.data['credits_charged'], 30)
         self.assertEqual(response.data['sender_balance'], 70)
-        wallet = MeowCreditWallet.objects.get(user=self.sender)
-        self.assertEqual(wallet.balance, 70)
-        tx = GiftTransaction.objects.get(sender=self.sender, drama_series=self.series)
-        self.assertEqual(tx.payment_method, 'meow_credit')
+        self.assertEqual(response.data['receiver_balance'], 80)
+
+        sender_points.refresh_from_db()
+        receiver_points.refresh_from_db()
+        sender_credits.refresh_from_db()
+        receiver_credits.refresh_from_db()
+        self.assertEqual(sender_points.balance, 44)
+        self.assertEqual(receiver_points.balance, 55)
+        self.assertEqual(sender_credits.balance, 70)
+        self.assertEqual(receiver_credits.balance, 80)
+
+        tx = GiftTransaction.objects.get(pk=response.data['gift_transaction_id'])
+        self.assertEqual(tx.target_type, GiftTransaction.TARGET_DRAMA_SERIES)
+        self.assertEqual(tx.target_id, self.series.id)
+        self.assertEqual(tx.payment_method, GiftTransaction.PAYMENT_MEOW_CREDIT)
+        self.assertEqual(tx.amount, 30)
         self.assertEqual(tx.points_amount, 0)
         self.assertEqual(tx.credits_amount, 30)
-        ledger = MeowCreditLedger.objects.get(pk=tx.credit_ledger_entry_id)
-        self.assertEqual(ledger.target_type, 'drama_series_gift')
-        self.assertEqual(ledger.target_id, self.series.id)
-        self.assertIn(f'drama_series_id={self.series.id}', ledger.note)
+        self.assertIsNone(tx.sender_point_ledger)
+        self.assertIsNone(tx.receiver_point_ledger)
+        self.assertIsNotNone(tx.sender_credit_ledger)
+        self.assertIsNotNone(tx.receiver_credit_ledger)
+        self.assertEqual(tx.sender_credit_ledger.sent_gift_transaction, tx)
+        self.assertEqual(tx.receiver_credit_ledger.received_gift_transaction, tx)
+        self.assertEqual(tx.credit_ledger_entry, tx.sender_credit_ledger)
+        self.assertIn(f'gift_transaction_id={tx.id}', tx.sender_credit_ledger.note)
+        self.assertIn(f'drama_series_id={self.series.id}', tx.sender_credit_ledger.note)
+        self.assertIn('direction=spend', tx.sender_credit_ledger.note)
+        self.assertIn('direction=receive', tx.receiver_credit_ledger.note)
 
     def test_default_payment_method_is_meow_points(self):
-        MeowPointService.add_points(user=self.sender, amount=10, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        MeowPointWallet.objects.create(user=self.sender, balance=10)
+        MeowPointWallet.objects.create(user=self.owner, balance=0)
         self.client.force_authenticate(user=self.sender)
 
         response = self.client.post(reverse('drama-gift-send', args=[self.series.id]), {'amount': 10}, format='json')
@@ -723,6 +783,7 @@ class DramaGiftAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['payment_method'], 'meow_points')
         self.assertEqual(response.data['sender_balance'], 0)
+        self.assertEqual(response.data['receiver_balance'], 10)
 
     def test_invalid_amount_rejected(self):
         self.client.force_authenticate(user=self.sender)
@@ -748,8 +809,9 @@ class DramaGiftAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('payment_method', response.data)
 
-    def test_drama_gift_insufficient_points(self):
-        MeowPointService.add_points(user=self.sender, amount=10, entry_type=MeowPointLedger.TYPE_PURCHASE)
+    def test_drama_gift_insufficient_points_rolls_back_everything(self):
+        MeowPointWallet.objects.create(user=self.sender, balance=10)
+        MeowPointWallet.objects.create(user=self.owner, balance=5)
         self.client.force_authenticate(user=self.sender)
 
         response = self.client.post(
@@ -761,9 +823,16 @@ class DramaGiftAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
         self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
+        self.assertFalse(self._gift_ledgers_exist())
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.gift_count, 0)
+        self.assertEqual(self.series.gift_amount_total, 0)
+        self.assertEqual(MeowPointWallet.objects.get(user=self.sender).balance, 10)
+        self.assertEqual(MeowPointWallet.objects.get(user=self.owner).balance, 5)
 
-    def test_drama_gift_insufficient_credit(self):
+    def test_drama_gift_insufficient_credit_rolls_back_everything(self):
         MeowCreditWallet.objects.create(user=self.sender, balance=10)
+        MeowCreditWallet.objects.create(user=self.owner, balance=5)
         self.client.force_authenticate(user=self.sender)
 
         response = self.client.post(
@@ -775,9 +844,14 @@ class DramaGiftAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
         self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
+        self.assertFalse(self._gift_ledgers_exist())
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.gift_count, 0)
+        self.assertEqual(self.series.gift_amount_total, 0)
+        self.assertEqual(MeowCreditWallet.objects.get(user=self.sender).balance, 10)
+        self.assertEqual(MeowCreditWallet.objects.get(user=self.owner).balance, 5)
 
     def test_ownerless_drama_gift_returns_clear_error(self):
-        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
         self.client.force_authenticate(user=self.sender)
 
         response = self.client.post(
@@ -804,6 +878,6 @@ class DramaGiftAPITestCase(APITestCase):
         )
 
         self.assertEqual(inactive_response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(inactive_response.data['code'], 'drama_unavailable')
+        self.assertEqual(inactive_response.data, {'code': 'drama_unavailable', 'detail': 'Drama series is not available for gifts.'})
         self.assertEqual(unpublished_response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(unpublished_response.data['code'], 'drama_unavailable')
+        self.assertEqual(unpublished_response.data, {'code': 'drama_unavailable', 'detail': 'Drama series is not available for gifts.'})

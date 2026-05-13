@@ -308,6 +308,8 @@ class DramaGiftSendResponseSerializer(serializers.Serializer):
     points_charged = serializers.IntegerField()
     credits_charged = serializers.IntegerField()
     sender_balance = serializers.IntegerField()
+    receiver_balance = serializers.IntegerField()
+    gift_transaction_id = serializers.IntegerField()
 
 
 class DramaProgressSaveSerializer(serializers.Serializer):

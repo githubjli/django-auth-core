@@ -348,7 +348,7 @@ class DramaGiftSendAPIView(APIView):
         payment_method = serializer.validated_data['payment_method']
 
         try:
-            tx, sender_balance = GiftService.send_drama_gift(
+            tx, sender_balance, receiver_balance = GiftService.send_drama_gift(
                 sender=request.user,
                 receiver=series.owner,
                 drama_series=series,
@@ -383,6 +383,8 @@ class DramaGiftSendAPIView(APIView):
                 'points_charged': tx.points_amount,
                 'credits_charged': tx.credits_amount,
                 'sender_balance': sender_balance,
+                'receiver_balance': receiver_balance,
+                'gift_transaction_id': tx.id,
             }
         )
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)

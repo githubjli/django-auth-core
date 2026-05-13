@@ -449,7 +449,9 @@ Successful response shape:
   "payment_method": "meow_credit",
   "points_charged": 0,
   "credits_charged": 30,
-  "sender_balance": 970
+  "sender_balance": 970,
+  "receiver_balance": 130,
+  "gift_transaction_id": 99
 }
 ```
 
