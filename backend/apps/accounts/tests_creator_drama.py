@@ -87,3 +87,71 @@ class CreatorDramaAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         item = next(i for i in response.data['episodes'] if i['id'] == episode.id)
         self.assertIsNone(item['playback_url'])
+
+
+    def test_series_serializer_exposes_interaction_counts(self):
+        self.own_series.comment_count = 4
+        self.own_series.share_count = 5
+        self.own_series.save(update_fields=['comment_count', 'share_count'])
+        self.creator.subscriber_count = 6
+        self.creator.save(update_fields=['subscriber_count'])
+        self.client.force_authenticate(self.creator)
+
+        response = self.client.get(f'/api/creator/dramas/{self.own_series.id}/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['comment_count'], 4)
+        self.assertEqual(response.data['share_count'], 5)
+        self.assertEqual(response.data['subscriber_count'], 6)
+
+    def test_creator_can_create_and_update_credit_price(self):
+        self.client.force_authenticate(self.creator)
+        create_response = self.client.post(
+            f'/api/creator/dramas/{self.own_series.id}/episodes/',
+            {
+                'episode_no': 10,
+                'title': 'Credit Ep',
+                'unlock_type': 'meow_points',
+                'meow_points_price': 30,
+                'meow_credit_price': 8,
+            },
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['meow_credit_price'], 8)
+        episode = DramaEpisode.objects.get(pk=create_response.data['id'])
+        self.assertEqual(episode.meow_credit_price, 8)
+
+        update_response = self.client.patch(
+            f'/api/creator/dramas/{self.own_series.id}/episodes/{episode.id}/',
+            {'meow_credit_price': 12},
+            format='json',
+        )
+
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_response.data['meow_credit_price'], 12)
+        episode.refresh_from_db()
+        self.assertEqual(episode.meow_credit_price, 12)
+
+    def test_free_unlock_zeroes_points_and_credit_price(self):
+        self.client.force_authenticate(self.creator)
+
+        response = self.client.post(
+            f'/api/creator/dramas/{self.own_series.id}/episodes/',
+            {
+                'episode_no': 11,
+                'title': 'Free Ep',
+                'unlock_type': 'free',
+                'meow_points_price': 30,
+                'meow_credit_price': 8,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['meow_points_price'], 0)
+        self.assertEqual(response.data['meow_credit_price'], 0)
+        episode = DramaEpisode.objects.get(pk=response.data['id'])
+        self.assertTrue(episode.is_free)
+        self.assertEqual(episode.meow_points_price, 0)
+        self.assertEqual(episode.meow_credit_price, 0)

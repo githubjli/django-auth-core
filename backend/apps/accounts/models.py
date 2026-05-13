@@ -1013,6 +1013,13 @@ class GiftTransaction(models.Model):
         blank=True,
         related_name='gift_transactions',
     )
+    drama_series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gift_transactions',
+    )
     gift = models.ForeignKey(
         Gift,
         on_delete=models.SET_NULL,

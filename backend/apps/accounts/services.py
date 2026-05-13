@@ -42,6 +42,7 @@ from apps.accounts.models import (
     DailyLoginReward,
     DramaUnlock,
     DramaEpisode,
+    DramaSeries,
     UserMembership,
     OrderPayment,
     PaymentOrder,
@@ -3111,38 +3112,47 @@ class DramaAccessService:
     @staticmethod
     @transaction.atomic
     def unlock_with_meow_credit(*, user, episode: DramaEpisode):
-        existing_unlock = DramaUnlock.objects.select_for_update().filter(user=user, episode=episode).select_related('credit_ledger_entry').first()
-        if existing_unlock is not None:
-            return existing_unlock, False
-
         if episode.is_free:
             return None, False
 
         if episode.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and DramaAccessService.has_active_membership(user):
             return None, False
 
+        wallet, _created = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)
+        existing_unlock = DramaUnlock.objects.select_for_update().filter(user=user, episode=episode).select_related('credit_ledger_entry').first()
+        if existing_unlock is not None:
+            return existing_unlock, False
+
+        amount = episode.meow_credit_price
+        if amount <= 0:
+            raise ValidationError('Amount must be greater than zero.')
+        if wallet.balance < amount:
+            raise ValidationError('Insufficient Meow Credit balance.')
+
+        balance_before = wallet.balance
+        balance_after = balance_before - amount
+        wallet.balance = balance_after
+        wallet.total_spent += amount
+        wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+        ledger_entry = MeowCreditLedger.objects.create(
+            user=user,
+            entry_type=MeowCreditLedger.TYPE_SPEND,
+            status=MeowCreditLedger.STATUS_COMPLETED,
+            amount=-amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            target_type='drama_episode',
+            target_id=episode.id,
+            note=f'Drama unlock for series {episode.series_id} episode {episode.id}',
+        )
         unlock = DramaUnlock.objects.create(
             user=user,
             series=episode.series,
             episode=episode,
             source=DramaUnlock.SOURCE_MEOW_CREDIT,
-            credit_amount=0,
+            credit_amount=amount,
+            credit_ledger_entry=ledger_entry,
         )
-        try:
-            _wallet, ledger_entry = MeowCreditService.spend_credit(
-                user=user,
-                amount=episode.meow_credit_price,
-                target_type='drama_episode',
-                target_id=episode.id,
-                note=f'Drama unlock for episode {episode.id}',
-            )
-        except ValidationError:
-            unlock.delete()
-            raise
-
-        unlock.credit_amount = episode.meow_credit_price
-        unlock.credit_ledger_entry = ledger_entry
-        unlock.save(update_fields=['credit_amount', 'credit_ledger_entry'])
         return unlock, True
 
 
@@ -3195,6 +3205,36 @@ class GiftService:
             sender=sender,
             receiver=receiver,
             video=video,
+            gift=gift,
+            gift_name_snapshot=gift.name,
+            points_price_snapshot=gift.points_price,
+            quantity=quantity,
+            total_points=total_points,
+            ledger_entry=ledger_entry,
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def send_drama_gift(*, sender, receiver, drama_series: DramaSeries, gift: Gift, quantity: int) -> GiftTransaction:
+        if quantity <= 0:
+            raise ValidationError({'quantity': ['Quantity must be greater than zero.']})
+        if receiver is None:
+            raise ValidationError('Drama series has no owner to receive gifts.')
+        if not gift.is_active:
+            raise ValidationError({'gift_code': ['Gift is not active.']})
+        total_points = gift.points_price * quantity
+        _wallet, ledger_entry = MeowPointService.spend_points(
+            user=sender,
+            amount=total_points,
+            entry_type=MeowPointLedger.TYPE_SPEND,
+            target_type='drama_gift',
+            target_id=drama_series.id,
+            note=f'Gift {gift.code} x{quantity} to drama series {drama_series.id}',
+        )
+        return GiftTransaction.objects.create(
+            sender=sender,
+            receiver=receiver,
+            drama_series=drama_series,
             gift=gift,
             gift_name_snapshot=gift.name,
             points_price_snapshot=gift.points_price,

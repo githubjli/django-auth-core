@@ -12,12 +12,15 @@ from apps.accounts.models import (
     DramaShare,
     DramaUnlock,
     DramaWatchProgress,
+    Gift,
+    GiftTransaction,
     MeowCreditLedger,
     MeowCreditWallet,
     MeowPointLedger,
     MeowPointWallet,
     User,
 )
+from apps.accounts.services import MeowPointService
 
 
 class DramaReadOnlyAPITestCase(APITestCase):
@@ -582,3 +585,85 @@ class DramaViewTrackingAPITestCase(APITestCase):
         detail_response = self.client.get(reverse('drama-series-detail', args=[self.series.id]))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+
+
+
+class DramaGiftAPITestCase(APITestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(email='drama-gift-owner@example.com', password='pass1234')
+        self.sender = User.objects.create_user(email='drama-gift-sender@example.com', password='pass1234')
+        self.series = DramaSeries.objects.create(
+            owner=self.owner,
+            title='Giftable Drama',
+            status=DramaSeries.STATUS_PUBLISHED,
+            is_active=True,
+        )
+        self.ownerless_series = DramaSeries.objects.create(
+            title='Ownerless Drama',
+            status=DramaSeries.STATUS_PUBLISHED,
+            is_active=True,
+        )
+        self.active_gift = Gift.objects.create(code='rose', name='Rose', points_price=10, is_active=True)
+        self.inactive_gift = Gift.objects.create(code='old', name='Old', points_price=10, is_active=False)
+
+    def test_drama_gift_send_success(self):
+        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'gift_code': 'rose', 'quantity': 2},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['drama_series_id'], self.series.id)
+        wallet = MeowPointWallet.objects.get(user=self.sender)
+        self.assertEqual(wallet.balance, 80)
+        tx = GiftTransaction.objects.get(sender=self.sender, drama_series=self.series)
+        self.assertEqual(tx.receiver, self.owner)
+        self.assertIsNone(tx.video)
+        self.assertIsNone(tx.stream)
+        self.assertEqual(tx.total_points, 20)
+
+    def test_drama_gift_insufficient_balance(self):
+        MeowPointService.add_points(user=self.sender, amount=5, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'gift_code': 'rose', 'quantity': 1},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'insufficient_balance')
+        self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
+
+    def test_ownerless_drama_gift_returns_clear_error(self):
+        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.ownerless_series.id]),
+            {'gift_code': 'rose', 'quantity': 1},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'drama_owner_required')
+        self.assertEqual(response.data['detail'], 'Drama series has no owner to receive gifts.')
+
+    def test_inactive_drama_gift_cannot_be_sent(self):
+        MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('drama-gift-send', args=[self.series.id]),
+            {'gift_code': 'old', 'quantity': 1},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], 'Gift is not active.')
+        self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
