@@ -55,5 +55,8 @@ class GiftTransactionSerializer(serializers.ModelSerializer):
             'points_price_snapshot',
             'quantity',
             'total_points',
+            'payment_method',
+            'points_amount',
+            'credits_amount',
             'created_at',
         )

@@ -92,7 +92,9 @@ class CreatorDramaAPITestCase(APITestCase):
     def test_series_serializer_exposes_interaction_counts(self):
         self.own_series.comment_count = 4
         self.own_series.share_count = 5
-        self.own_series.save(update_fields=['comment_count', 'share_count'])
+        self.own_series.gift_count = 2
+        self.own_series.gift_amount_total = 60
+        self.own_series.save(update_fields=['comment_count', 'share_count', 'gift_count', 'gift_amount_total'])
         self.creator.subscriber_count = 6
         self.creator.save(update_fields=['subscriber_count'])
         self.client.force_authenticate(self.creator)
@@ -102,6 +104,8 @@ class CreatorDramaAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['comment_count'], 4)
         self.assertEqual(response.data['share_count'], 5)
+        self.assertEqual(response.data['gift_count'], 2)
+        self.assertEqual(response.data['gift_amount_total'], 60)
         self.assertEqual(response.data['subscriber_count'], 6)
 
     def test_creator_can_create_and_update_credit_price(self):

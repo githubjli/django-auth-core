@@ -24,12 +24,14 @@ from apps.accounts.drama_serializers import (
     DramaEpisodeUnlockRequestSerializer,
     DramaFavoriteStateSerializer,
     DramaInteractionSummarySerializer,
+    DramaGiftSendResponseSerializer,
+    DramaGiftSendSerializer,
     DramaUnlockResponseSerializer,
     DramaProgressSaveSerializer,
     DramaSeriesSerializer,
     DramaWatchProgressSerializer,
 )
-from apps.accounts.models import ChannelSubscription, DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaSeriesView, DramaShare, DramaUnlock, DramaWatchProgress, Gift, GiftTransaction
+from apps.accounts.models import ChannelSubscription, DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaSeriesView, DramaShare, DramaUnlock, DramaWatchProgress
 from apps.accounts.services import DramaAccessService, GiftService
 
 
@@ -313,60 +315,61 @@ class DramaGiftSendAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        series = get_object_or_404(
-            DramaSeries.objects.select_related('owner').filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
-            pk=pk,
-        )
-        if series.owner_id is None:
+        series = get_object_or_404(DramaSeries.objects.select_related('owner'), pk=pk)
+        if not series.is_active or series.status != DramaSeries.STATUS_PUBLISHED:
             return Response(
-                {'code': 'drama_owner_required', 'detail': 'Drama series has no owner to receive gifts.'},
+                {'code': 'drama_unavailable', 'detail': 'Drama series is not available for gifts.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        serializer = GiftSendSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        gift = get_object_or_404(Gift, code=serializer.validated_data['gift_code'])
-        cutoff = timezone.now() - timedelta(seconds=2)
-        existing_tx = (
-            GiftTransaction.objects.filter(
-                sender=request.user,
-                drama_series=series,
-                gift=gift,
-                quantity=serializer.validated_data['quantity'],
-                created_at__gte=cutoff,
+        if series.owner_id is None:
+            return Response(
+                {'code': 'receiver_unavailable', 'detail': 'Drama series has no owner.'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-            .order_by('-created_at', '-id')
-            .first()
-        )
-        if existing_tx is not None:
-            response_serializer = GiftTransactionSerializer(existing_tx)
-            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        serializer = DramaGiftSendSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        amount = serializer.validated_data['amount']
+        payment_method = serializer.validated_data['payment_method']
 
         try:
-            tx = GiftService.send_drama_gift(
+            tx, sender_balance = GiftService.send_drama_gift(
                 sender=request.user,
                 receiver=series.owner,
                 drama_series=series,
-                gift=gift,
-                quantity=serializer.validated_data['quantity'],
+                amount=amount,
+                payment_method=payment_method,
             )
         except DjangoValidationError as exc:
             error_text = str(exc)
-            if 'Insufficient Meow Points balance.' in error_text:
+            if 'Insufficient Meow Points balance.' in error_text or 'Insufficient Meow Credit balance.' in error_text:
                 return Response(
-                    {'code': 'insufficient_balance', 'detail': 'Insufficient Meow Points balance.'},
+                    {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if 'Gift is not active.' in error_text:
-                return Response({'detail': 'Gift is not active.'}, status=status.HTTP_400_BAD_REQUEST)
-            if 'no owner' in error_text or 'owner' in error_text:
+            if 'Drama series has no owner.' in error_text:
                 return Response(
-                    {'code': 'drama_owner_required', 'detail': 'Drama series has no owner to receive gifts.'},
+                    {'code': 'receiver_unavailable', 'detail': 'Drama series has no owner.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if 'Drama series is not available for gifts.' in error_text:
+                return Response(
+                    {'code': 'drama_unavailable', 'detail': 'Drama series is not available for gifts.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             return Response({'detail': error_text}, status=status.HTTP_400_BAD_REQUEST)
 
-        response_serializer = GiftTransactionSerializer(tx)
+        response_serializer = DramaGiftSendResponseSerializer(
+            {
+                'series_id': series.id,
+                'receiver_id': series.owner_id,
+                'amount': amount,
+                'payment_method': payment_method,
+                'points_charged': tx.points_amount,
+                'credits_charged': tx.credits_amount,
+                'sender_balance': sender_balance,
+            }
+        )
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 

@@ -231,6 +231,8 @@ class DramaInteractionSummarySerializer(serializers.Serializer):
     favorite_count = serializers.IntegerField(read_only=True)
     comment_count = serializers.IntegerField(read_only=True)
     share_count = serializers.IntegerField(read_only=True)
+    gift_count = serializers.IntegerField(read_only=True)
+    gift_amount_total = serializers.IntegerField(read_only=True)
     view_count = serializers.IntegerField(read_only=True)
     viewer_is_favorited = serializers.SerializerMethodField()
     viewer_is_subscribed = serializers.SerializerMethodField()
@@ -253,6 +255,27 @@ class DramaInteractionSummarySerializer(serializers.Serializer):
         if obj.owner_id is None or obj.owner is None:
             return 0
         return obj.owner.subscriber_count
+
+
+class DramaGiftSendSerializer(serializers.Serializer):
+    ALLOWED_AMOUNTS = [1, 10, 30, 100, 200, 500]
+
+    amount = serializers.ChoiceField(choices=ALLOWED_AMOUNTS)
+    payment_method = serializers.ChoiceField(
+        choices=['meow_points', 'meow_credit'],
+        required=False,
+        default='meow_points',
+    )
+
+
+class DramaGiftSendResponseSerializer(serializers.Serializer):
+    series_id = serializers.IntegerField()
+    receiver_id = serializers.IntegerField()
+    amount = serializers.IntegerField()
+    payment_method = serializers.CharField()
+    points_charged = serializers.IntegerField()
+    credits_charged = serializers.IntegerField()
+    sender_balance = serializers.IntegerField()
 
 
 class DramaProgressSaveSerializer(serializers.Serializer):
@@ -366,9 +389,9 @@ class CreatorDramaSeriesSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'owner_id', 'title', 'description', 'cover', 'cover_url', 'category', 'category_name',
             'category_slug', 'tags', 'total_episodes', 'status', 'is_active', 'view_count', 'favorite_count',
-            'comment_count', 'share_count', 'subscriber_count', 'created_at', 'updated_at',
+            'comment_count', 'share_count', 'gift_count', 'gift_amount_total', 'subscriber_count', 'created_at', 'updated_at',
         )
-        read_only_fields = ('id', 'owner_id', 'view_count', 'favorite_count', 'comment_count', 'share_count', 'subscriber_count', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'owner_id', 'view_count', 'favorite_count', 'comment_count', 'share_count', 'gift_count', 'gift_amount_total', 'subscriber_count', 'created_at', 'updated_at')
 
     def get_cover_url(self, obj):
         request = self.context.get('request')
