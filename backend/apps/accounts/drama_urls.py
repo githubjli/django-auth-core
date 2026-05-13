@@ -1,6 +1,7 @@
 from django.urls import path
 
 from apps.accounts.drama_views import (
+    DramaCommentListCreateAPIView,
     DramaFavoriteAPIView,
     DramaEpisodeUnlockAPIView,
     DramaEpisodeDetailAPIView,
@@ -10,6 +11,8 @@ from apps.accounts.drama_views import (
     DramaSeriesViewTrackAPIView,
     DramaSeriesDetailAPIView,
     DramaSeriesListAPIView,
+    DramaInteractionSummaryAPIView,
+    DramaShareAPIView,
 )
 
 urlpatterns = [
@@ -21,5 +24,8 @@ urlpatterns = [
     path('<int:pk>/progress/', DramaProgressUpsertAPIView.as_view(), name='drama-progress-upsert'),
     path('episodes/<int:episode_id>/progress/', DramaEpisodeProgressUpsertAPIView.as_view(), name='drama-episode-progress-upsert'),
     path('<int:pk>/favorite/', DramaFavoriteAPIView.as_view(), name='drama-favorite'),
+    path('<int:pk>/comments/', DramaCommentListCreateAPIView.as_view(), name='drama-comments'),
+    path('<int:pk>/share/', DramaShareAPIView.as_view(), name='drama-share'),
+    path('<int:pk>/interaction-summary/', DramaInteractionSummaryAPIView.as_view(), name='drama-interaction-summary'),
     path('<int:pk>/view/', DramaSeriesViewTrackAPIView.as_view(), name='drama-series-view-track'),
 ]

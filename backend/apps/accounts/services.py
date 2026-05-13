@@ -3073,7 +3073,7 @@ class DramaAccessService:
     @staticmethod
     @transaction.atomic
     def unlock_with_meow_points(*, user, episode: DramaEpisode):
-        existing_unlock = DramaUnlock.objects.filter(user=user, episode=episode).select_related('ledger_entry').first()
+        existing_unlock = DramaUnlock.objects.select_for_update().filter(user=user, episode=episode).select_related('ledger_entry').first()
         if existing_unlock is not None:
             return existing_unlock, False
 
@@ -3106,6 +3106,43 @@ class DramaAccessService:
         unlock.points_amount = episode.meow_points_price
         unlock.ledger_entry = ledger_entry
         unlock.save(update_fields=['points_amount', 'ledger_entry'])
+        return unlock, True
+
+    @staticmethod
+    @transaction.atomic
+    def unlock_with_meow_credit(*, user, episode: DramaEpisode):
+        existing_unlock = DramaUnlock.objects.select_for_update().filter(user=user, episode=episode).select_related('credit_ledger_entry').first()
+        if existing_unlock is not None:
+            return existing_unlock, False
+
+        if episode.is_free:
+            return None, False
+
+        if episode.unlock_type == DramaEpisode.UNLOCK_MEMBERSHIP and DramaAccessService.has_active_membership(user):
+            return None, False
+
+        unlock = DramaUnlock.objects.create(
+            user=user,
+            series=episode.series,
+            episode=episode,
+            source=DramaUnlock.SOURCE_MEOW_CREDIT,
+            credit_amount=0,
+        )
+        try:
+            _wallet, ledger_entry = MeowCreditService.spend_credit(
+                user=user,
+                amount=episode.meow_credit_price,
+                target_type='drama_episode',
+                target_id=episode.id,
+                note=f'Drama unlock for episode {episode.id}',
+            )
+        except ValidationError:
+            unlock.delete()
+            raise
+
+        unlock.credit_amount = episode.meow_credit_price
+        unlock.credit_ledger_entry = ledger_entry
+        unlock.save(update_fields=['credit_amount', 'credit_ledger_entry'])
         return unlock, True
 
 

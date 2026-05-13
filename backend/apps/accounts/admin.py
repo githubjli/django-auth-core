@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.core.exceptions import ValidationError
 from django.utils.html import format_html
 from django.utils import timezone
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
@@ -48,7 +49,7 @@ from apps.accounts.models import (
     VideoView,
     WalletAddress,
 )
-from apps.accounts.services import MeowCreditRechargeService
+from apps.accounts.services import MeowCreditRechargeService, MeowCreditService
 
 
 @admin.register(Category)
@@ -353,6 +354,33 @@ class MeowCreditRedeemRequestAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at', 'reviewed_at')
     autocomplete_fields = ('user', 'reviewed_by')
+    actions = ('approve_selected_redeem_requests', 'reject_selected_redeem_requests_and_refund')
+
+    @admin.action(description='Approve selected redeem requests')
+    def approve_selected_redeem_requests(self, request, queryset):
+        approved = 0
+        skipped = 0
+        for redeem_request in queryset:
+            try:
+                MeowCreditService.approve_redeem_request(redeem_request, request.user)
+            except ValidationError:
+                skipped += 1
+            else:
+                approved += 1
+        self.message_user(request, f'Meow Credit redeem approval completed: approved={approved}, skipped={skipped}.')
+
+    @admin.action(description='Reject selected redeem requests and refund credits')
+    def reject_selected_redeem_requests_and_refund(self, request, queryset):
+        rejected = 0
+        skipped = 0
+        for redeem_request in queryset:
+            try:
+                MeowCreditService.reject_redeem_request(redeem_request, request.user, 'Rejected by admin')
+            except ValidationError:
+                skipped += 1
+            else:
+                rejected += 1
+        self.message_user(request, f'Meow Credit redeem rejection completed: rejected={rejected}, skipped={skipped}.')
 
 
 @admin.register(MeowPointWallet)

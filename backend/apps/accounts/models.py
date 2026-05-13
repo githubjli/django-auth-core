@@ -196,6 +196,8 @@ class DramaSeries(models.Model):
     is_active = models.BooleanField(default=True)
     view_count = models.PositiveIntegerField(default=0)
     favorite_count = models.PositiveIntegerField(default=0)
+    comment_count = models.PositiveIntegerField(default=0)
+    share_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -242,6 +244,7 @@ class DramaEpisode(models.Model):
     is_free = models.BooleanField(default=False)
     unlock_type = models.CharField(max_length=20, choices=UNLOCK_TYPE_CHOICES, default=UNLOCK_MEOW_POINTS)
     meow_points_price = models.PositiveIntegerField(default=0)
+    meow_credit_price = models.PositiveIntegerField(default=0)
     sort_order = models.PositiveIntegerField(default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PUBLISHED)
     is_active = models.BooleanField(default=True)
@@ -305,6 +308,57 @@ class DramaFavorite(models.Model):
         ]
 
 
+class DramaComment(models.Model):
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='comments',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drama_comments',
+    )
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='replies',
+    )
+    content = models.TextField()
+    like_count = models.PositiveIntegerField(default=0)
+    reply_count = models.PositiveIntegerField(default=0)
+    is_deleted = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
+class DramaShare(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='drama_shares',
+    )
+    series = models.ForeignKey(
+        DramaSeries,
+        on_delete=models.CASCADE,
+        related_name='shares',
+    )
+    channel = models.CharField(max_length=64, blank=True, default='')
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+
 class DramaSeriesView(models.Model):
     series = models.ForeignKey(
         DramaSeries,
@@ -328,12 +382,14 @@ class DramaSeriesView(models.Model):
 
 class DramaUnlock(models.Model):
     SOURCE_MEOW_POINTS = 'meow_points'
+    SOURCE_MEOW_CREDIT = 'meow_credit'
     SOURCE_MEMBERSHIP = 'membership'
     SOURCE_FREE = 'free'
     SOURCE_ADMIN = 'admin'
     SOURCE_AD_REWARD = 'ad_reward'
     SOURCE_CHOICES = [
         (SOURCE_MEOW_POINTS, 'Meow Points'),
+        (SOURCE_MEOW_CREDIT, 'Meow Credit'),
         (SOURCE_MEMBERSHIP, 'Membership'),
         (SOURCE_FREE, 'Free'),
         (SOURCE_ADMIN, 'Admin'),
@@ -357,8 +413,16 @@ class DramaUnlock(models.Model):
     )
     source = models.CharField(max_length=24, choices=SOURCE_CHOICES, default=SOURCE_MEOW_POINTS)
     points_amount = models.PositiveIntegerField(default=0)
+    credit_amount = models.PositiveIntegerField(default=0)
     ledger_entry = models.OneToOneField(
         'MeowPointLedger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='drama_unlock',
+    )
+    credit_ledger_entry = models.OneToOneField(
+        'MeowCreditLedger',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,

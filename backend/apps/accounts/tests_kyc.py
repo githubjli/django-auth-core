@@ -9,9 +9,9 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.admin import KycProfileAdmin
+from apps.accounts.admin import KycProfileAdmin, MeowCreditRedeemRequestAdmin
 from apps.accounts.constants import TOKEN_SYMBOL
-from apps.accounts.models import KycDocument, KycProfile, MeowCreditPackage, MeowCreditWallet, PaymentOrder
+from apps.accounts.models import KycDocument, KycProfile, MeowCreditLedger, MeowCreditPackage, MeowCreditRedeemRequest, MeowCreditWallet, PaymentOrder
 from apps.accounts.services import MeowCreditService
 
 User = get_user_model()
@@ -160,12 +160,87 @@ class KycAPITests(APITestCase):
         wallet = MeowCreditWallet.objects.get(user=self.user)
         self.assertEqual(wallet.balance, 60)
 
+
+    def test_admin_action_approve_redeem_requests_completes_pending_redeem(self):
+        self._approved_kyc()
+        MeowCreditService.credit_recharge(user=self.user, amount=100, payment_order=self._payment_order(), target=self._package())
+        redeem = MeowCreditService.create_redeem_request(
+            user=self.user,
+            amount=40,
+            redeem_method='bank',
+            account_snapshot={'name': 'Cat'},
+        )
+        admin_user = User.objects.create_superuser(email='redeem-admin@example.com', password='pass12345')
+        request = RequestFactory().post('/admin/accounts/meowcreditredeemrequest/')
+        request.user = admin_user
+        model_admin = MeowCreditRedeemRequestAdmin(MeowCreditRedeemRequest, admin.site)
+        model_admin.message_user = lambda *args, **kwargs: None
+
+        model_admin.approve_selected_redeem_requests(request, MeowCreditRedeemRequest.objects.filter(pk=redeem.pk))
+
+        redeem.refresh_from_db()
+        self.assertEqual(redeem.status, MeowCreditRedeemRequest.STATUS_COMPLETED)
+        self.assertEqual(redeem.reviewed_by, admin_user)
+        self.assertTrue(
+            MeowCreditLedger.objects.filter(
+                entry_type=MeowCreditLedger.TYPE_REDEEM,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                target_id=redeem.id,
+            ).exists()
+        )
+
+    def test_admin_action_reject_redeem_requests_refunds_credits(self):
+        self._approved_kyc()
+        MeowCreditService.credit_recharge(user=self.user, amount=100, payment_order=self._payment_order(), target=self._package())
+        redeem = MeowCreditService.create_redeem_request(
+            user=self.user,
+            amount=40,
+            redeem_method='bank',
+            account_snapshot={'name': 'Cat'},
+        )
+        wallet = MeowCreditWallet.objects.get(user=self.user)
+        self.assertEqual(wallet.balance, 60)
+        admin_user = User.objects.create_superuser(email='redeem-reject-admin@example.com', password='pass12345')
+        request = RequestFactory().post('/admin/accounts/meowcreditredeemrequest/')
+        request.user = admin_user
+        model_admin = MeowCreditRedeemRequestAdmin(MeowCreditRedeemRequest, admin.site)
+        model_admin.message_user = lambda *args, **kwargs: None
+
+        model_admin.reject_selected_redeem_requests_and_refund(request, MeowCreditRedeemRequest.objects.filter(pk=redeem.pk))
+
+        redeem.refresh_from_db()
+        wallet.refresh_from_db()
+        self.assertEqual(redeem.status, MeowCreditRedeemRequest.STATUS_REJECTED)
+        self.assertEqual(redeem.reviewed_by, admin_user)
+        self.assertEqual(redeem.reject_reason, 'Rejected by admin')
+        self.assertEqual(wallet.balance, 100)
+        self.assertTrue(
+            MeowCreditLedger.objects.filter(
+                entry_type=MeowCreditLedger.TYPE_REFUND,
+                status=MeowCreditLedger.STATUS_COMPLETED,
+                target_id=redeem.id,
+            ).exists()
+        )
+
     def _upload_document(self, document_type, filename):
         image = SimpleUploadedFile(filename, b'file-content', content_type='image/jpeg')
         return self.client.post(
             reverse('kyc-document-upload'),
             {'document_type': document_type, 'image': image},
             format='multipart',
+        )
+
+
+    def _approved_kyc(self):
+        return KycProfile.objects.create(
+            user=self.user,
+            status=KycProfile.STATUS_APPROVED,
+            full_name='Jenny Li',
+            date_of_birth='1995-01-01',
+            nationality='CN',
+            id_type=KycProfile.ID_TYPE_PASSPORT,
+            id_number='E12345678',
+            id_expiry_date='2030-01-01',
         )
 
     def _package(self):
