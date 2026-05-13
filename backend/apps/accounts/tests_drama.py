@@ -19,6 +19,7 @@ from apps.accounts.models import (
     MeowPointWallet,
     User,
 )
+from apps.accounts.services import MeowPointService
 
 
 class DramaReadOnlyAPITestCase(APITestCase):
