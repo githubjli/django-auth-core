@@ -35,6 +35,18 @@ from apps.accounts.models import ChannelSubscription, DramaComment, DramaEpisode
 from apps.accounts.services import DramaAccessService, GiftService
 
 
+
+
+def build_episode_nav_by_id(episodes):
+    ordered = sorted(episodes, key=lambda episode: (episode.sort_order, episode.episode_no, episode.id))
+    nav_by_id = {}
+    for index, episode in enumerate(ordered):
+        nav_by_id[episode.id] = {
+            'previous_episode_no': ordered[index - 1].episode_no if index > 0 else None,
+            'next_episode_no': ordered[index + 1].episode_no if index < len(ordered) - 1 else None,
+        }
+    return nav_by_id
+
 def get_client_ip(request):
     forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
     if forwarded_for:
@@ -122,7 +134,7 @@ class DramaEpisodeListAPIView(APIView):
             DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
             pk=pk,
         )
-        episodes = DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id')
+        episodes = list(DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id'))
         unlocked_episode_ids: set[int] = set()
         has_active_membership = False
         if request.user.is_authenticated:
@@ -137,6 +149,7 @@ class DramaEpisodeListAPIView(APIView):
                 'request': request,
                 'unlocked_episode_ids': unlocked_episode_ids,
                 'has_active_membership': has_active_membership,
+                'episode_nav_by_id': build_episode_nav_by_id(episodes),
             },
         )
         return Response({'series_id': series.id, 'episodes': serializer.data})
@@ -159,12 +172,14 @@ class DramaEpisodeDetailAPIView(APIView):
                 DramaUnlock.objects.filter(user=request.user, series=series).values_list('episode_id', flat=True)
             )
             has_active_membership = DramaAccessService.has_active_membership(request.user)
+        series_episodes = list(DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id'))
         serializer = DramaEpisodeSerializer(
             episode,
             context={
                 'request': request,
                 'unlocked_episode_ids': unlocked_episode_ids,
                 'has_active_membership': has_active_membership,
+                'episode_nav_by_id': build_episode_nav_by_id(series_episodes),
             },
         )
         return Response(serializer.data)

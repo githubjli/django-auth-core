@@ -29,6 +29,10 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
             'locked_episode_count',
             'view_count',
             'favorite_count',
+            'comment_count',
+            'share_count',
+            'gift_count',
+            'gift_amount_total',
             'is_favorited',
             'continue_episode_no',
             'continue_progress_seconds',
@@ -113,6 +117,8 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
     playback_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
     hls_url = serializers.SerializerMethodField()
+    previous_episode_no = serializers.SerializerMethodField()
+    next_episode_no = serializers.SerializerMethodField()
 
     class Meta:
         model = DramaEpisode
@@ -126,6 +132,8 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
             'playback_url',
             'video_url',
             'hls_url',
+            'previous_episode_no',
+            'next_episode_no',
             'is_free',
             'unlock_type',
             'meow_points_price',
@@ -163,6 +171,28 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
         if value.startswith('http://') or value.startswith('https://'):
             return value
         return request.build_absolute_uri(value)
+
+    def _get_episode_nav_value(self, obj, key):
+        episode_nav_by_id = self.context.get('episode_nav_by_id') or {}
+        if obj.id in episode_nav_by_id:
+            return episode_nav_by_id[obj.id].get(key)
+        queryset = DramaEpisode.objects.filter(series_id=obj.series_id, is_active=True).order_by('sort_order', 'episode_no', 'id')
+        episode_nos = list(queryset.values_list('episode_no', flat=True))
+        try:
+            index = episode_nos.index(obj.episode_no)
+        except ValueError:
+            return None
+        if key == 'previous_episode_no':
+            return episode_nos[index - 1] if index > 0 else None
+        if key == 'next_episode_no':
+            return episode_nos[index + 1] if index < len(episode_nos) - 1 else None
+        return None
+
+    def get_previous_episode_no(self, obj):
+        return self._get_episode_nav_value(obj, 'previous_episode_no')
+
+    def get_next_episode_no(self, obj):
+        return self._get_episode_nav_value(obj, 'next_episode_no')
 
     def get_video_url(self, obj):
         if not self._can_watch(obj):

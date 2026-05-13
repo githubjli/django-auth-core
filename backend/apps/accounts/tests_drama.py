@@ -34,6 +34,10 @@ class DramaReadOnlyAPITestCase(APITestCase):
             is_active=True,
             view_count=123,
             favorite_count=10,
+            comment_count=2,
+            share_count=3,
+            gift_count=4,
+            gift_amount_total=130,
         )
         self.inactive_series = DramaSeries.objects.create(
             title='Hidden Drama',
@@ -92,6 +96,10 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertEqual(item['total_episodes'], 2)
         self.assertEqual(item['free_episode_count'], 1)
         self.assertEqual(item['locked_episode_count'], 1)
+        self.assertEqual(item['comment_count'], 2)
+        self.assertEqual(item['share_count'], 3)
+        self.assertEqual(item['gift_count'], 4)
+        self.assertEqual(item['gift_amount_total'], 130)
         self.assertFalse(item['is_favorited'])
         self.assertIsNone(item['continue_episode_no'])
         self.assertIsNone(item['continue_progress_seconds'])
@@ -103,6 +111,10 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertEqual(response.data['title'], self.active_series.title)
         self.assertEqual(response.data['free_episode_count'], 1)
         self.assertEqual(response.data['locked_episode_count'], 1)
+        self.assertEqual(response.data['comment_count'], 2)
+        self.assertEqual(response.data['share_count'], 3)
+        self.assertEqual(response.data['gift_count'], 4)
+        self.assertEqual(response.data['gift_amount_total'], 130)
         self.assertFalse(response.data['is_favorited'])
         self.assertIsNone(response.data['continue_episode_no'])
         self.assertIsNone(response.data['continue_progress_seconds'])
@@ -120,6 +132,8 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertTrue(first['is_unlocked'])
         self.assertEqual(first['video_url'], self.free_episode.video_url)
         self.assertEqual(first['hls_url'], self.free_episode.hls_url)
+        self.assertIsNone(first['previous_episode_no'])
+        self.assertEqual(first['next_episode_no'], 2)
 
         second = response.data['episodes'][1]
         self.assertEqual(second['id'], self.locked_episode.id)
@@ -127,6 +141,8 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertFalse(second['is_unlocked'])
         self.assertIsNone(second['video_url'])
         self.assertIsNone(second['hls_url'])
+        self.assertEqual(second['previous_episode_no'], 1)
+        self.assertIsNone(second['next_episode_no'])
 
     def test_get_drama_episode_detail_by_episode_no(self):
         response = self.client.get(
@@ -140,6 +156,8 @@ class DramaReadOnlyAPITestCase(APITestCase):
         self.assertFalse(response.data['is_unlocked'])
         self.assertIsNone(response.data['video_url'])
         self.assertIsNone(response.data['hls_url'])
+        self.assertEqual(response.data['previous_episode_no'], 1)
+        self.assertIsNone(response.data['next_episode_no'])
 
     def test_https_forwarded_proto_generates_https_media_urls(self):
         self.free_episode.video_url = ''
@@ -322,7 +340,7 @@ class DramaInteractionAPITestCase(APITestCase):
             is_active=True,
         )
 
-    def test_comment_list_and_create(self):
+    def test_comment_create_list_and_reply_count(self):
         self.client.force_authenticate(user=self.user)
         create_response = self.client.post(
             reverse('drama-comments', args=[self.series.id]),
@@ -334,10 +352,24 @@ class DramaInteractionAPITestCase(APITestCase):
         self.series.refresh_from_db()
         self.assertEqual(self.series.comment_count, 1)
 
-        list_response = self.client.get(reverse('drama-comments', args=[self.series.id]))
+        parent_id = create_response.data['id']
+        reply_response = self.client.post(
+            reverse('drama-comments', args=[self.series.id]),
+            {'content': 'Agree!', 'parent_id': parent_id},
+            format='json',
+        )
+        self.assertEqual(reply_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(reply_response.data['parent_id'], parent_id)
+        parent = DramaComment.objects.get(pk=parent_id)
+        self.assertEqual(parent.reply_count, 1)
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.comment_count, 2)
+
+        list_response = self.client.get(reverse('drama-comments', args=[self.series.id]), {'page': 1})
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_response.data['count'], 1)
         self.assertEqual(list_response.data['results'][0]['content'], 'So good!')
+        self.assertEqual(list_response.data['results'][0]['reply_count'], 1)
 
     def test_share_increments_count(self):
         response = self.client.post(
