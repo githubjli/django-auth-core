@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress
+from apps.accounts.models import ChannelSubscription, DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress
 
 
 class DramaSeriesSerializer(serializers.ModelSerializer):
@@ -10,6 +10,11 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
     is_favorited = serializers.SerializerMethodField()
     continue_episode_no = serializers.SerializerMethodField()
     continue_progress_seconds = serializers.SerializerMethodField()
+    owner_id = serializers.IntegerField(read_only=True, allow_null=True)
+    owner_name = serializers.SerializerMethodField()
+    owner_avatar_url = serializers.SerializerMethodField()
+    viewer_is_subscribed = serializers.SerializerMethodField()
+    subscriber_count = serializers.SerializerMethodField()
 
     class Meta:
         model = DramaSeries
@@ -27,6 +32,11 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
             'is_favorited',
             'continue_episode_no',
             'continue_progress_seconds',
+            'owner_id',
+            'owner_name',
+            'owner_avatar_url',
+            'viewer_is_subscribed',
+            'subscriber_count',
         )
 
     def get_cover_url(self, obj):
@@ -44,6 +54,36 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
         if favorite_series_ids is None:
             return False
         return _obj.id in favorite_series_ids
+
+
+    def get_owner_name(self, obj):
+        if obj.owner_id is None or obj.owner is None:
+            return None
+        return obj.owner.display_name
+
+    def get_owner_avatar_url(self, obj):
+        if obj.owner_id is None or obj.owner is None or not obj.owner.avatar:
+            return None
+        request = self.context.get('request')
+        if request is None:
+            return obj.owner.avatar.url
+        return request.build_absolute_uri(obj.owner.avatar.url)
+
+    def get_viewer_is_subscribed(self, obj):
+        if obj.owner_id is None:
+            return False
+        subscribed_owner_ids = self.context.get('subscribed_owner_ids')
+        if subscribed_owner_ids is not None:
+            return obj.owner_id in subscribed_owner_ids
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return False
+        return ChannelSubscription.objects.filter(channel_id=obj.owner_id, subscriber=request.user).exists()
+
+    def get_subscriber_count(self, obj):
+        if obj.owner_id is None or obj.owner is None:
+            return 0
+        return obj.owner.subscriber_count
 
     def get_continue_episode_no(self, _obj):
         progress_by_series_id = self.context.get('progress_by_series_id')
@@ -89,6 +129,7 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
             'is_free',
             'unlock_type',
             'meow_points_price',
+            'meow_credit_price',
             'points_price',
             'is_locked',
             'is_unlocked',
@@ -148,6 +189,72 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
         return self.get_video_url(obj)
 
 
+class DramaCommentUserSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    display_name = serializers.CharField()
+
+
+class DramaCommentSerializer(serializers.ModelSerializer):
+    series_id = serializers.IntegerField(source='series.id', read_only=True)
+    parent_id = serializers.IntegerField(source='parent.id', allow_null=True, read_only=True)
+    user = DramaCommentUserSerializer(read_only=True)
+
+    class Meta:
+        model = DramaComment
+        fields = (
+            'id',
+            'series_id',
+            'parent_id',
+            'content',
+            'like_count',
+            'reply_count',
+            'user',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = fields
+
+
+class DramaCommentCreateSerializer(serializers.Serializer):
+    content = serializers.CharField(max_length=500)
+    parent_id = serializers.IntegerField(required=False, allow_null=True)
+
+    def validate_content(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('content cannot be blank.')
+        return value
+
+
+class DramaInteractionSummarySerializer(serializers.Serializer):
+    series_id = serializers.IntegerField(source='id', read_only=True)
+    favorite_count = serializers.IntegerField(read_only=True)
+    comment_count = serializers.IntegerField(read_only=True)
+    share_count = serializers.IntegerField(read_only=True)
+    view_count = serializers.IntegerField(read_only=True)
+    viewer_is_favorited = serializers.SerializerMethodField()
+    viewer_is_subscribed = serializers.SerializerMethodField()
+    owner_id = serializers.IntegerField(read_only=True, allow_null=True)
+    subscriber_count = serializers.SerializerMethodField()
+
+    def get_viewer_is_favorited(self, obj):
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return False
+        return DramaFavorite.objects.filter(series=obj, user=request.user).exists()
+
+    def get_viewer_is_subscribed(self, obj):
+        request = self.context.get('request')
+        if obj.owner_id is None or request is None or not request.user.is_authenticated:
+            return False
+        return ChannelSubscription.objects.filter(channel_id=obj.owner_id, subscriber=request.user).exists()
+
+    def get_subscriber_count(self, obj):
+        if obj.owner_id is None or obj.owner is None:
+            return 0
+        return obj.owner.subscriber_count
+
+
 class DramaProgressSaveSerializer(serializers.Serializer):
     episode_id = serializers.IntegerField(min_value=1)
     progress_seconds = serializers.IntegerField(min_value=0)
@@ -177,11 +284,18 @@ class DramaFavoriteStateSerializer(serializers.Serializer):
     favorite_count = serializers.IntegerField()
 
 
+class DramaEpisodeUnlockRequestSerializer(serializers.Serializer):
+    payment_method = serializers.ChoiceField(choices=['meow_points', 'meow_credit'], required=False, default='meow_points')
+
+
 class DramaUnlockResponseSerializer(serializers.Serializer):
     episode_id = serializers.IntegerField()
     series_id = serializers.IntegerField()
     is_unlocked = serializers.BooleanField()
+    payment_method = serializers.CharField(required=False)
     points_charged = serializers.IntegerField()
+    credits_charged = serializers.IntegerField(default=0)
+    code = serializers.CharField(required=False)
 
 
 class AccountDramaProgressItemSerializer(serializers.ModelSerializer):

@@ -6,7 +6,7 @@ from django.utils import timezone
 from datetime import timedelta
 from rest_framework import generics
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.permissions import BasePermission
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
@@ -15,17 +15,28 @@ from rest_framework.views import APIView
 from apps.accounts.drama_serializers import (
     AccountDramaFavoriteItemSerializer,
     AccountDramaProgressItemSerializer,
+    DramaCommentCreateSerializer,
+    DramaCommentSerializer,
     DramaEpisodeSerializer,
     CreatorDramaEpisodeSerializer,
     CreatorDramaSeriesSerializer,
+    DramaEpisodeUnlockRequestSerializer,
     DramaFavoriteStateSerializer,
+    DramaInteractionSummarySerializer,
     DramaUnlockResponseSerializer,
     DramaProgressSaveSerializer,
     DramaSeriesSerializer,
     DramaWatchProgressSerializer,
 )
-from apps.accounts.models import DramaEpisode, DramaFavorite, DramaSeries, DramaSeriesView, DramaUnlock, DramaWatchProgress
+from apps.accounts.models import ChannelSubscription, DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaSeriesView, DramaShare, DramaUnlock, DramaWatchProgress
 from apps.accounts.services import DramaAccessService
+
+
+def get_client_ip(request):
+    forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR')
 
 
 class DramaSeriesPagination(PageNumberPagination):
@@ -40,7 +51,7 @@ class DramaSeriesListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = (
-            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED)
+            DramaSeries.objects.select_related('owner').filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED)
             .annotate(
                 free_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=True)),
                 locked_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=False)),
@@ -68,6 +79,10 @@ class DramaSeriesListAPIView(generics.ListAPIView):
         )
         progress_items = DramaWatchProgress.objects.filter(user=user, series_id__in=series_ids).select_related('episode')
         context['progress_by_series_id'] = {item.series_id: item for item in progress_items}
+        owner_ids = [owner_id for owner_id in self.get_queryset().values_list('owner_id', flat=True) if owner_id]
+        context['subscribed_owner_ids'] = set(
+            ChannelSubscription.objects.filter(subscriber=user, channel_id__in=owner_ids).values_list('channel_id', flat=True)
+        )
         return context
 
 
@@ -75,7 +90,7 @@ class DramaSeriesDetailAPIView(generics.RetrieveAPIView):
     serializer_class = DramaSeriesSerializer
 
     def get_queryset(self):
-        return DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED).annotate(
+        return DramaSeries.objects.select_related('owner').filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED).annotate(
             free_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=True)),
             locked_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=False)),
         )
@@ -91,6 +106,10 @@ class DramaSeriesDetailAPIView(generics.RetrieveAPIView):
         )
         progress_items = DramaWatchProgress.objects.filter(user=user, series_id=series_id).select_related('episode')
         context['progress_by_series_id'] = {item.series_id: item for item in progress_items}
+        owner_id = DramaSeries.objects.filter(pk=series_id).values_list('owner_id', flat=True).first()
+        context['subscribed_owner_ids'] = set(
+            ChannelSubscription.objects.filter(subscriber=user, channel_id=owner_id).values_list('channel_id', flat=True)
+        ) if owner_id else set()
         return context
 
 
@@ -210,6 +229,85 @@ class DramaFavoriteAPIView(APIView):
         return Response(serializer.data)
 
 
+class DramaCommentListCreateAPIView(APIView):
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated()]
+        return [AllowAny()]
+
+    def get(self, request, pk):
+        series = get_object_or_404(
+            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            pk=pk,
+        )
+        comments = (
+            DramaComment.objects.filter(series=series, parent__isnull=True, is_deleted=False)
+            .select_related('user', 'parent')
+            .order_by('-created_at', '-id')
+        )
+        paginator = DramaSeriesPagination()
+        page = paginator.paginate_queryset(comments, request)
+        serializer = DramaCommentSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request, pk):
+        series = get_object_or_404(
+            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            pk=pk,
+        )
+        serializer = DramaCommentCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        parent = None
+        parent_id = serializer.validated_data.get('parent_id')
+        if parent_id:
+            parent = get_object_or_404(DramaComment.objects.filter(series=series, is_deleted=False), pk=parent_id)
+        with transaction.atomic():
+            comment = DramaComment.objects.create(
+                series=series,
+                user=request.user,
+                parent=parent,
+                content=serializer.validated_data['content'],
+            )
+            DramaSeries.objects.filter(pk=series.pk).update(comment_count=F('comment_count') + 1)
+            if parent is not None:
+                DramaComment.objects.filter(pk=parent.pk).update(reply_count=F('reply_count') + 1)
+        comment = DramaComment.objects.select_related('user', 'parent').get(pk=comment.pk)
+        return Response(DramaCommentSerializer(comment, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+class DramaShareAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        series = get_object_or_404(
+            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            pk=pk,
+        )
+        channel = (request.data.get('channel') or '').strip()[:64]
+        user = request.user if request.user.is_authenticated else None
+        DramaShare.objects.create(
+            user=user,
+            series=series,
+            channel=channel,
+            ip_address=get_client_ip(request),
+            user_agent=(request.META.get('HTTP_USER_AGENT') or '')[:1000],
+        )
+        DramaSeries.objects.filter(pk=series.pk).update(share_count=F('share_count') + 1)
+        series.refresh_from_db(fields=['share_count'])
+        return Response({'series_id': series.id, 'share_count': series.share_count, 'channel': channel}, status=status.HTTP_200_OK)
+
+
+class DramaInteractionSummaryAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        series = get_object_or_404(
+            DramaSeries.objects.select_related('owner').filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            pk=pk,
+        )
+        return Response(DramaInteractionSummarySerializer(series, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
 class AccountDramaProgressListAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AccountDramaProgressItemSerializer
@@ -248,25 +346,41 @@ class DramaEpisodeUnlockAPIView(APIView):
             ),
             pk=episode_id,
         )
+        request_serializer = DramaEpisodeUnlockRequestSerializer(data=request.data or {})
+        if not request_serializer.is_valid():
+            return Response(
+                {'code': 'invalid_payment_method', 'detail': 'Invalid payment_method.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        payment_method = request_serializer.validated_data['payment_method']
         try:
-            unlock, charged = DramaAccessService.unlock_with_meow_points(user=request.user, episode=episode)
+            if payment_method == 'meow_credit':
+                unlock, charged = DramaAccessService.unlock_with_meow_credit(user=request.user, episode=episode)
+            else:
+                unlock, charged = DramaAccessService.unlock_with_meow_points(user=request.user, episode=episode)
         except DjangoValidationError as exc:
-            if 'Insufficient Meow Points balance.' in str(exc):
+            error_text = str(exc)
+            if 'Insufficient Meow Points balance.' in error_text or 'Insufficient Meow Credit balance.' in error_text:
+                detail = 'Insufficient Meow Credit balance.' if payment_method == 'meow_credit' else 'Insufficient Meow Points balance.'
                 return Response(
-                    {'code': 'insufficient_balance', 'detail': 'Insufficient Meow Points balance.'},
+                    {'code': 'insufficient_balance', 'detail': detail},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             raise
 
-        points_charged = episode.meow_points_price if charged else 0
-        serializer = DramaUnlockResponseSerializer(
-            {
-                'episode_id': episode.id,
-                'series_id': episode.series_id,
-                'is_unlocked': True,
-                'points_charged': points_charged,
-            }
-        )
+        points_charged = episode.meow_points_price if charged and payment_method == 'meow_points' else 0
+        credits_charged = episode.meow_credit_price if charged and payment_method == 'meow_credit' else 0
+        payload = {
+            'episode_id': episode.id,
+            'series_id': episode.series_id,
+            'is_unlocked': True,
+            'payment_method': payment_method,
+            'points_charged': points_charged,
+            'credits_charged': credits_charged,
+        }
+        if not charged:
+            payload['code'] = 'already_unlocked'
+        serializer = DramaUnlockResponseSerializer(payload)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
