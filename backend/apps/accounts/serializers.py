@@ -108,6 +108,14 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     wallet_link_status = serializers.ChoiceField(required=False, allow_blank=True, choices=User.WALLET_LINK_STATUS_CHOICES)
     seller_store = serializers.SerializerMethodField()
     counts = serializers.SerializerMethodField()
+    follower_count = serializers.SerializerMethodField()
+    subscriber_count = serializers.SerializerMethodField()
+    like_count = serializers.SerializerMethodField()
+    total_likes = serializers.SerializerMethodField()
+    gift_count = serializers.SerializerMethodField()
+    total_gifts = serializers.SerializerMethodField()
+    video_count = serializers.SerializerMethodField()
+    total_videos = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -132,6 +140,14 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'wallet_link_status',
             'linked_at',
             'seller_store',
+            'follower_count',
+            'subscriber_count',
+            'like_count',
+            'total_likes',
+            'gift_count',
+            'total_gifts',
+            'video_count',
+            'total_videos',
             'counts',
         )
         read_only_fields = (
@@ -145,6 +161,14 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'can_accept_payments',
             'linked_at',
             'seller_store',
+            'follower_count',
+            'subscriber_count',
+            'like_count',
+            'total_likes',
+            'gift_count',
+            'total_gifts',
+            'video_count',
+            'total_videos',
             'counts',
         )
 
@@ -177,15 +201,47 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     def get_counts(self, obj):
         return self._summary(obj)['counts']
 
+    def get_follower_count(self, obj):
+        return self._summary(obj)['follower_count']
+
+    def get_subscriber_count(self, obj):
+        return self._summary(obj)['follower_count']
+
+    def get_like_count(self, obj):
+        return self._summary(obj)['like_count']
+
+    def get_total_likes(self, obj):
+        return self._summary(obj)['like_count']
+
+    def get_gift_count(self, obj):
+        return self._summary(obj)['gift_count']
+
+    def get_total_gifts(self, obj):
+        return self._summary(obj)['gift_count']
+
+    def get_video_count(self, obj):
+        return self._summary(obj)['video_count']
+
+    def get_total_videos(self, obj):
+        return self._summary(obj)['video_count']
+
     def _summary(self, obj):
         summary = getattr(obj, '_account_profile_summary_cache', None)
         if summary is not None:
             return summary
 
         seller_store = SellerStore.objects.filter(owner=obj).only('id', 'name', 'slug', 'is_active').first()
+        video_count = Video.objects.filter(owner=obj).count()
+        follower_count = ChannelSubscription.objects.filter(channel=obj).count()
+        like_count = VideoLike.objects.filter(video__owner=obj).count()
+        gift_count = GiftTransaction.objects.filter(receiver=obj).count()
         product_count = Product.objects.filter(store__owner=obj).count()
         payment_method_count = StreamPaymentMethod.objects.filter(stream__owner=obj).count()
         summary = {
+            'follower_count': follower_count,
+            'like_count': like_count,
+            'gift_count': gift_count,
+            'video_count': video_count,
             'is_seller': seller_store is not None,
             'is_admin': bool(obj.is_staff or obj.is_superuser),
             'can_create_live': bool(obj.is_creator),
@@ -201,7 +257,11 @@ class AccountProfileSerializer(serializers.ModelSerializer):
                 if seller_store is not None else None
             ),
             'counts': {
-                'videos': Video.objects.filter(owner=obj).count(),
+                'videos': video_count,
+                'followers': follower_count,
+                'subscribers': follower_count,
+                'likes': like_count,
+                'gifts': gift_count,
                 'live_streams': LiveStream.objects.filter(owner=obj).count(),
                 'products': product_count,
                 'payment_methods': payment_method_count,
@@ -1727,6 +1787,7 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     share_count = serializers.IntegerField(read_only=True)
     gift_count = serializers.SerializerMethodField()
     gift_points_total = serializers.SerializerMethodField()
+    gift_amount_total = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
     viewer_has_liked = serializers.SerializerMethodField()
     viewer_is_following = serializers.SerializerMethodField()
@@ -1749,6 +1810,12 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     def get_gift_points_total(self, obj):
         value = GiftTransaction.objects.filter(video=obj).aggregate(total=Sum('total_points')).get('total')
         return value or 0
+
+    def get_gift_amount_total(self, obj):
+        return sum(
+            (tx.amount or tx.total_points or 0)
+            for tx in GiftTransaction.objects.filter(video=obj).only('amount', 'total_points')
+        )
 
     def get_is_liked(self, obj):
         return self.get_viewer_has_liked(obj)
