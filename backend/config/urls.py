@@ -6,6 +6,7 @@ from django.conf.urls.static import static
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/', include('apps.accounts.urls')),
+    path('api/account/library/', include('apps.accounts.library_urls')),
     path('api/account/', include('apps.accounts.account_urls')),
     path('api/admin/', include('apps.accounts.admin_urls')),
     path('api/videos/', include('apps.accounts.video_urls')),
@@ -23,6 +24,8 @@ urlpatterns = [
     path('api/', include('apps.accounts.product_order_urls')),
     path('api/live/', include('apps.accounts.live_urls')),
     path('api/dramas/', include('apps.accounts.drama_urls')),
+    path('api/creator/videos/', include('apps.accounts.creator_video_urls')),
+    path('api/creator/live-streams/', include('apps.accounts.creator_live_urls')),
     path('api/creator/dramas/', include('apps.accounts.creator_drama_urls')),
     path('api/public/categories/', include('apps.accounts.public_category_urls')),
     path('api/public/videos/', include('apps.accounts.public_video_urls')),
