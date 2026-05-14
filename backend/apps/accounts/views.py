@@ -52,7 +52,7 @@ from apps.accounts.models import (
     generate_stream_key,
 )
 from apps.accounts.permissions import IsCreator, IsStaffOrSuperuser
-from apps.accounts.gift_serializers import GiftSendSerializer, GiftTransactionSerializer
+from apps.accounts.gift_serializers import ContentGiftSendResponseSerializer, ContentGiftSendSerializer, GiftSendSerializer, GiftTransactionSerializer
 from apps.accounts.serializers import (
     AccountPasswordChangeSerializer,
     AccountPreferencesSerializer,
@@ -2054,6 +2054,46 @@ class PublicVideoGiftSendAPIView(APIView):
             Video.objects.select_related('owner').filter(visibility=Video.VISIBILITY_PUBLIC),
             pk=pk,
         )
+
+        if 'amount' in request.data:
+            serializer = ContentGiftSendSerializer(data=request.data or {})
+            serializer.is_valid(raise_exception=True)
+            amount = serializer.validated_data['amount']
+            payment_method = serializer.validated_data['payment_method']
+            try:
+                tx, sender_balance, receiver_balance = GiftService.send_content_gift(
+                    sender=request.user,
+                    receiver=video.owner,
+                    target_type=GiftTransaction.TARGET_VIDEO,
+                    target_id=video.id,
+                    video=video,
+                    amount=amount,
+                    payment_method=payment_method,
+                )
+            except ValidationError as exc:
+                error_text = str(exc)
+                if 'Insufficient Meow Points balance.' in error_text or 'Insufficient Meow Credit balance.' in error_text:
+                    return Response(
+                        {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                return Response({'detail': error_text}, status=status.HTTP_400_BAD_REQUEST)
+
+            response_serializer = ContentGiftSendResponseSerializer(
+                {
+                    'video_id': video.id,
+                    'receiver_id': video.owner_id,
+                    'amount': amount,
+                    'payment_method': payment_method,
+                    'points_charged': tx.points_amount,
+                    'credits_charged': tx.credits_amount,
+                    'sender_balance': sender_balance,
+                    'receiver_balance': receiver_balance,
+                    'gift_transaction_id': tx.id,
+                }
+            )
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
         serializer = GiftSendSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -2095,7 +2135,6 @@ class PublicVideoGiftSendAPIView(APIView):
 
         response_serializer = GiftTransactionSerializer(tx)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-
 
 class VideoLikeAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
