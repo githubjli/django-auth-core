@@ -361,6 +361,7 @@ These endpoints are read-only and do not require authentication.
 - `GET /api/public/videos/<id>/interaction-summary/` returns `video_id`, `like_count`, `comment_count`, `viewer_has_liked`, `viewer_is_subscribed`, `channel_id`, and `subscriber_count`
 - `GET /api/public/videos/<id>/comments/` - paginated top-level non-deleted comments ordered newest first
 - `POST /api/public/videos/<id>/view/` - record a lightweight view event and return the updated video payload
+- `POST /api/public/videos/<id>/gifts/send/` - send a fixed amount gift using `meow_points` or `meow_credit` (`amount` must be one of `1`, `10`, `30`, `100`, `200`, `500`; legacy `gift_code` + `quantity` remains supported)
 
 The public list also supports the same `category`, `search`, `ordering`, `page`, and `page_size` query params.
 Public video responses also include presentation-friendly fields such as `owner_id`, `owner_name`, `owner_avatar_url`, `description_preview`, `category_name`, `category_slug`, `thumbnail_url`, `like_count`, `comment_count`, `view_count`, and `is_liked`.
@@ -381,6 +382,110 @@ curl http://127.0.0.1:8001/api/public/videos/1/related/
 ```bash
 curl -X POST http://127.0.0.1:8001/api/public/videos/1/view/
 ```
+
+
+
+## Short Drama API
+
+Short drama endpoints power the Shorts-style playback page, including series metadata, episode navigation, comments, shares, gifts, and interaction counts.
+
+### Public read/playback endpoints
+
+- `GET /api/dramas/` - paginated published/active drama series. Items include `comment_count`, `share_count`, `gift_count`, and `gift_amount_total` for the right-side action rail.
+- `GET /api/dramas/<id>/` - published/active drama detail with the same interaction counts.
+- `GET /api/dramas/<id>/episodes/` - active episodes for a series. Episode payloads include `previous_episode_no` and `next_episode_no` for Watch Full Drama / previous-next controls.
+- `GET /api/dramas/<id>/episodes/<episode_no>/` - single episode detail with playback URLs when the viewer can watch and the same navigation helper fields.
+- `GET /api/dramas/<id>/interaction-summary/` - returns `favorite_count`, `comment_count`, `share_count`, `gift_count`, `gift_amount_total`, `view_count`, owner/subscription metadata, and viewer favorite/subscription state.
+
+```bash
+curl "http://127.0.0.1:8001/api/dramas/?page=1&page_size=10"
+```
+
+```bash
+curl http://127.0.0.1:8001/api/dramas/1/episodes/
+```
+
+```bash
+curl http://127.0.0.1:8001/api/dramas/1/interaction-summary/ \
+  -H 'Authorization: Bearer <access_token>'
+```
+
+### Comments and shares
+
+- `GET /api/dramas/<id>/comments/` - paginated top-level comments.
+- `POST /api/dramas/<id>/comments/` - create a comment; include `parent_id` to create a reply and increment the parent `reply_count`.
+- `POST /api/dramas/<id>/share/` - record a share and increment `share_count`.
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/dramas/1/comments/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"So good!"}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/dramas/1/comments/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Agree!","parent_id":123}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/dramas/1/share/ \
+  -H 'Content-Type: application/json' \
+  -d '{"channel":"copy_link"}'
+```
+
+### Gifts
+
+`POST /api/dramas/<id>/gifts/send/` sends a fixed-amount gift to `DramaSeries.owner`. The drama must be published and active. Allowed `amount` values are `1`, `10`, `30`, `100`, `200`, and `500`. `payment_method` can be `meow_points` or `meow_credit`; it defaults to `meow_points` for backward-compatible clients.
+
+Successful response shape:
+
+```json
+{
+  "series_id": 1,
+  "receiver_id": 2,
+  "amount": 30,
+  "payment_method": "meow_credit",
+  "points_charged": 0,
+  "credits_charged": 30,
+  "sender_balance": 970,
+  "receiver_balance": 130,
+  "gift_transaction_id": 99
+}
+```
+
+Error responses include:
+
+- `400 {"code":"receiver_unavailable","detail":"Drama series has no owner."}`
+- `400 {"code":"insufficient_balance","detail":"Insufficient balance."}`
+- `400 {"code":"drama_unavailable","detail":"Drama series is not available for gifts."}`
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/dramas/1/gifts/send/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"amount":30}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/dramas/1/gifts/send/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"amount":30,"payment_method":"meow_credit"}'
+```
+
+
+Send a public video gift with points or credits:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/public/videos/1/gifts/send/ \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"amount":30,"payment_method":"meow_credit"}'
+```
+
 
 
 ## Channel Subscription API

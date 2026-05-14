@@ -10,6 +10,8 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import (
     Gift,
     GiftTransaction,
+    MeowCreditLedger,
+    MeowCreditWallet,
     MeowPointLedger,
     MeowPointWallet,
     User,
@@ -98,7 +100,155 @@ class PublicVideoShareAndGiftTestCase(APITestCase):
         self.assertEqual(response.data['share_count'], 2)
         self.assertEqual(response.data['gift_count'], 3)
         self.assertEqual(response.data['gift_points_total'], 30)
+        self.assertEqual(response.data['gift_amount_total'], 30)
         self.assertFalse(response.data['is_liked'])
+
+
+
+    def test_video_points_gift_success_transfers_points_to_receiver(self):
+        sender_points = MeowPointWallet.objects.create(user=self.sender, balance=100)
+        receiver_points = MeowPointWallet.objects.create(user=self.owner, balance=50)
+        sender_credits = MeowCreditWallet.objects.create(user=self.sender, balance=77)
+        receiver_credits = MeowCreditWallet.objects.create(user=self.owner, balance=88)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('public-video-gift-send', args=[self.video.id]),
+            {'amount': 30, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['video_id'], self.video.id)
+        self.assertEqual(response.data['receiver_id'], self.owner.id)
+        self.assertEqual(response.data['amount'], 30)
+        self.assertEqual(response.data['payment_method'], 'meow_points')
+        self.assertEqual(response.data['points_charged'], 30)
+        self.assertEqual(response.data['credits_charged'], 0)
+        self.assertEqual(response.data['sender_balance'], 70)
+        self.assertEqual(response.data['receiver_balance'], 80)
+
+        sender_points.refresh_from_db()
+        receiver_points.refresh_from_db()
+        sender_credits.refresh_from_db()
+        receiver_credits.refresh_from_db()
+        self.assertEqual(sender_points.balance, 70)
+        self.assertEqual(receiver_points.balance, 80)
+        self.assertEqual(sender_credits.balance, 77)
+        self.assertEqual(receiver_credits.balance, 88)
+
+        tx = GiftTransaction.objects.get(pk=response.data['gift_transaction_id'])
+        self.assertEqual(tx.sender, self.sender)
+        self.assertEqual(tx.receiver, self.owner)
+        self.assertEqual(tx.video, self.video)
+        self.assertIsNone(tx.drama_series)
+        self.assertIsNone(tx.stream)
+        self.assertEqual(tx.target_type, GiftTransaction.TARGET_VIDEO)
+        self.assertEqual(tx.target_id, self.video.id)
+        self.assertEqual(tx.payment_method, GiftTransaction.PAYMENT_MEOW_POINTS)
+        self.assertEqual(tx.amount, 30)
+        self.assertEqual(tx.points_amount, 30)
+        self.assertEqual(tx.credits_amount, 0)
+        self.assertIsNotNone(tx.sender_point_ledger)
+        self.assertIsNotNone(tx.receiver_point_ledger)
+        self.assertIsNone(tx.sender_credit_ledger)
+        self.assertIsNone(tx.receiver_credit_ledger)
+        self.assertEqual(tx.sender_point_ledger.sent_gift_transaction, tx)
+        self.assertEqual(tx.receiver_point_ledger.received_gift_transaction, tx)
+        self.video.refresh_from_db()
+        self.assertEqual(self.video.gift_count, 1)
+        self.assertEqual(self.video.gift_amount_total, 30)
+
+    def test_video_credit_gift_success_transfers_credits_to_receiver(self):
+        sender_points = MeowPointWallet.objects.create(user=self.sender, balance=44)
+        receiver_points = MeowPointWallet.objects.create(user=self.owner, balance=55)
+        sender_credits = MeowCreditWallet.objects.create(user=self.sender, balance=100)
+        receiver_credits = MeowCreditWallet.objects.create(user=self.owner, balance=50)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('public-video-gift-send', args=[self.video.id]),
+            {'amount': 30, 'payment_method': 'meow_credit'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['payment_method'], 'meow_credit')
+        self.assertEqual(response.data['points_charged'], 0)
+        self.assertEqual(response.data['credits_charged'], 30)
+        self.assertEqual(response.data['sender_balance'], 70)
+        self.assertEqual(response.data['receiver_balance'], 80)
+
+        sender_points.refresh_from_db()
+        receiver_points.refresh_from_db()
+        sender_credits.refresh_from_db()
+        receiver_credits.refresh_from_db()
+        self.assertEqual(sender_points.balance, 44)
+        self.assertEqual(receiver_points.balance, 55)
+        self.assertEqual(sender_credits.balance, 70)
+        self.assertEqual(receiver_credits.balance, 80)
+
+        tx = GiftTransaction.objects.get(pk=response.data['gift_transaction_id'])
+        self.assertEqual(tx.target_type, GiftTransaction.TARGET_VIDEO)
+        self.assertEqual(tx.target_id, self.video.id)
+        self.assertEqual(tx.payment_method, GiftTransaction.PAYMENT_MEOW_CREDIT)
+        self.assertEqual(tx.amount, 30)
+        self.assertEqual(tx.points_amount, 0)
+        self.assertEqual(tx.credits_amount, 30)
+        self.assertIsNone(tx.sender_point_ledger)
+        self.assertIsNone(tx.receiver_point_ledger)
+        self.assertIsNotNone(tx.sender_credit_ledger)
+        self.assertIsNotNone(tx.receiver_credit_ledger)
+
+    def test_video_gift_invalid_amount_rejected(self):
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('public-video-gift-send', args=[self.video.id]),
+            {'amount': 2, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('amount', response.data)
+
+    def test_video_gift_insufficient_points_rolls_back(self):
+        MeowPointWallet.objects.create(user=self.sender, balance=10)
+        MeowPointWallet.objects.create(user=self.owner, balance=5)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('public-video-gift-send', args=[self.video.id]),
+            {'amount': 30, 'payment_method': 'meow_points'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertFalse(GiftTransaction.objects.filter(video=self.video).exists())
+        self.assertFalse(MeowPointLedger.objects.filter(entry_type__in=[MeowPointLedger.TYPE_GIFT_SPEND, MeowPointLedger.TYPE_GIFT_RECEIVED]).exists())
+        self.video.refresh_from_db()
+        self.assertEqual(self.video.gift_count, 0)
+        self.assertEqual(self.video.gift_amount_total, 0)
+
+    def test_video_gift_insufficient_credit_rolls_back(self):
+        MeowCreditWallet.objects.create(user=self.sender, balance=10)
+        MeowCreditWallet.objects.create(user=self.owner, balance=5)
+        self.client.force_authenticate(user=self.sender)
+
+        response = self.client.post(
+            reverse('public-video-gift-send', args=[self.video.id]),
+            {'amount': 30, 'payment_method': 'meow_credit'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertFalse(GiftTransaction.objects.filter(video=self.video).exists())
+        self.assertFalse(MeowCreditLedger.objects.filter(entry_type__in=[MeowCreditLedger.TYPE_GIFT_SPEND, MeowCreditLedger.TYPE_GIFT_RECEIVED]).exists())
+        self.video.refresh_from_db()
+        self.assertEqual(self.video.gift_count, 0)
+        self.assertEqual(self.video.gift_amount_total, 0)
 
     def test_authenticated_user_can_send_video_gift(self):
         MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
