@@ -480,6 +480,7 @@ def _recount_total_episodes(series: DramaSeries):
 class CreatorDramaSeriesListCreateAPIView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated, IsCreatorOrAdmin]
     serializer_class = CreatorDramaSeriesSerializer
+    pagination_class = DramaSeriesPagination
 
     def get_queryset(self):
         qs = DramaSeries.objects.all().order_by('-created_at', '-id')

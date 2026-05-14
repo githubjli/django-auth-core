@@ -1479,6 +1479,26 @@ class LiveStreamListAPIView(generics.ListAPIView):
         return queryset.filter(visibility=LiveStream.VISIBILITY_PUBLIC)
 
 
+class CreatorLiveStreamPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class CreatorLiveStreamListAPIView(generics.ListAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.IsAuthenticated, IsCreator]
+    pagination_class = CreatorLiveStreamPagination
+
+    def get_queryset(self):
+        return (
+            LiveStream.objects
+            .filter(owner=self.request.user)
+            .select_related('category', 'owner')
+            .order_by('-created_at', '-id')
+        )
+
+
 class LiveStreamCreateAPIView(generics.CreateAPIView):
     serializer_class = LiveStreamSerializer
     permission_classes = [permissions.IsAuthenticated, IsCreator]
@@ -1882,6 +1902,10 @@ class VideoListCreateAPIView(generics.ListCreateAPIView):
         else:
             queryset = queryset.order_by('-created_at', '-id')
         return queryset
+
+
+class CreatorVideoListCreateAPIView(VideoListCreateAPIView):
+    permission_classes = [permissions.IsAuthenticated, IsCreator]
 
 
 class VideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
