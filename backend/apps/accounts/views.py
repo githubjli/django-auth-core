@@ -93,6 +93,7 @@ from apps.accounts.serializers import (
     SellerProductOrderListSerializer,
     PaymentOrderCreateSerializer,
     PaymentOrderSerializer,
+    PublicCreatorSerializer,
     RegisterSerializer,
     SellerStoreSerializer,
     UserShippingAddressSerializer,
@@ -1957,7 +1958,10 @@ class PublicVideoListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = annotate_videos_for_request(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             self.request,
         )
         category = self.request.query_params.get('category')
@@ -1990,7 +1994,10 @@ class PublicVideoDetailAPIView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return annotate_videos_for_request(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             self.request,
         )
 
@@ -2007,7 +2014,10 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         current_video = generics.get_object_or_404(
-            Video.objects.select_related('category').filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.select_related('category').filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=self.kwargs['pk'],
         )
         limit = self.request.query_params.get('limit', 8)
@@ -2018,7 +2028,10 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
             limit = 8
 
         queryset = annotate_videos_for_request(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC).exclude(pk=current_video.pk),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ).exclude(pk=current_video.pk),
             self.request,
         )
         if current_video.category_id:
@@ -2032,7 +2045,10 @@ class PublicVideoInteractionSummaryAPIView(APIView):
     def get(self, request, pk):
         video = generics.get_object_or_404(
             annotate_videos_for_request(
-                Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+                Video.objects.filter(
+                    visibility=Video.VISIBILITY_PUBLIC,
+                    status=Video.STATUS_ACTIVE,
+                ),
                 request,
             ),
             pk=pk,
@@ -2046,7 +2062,10 @@ class PublicVideoShareTrackAPIView(APIView):
 
     def post(self, request, pk):
         video = generics.get_object_or_404(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=pk,
         )
         channel = (request.data.get('channel') or '').strip()[:64]
@@ -2075,7 +2094,10 @@ class PublicVideoGiftSendAPIView(APIView):
 
     def post(self, request, pk):
         video = generics.get_object_or_404(
-            Video.objects.select_related('owner').filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.select_related('owner').filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=pk,
         )
 
@@ -2272,6 +2294,55 @@ class CreatorFollowAPIView(APIView):
             'viewer_is_following': is_following,
             'follower_count': subscriber_count,
         }
+
+
+class PublicCreatorDetailAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, creator_id):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=creator_id)
+        serializer = PublicCreatorSerializer(creator, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PublicCreatorVideoListAPIView(generics.ListAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['mask_locked_file_fields'] = True
+        return context
+
+    def get_queryset(self):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=self.kwargs['creator_id'])
+        queryset = annotate_videos_for_request(
+            Video.objects.filter(
+                owner=creator,
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
+            self.request,
+        )
+
+        category = self.request.query_params.get('category')
+        access_type = self.request.query_params.get('access_type')
+        search = self.request.query_params.get('search')
+        ordering = self.request.query_params.get('ordering')
+
+        category = LEGACY_CATEGORY_SLUG_ALIASES.get(category, category)
+        if category:
+            queryset = queryset.filter(category__slug=category)
+        if access_type:
+            queryset = queryset.filter(access_type=access_type)
+        if search:
+            queryset = queryset.filter(Q(title__icontains=search))
+        if ordering in {'created_at', '-created_at'}:
+            queryset = queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at', '-id')
+        return queryset
 
 
 class BillingPlanListAPIView(generics.ListAPIView):
@@ -2975,6 +3046,7 @@ class PublicVideoCommentListAPIView(generics.ListAPIView):
             Video,
             pk=self.kwargs['pk'],
             visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
         )
         parent_id = self.request.query_params.get('parent_id')
         queryset = VideoComment.objects.filter(video=video, is_deleted=False)
@@ -3027,14 +3099,22 @@ class PublicVideoViewTrackAPIView(APIView):
 
     def post(self, request, pk):
         video = generics.get_object_or_404(
-            Video,
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=pk,
-            visibility=Video.VISIBILITY_PUBLIC,
         )
         viewer = request.user if request.user.is_authenticated else None
         VideoView.objects.create(video=video, viewer=viewer)
         video = annotate_videos_for_request(Video.objects.filter(pk=video.pk), request).get()
-        serializer = VideoSerializer(video, context={'request': request})
+        serializer = VideoSerializer(
+            video,
+            context={
+                'request': request,
+                'mask_locked_file_fields': True,
+            },
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
