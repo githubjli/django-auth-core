@@ -2045,7 +2045,10 @@ class PublicVideoInteractionSummaryAPIView(APIView):
     def get(self, request, pk):
         video = generics.get_object_or_404(
             annotate_videos_for_request(
-                Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+                Video.objects.filter(
+                    visibility=Video.VISIBILITY_PUBLIC,
+                    status=Video.STATUS_ACTIVE,
+                ),
                 request,
             ).filter(status=Video.STATUS_ACTIVE),
             pk=pk,
@@ -3096,15 +3099,22 @@ class PublicVideoViewTrackAPIView(APIView):
 
     def post(self, request, pk):
         video = generics.get_object_or_404(
-            Video,
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=pk,
-            visibility=Video.VISIBILITY_PUBLIC,
-            status=Video.STATUS_ACTIVE,
         )
         viewer = request.user if request.user.is_authenticated else None
         VideoView.objects.create(video=video, viewer=viewer)
         video = annotate_videos_for_request(Video.objects.filter(pk=video.pk), request).get()
-        serializer = VideoSerializer(video, context={'request': request})
+        serializer = VideoSerializer(
+            video,
+            context={
+                'request': request,
+                'mask_locked_file_fields': True,
+            },
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 

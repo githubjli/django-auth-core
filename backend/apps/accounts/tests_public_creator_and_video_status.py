@@ -115,3 +115,71 @@ class PublicCreatorAPITestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(response.data['viewer_is_following'])
+
+
+class PublicVideoViewTrackingTestCase(APITestCase):
+    def setUp(self):
+        self.creator = User.objects.create_user(
+            email='creator-view@example.com',
+            password='pass1234',
+            is_creator=True,
+        )
+        self.video = Video.objects.create(
+            owner=self.creator,
+            title='track me',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+        )
+
+    def test_public_view_endpoint_increments_view_count_and_reflects_in_detail_and_creator_list(self):
+        view_url = reverse('public-video-view', kwargs={'pk': self.video.id})
+        detail_url = reverse('public-video-detail', kwargs={'pk': self.video.id})
+        creator_list_url = reverse('creator-video-list-create')
+
+        first = self.client.post(view_url)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertIn('view_count', first.data)
+        self.assertEqual(first.data['view_count'], 1)
+
+        second = self.client.post(view_url)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data['view_count'], 2)
+
+        detail = self.client.get(detail_url)
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data['view_count'], 2)
+
+        self.client.force_authenticate(user=self.creator)
+        creator_list = self.client.get(creator_list_url)
+        self.assertEqual(creator_list.status_code, status.HTTP_200_OK)
+        results = creator_list.data['results']
+        target = next(item for item in results if item['id'] == self.video.id)
+        self.assertEqual(target['view_count'], 2)
+
+    def test_public_view_endpoint_returns_404_for_private_video(self):
+        private_video = Video.objects.create(
+            owner=self.creator,
+            title='private',
+            visibility=Video.VISIBILITY_PRIVATE,
+            status=Video.STATUS_ACTIVE,
+        )
+        response = self.client.post(reverse('public-video-view', kwargs={'pk': private_video.id}))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_view_endpoint_returns_404_for_non_active_video(self):
+        archived_video = Video.objects.create(
+            owner=self.creator,
+            title='archived',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ARCHIVED,
+        )
+        flagged_video = Video.objects.create(
+            owner=self.creator,
+            title='flagged',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_FLAGGED,
+        )
+        archived_response = self.client.post(reverse('public-video-view', kwargs={'pk': archived_video.id}))
+        flagged_response = self.client.post(reverse('public-video-view', kwargs={'pk': flagged_video.id}))
+        self.assertEqual(archived_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(flagged_response.status_code, status.HTTP_404_NOT_FOUND)
