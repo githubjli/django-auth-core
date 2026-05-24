@@ -431,11 +431,34 @@ class AntMediaLiveAdapter:
             f"{settings.ANT_MEDIA_BASE_URL}/"
             f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}/stop"
         )
-        request_obj = urllib_request.Request(endpoint, data=b'', method='POST')
+        request_obj = urllib_request.Request(
+            endpoint,
+            data=json.dumps({}).encode('utf-8'),
+            headers={
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            },
+            method='POST',
+        )
         try:
             with urllib_request.urlopen(request_obj, timeout=3) as response:
                 response_body = response.read().decode('utf-8')
                 status_code = getattr(response, 'status', response.getcode())
+        except error.HTTPError as exc:
+            response_body = self._read_error_body(exc)
+            logger.warning(
+                'ant_media stop_broadcast http_error stream_key=%s status=%s body=%s',
+                stream_key,
+                exc.code,
+                response_body,
+            )
+            return {
+                'ok': False,
+                'warning': 'ant_media_stop_failed',
+                'message': 'Live stream ended in Django, but Ant Media stop failed.',
+                'status_code': exc.code,
+                'body': response_body,
+            }
         except (error.URLError, TimeoutError) as exc:
             logger.warning('ant_media stop_broadcast failed stream_key=%s error=%s', stream_key, exc)
             return {
