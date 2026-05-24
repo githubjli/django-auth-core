@@ -54,6 +54,9 @@ from apps.accounts.models import (
     SellerPayoutAddress,
     UserShippingAddress,
     WalletAddress,
+    LiveChatMessage,
+    LiveChatRoom,
+    LiveStreamProduct,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,58 @@ logger = logging.getLogger(__name__)
 DEFAULT_THUMBNAIL_PNG = base64.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn4n/4AAAAASUVORK5CYII='
 )
+
+
+def create_live_chat_message(*, stream, user, validated_data: dict):
+    if stream.status in {LiveStream.STATUS_ENDED, LiveStream.STATUS_FAILED}:
+        raise ValidationError('Live stream has ended.')
+    if stream.visibility != LiveStream.VISIBILITY_PUBLIC and user.id != stream.owner_id:
+        raise ValidationError('Not found.')
+    room, _ = LiveChatRoom.objects.get_or_create(stream=stream)
+    if not room.is_enabled:
+        raise ValidationError('Chat is disabled for this stream.')
+
+    cutoff = timezone.now() - timedelta(seconds=2)
+    if LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists():
+        raise ValidationError('Please wait before sending another chat message.')
+    if room.slow_mode_seconds > 0:
+        cutoff = timezone.now() - timedelta(seconds=room.slow_mode_seconds)
+        if LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists():
+            raise ValidationError('Slow mode is enabled. Please wait before sending again.')
+
+    reply_to = None
+    reply_to_id = validated_data.get('reply_to_id')
+    if reply_to_id:
+        reply_to = LiveChatMessage.objects.filter(pk=reply_to_id, room=room).first()
+
+    product = None
+    message_type = validated_data.get('message_type', LiveChatMessage.TYPE_TEXT)
+    if message_type == LiveChatMessage.TYPE_PRODUCT:
+        product_id = validated_data.get('product_id')
+        product = Product.objects.filter(pk=product_id, status=Product.STATUS_ACTIVE).first()
+        if product is None or not LiveStreamProduct.objects.filter(stream=stream, product=product, is_active=True).exists():
+            raise ValidationError('Product is not active for this live stream.')
+
+    mapped_type = LiveChatMessage.EVENT_CHAT
+    if message_type == LiveChatMessage.TYPE_SYSTEM:
+        mapped_type = LiveChatMessage.EVENT_SYSTEM
+    elif message_type == LiveChatMessage.TYPE_GIFT:
+        mapped_type = LiveChatMessage.EVENT_GIFT
+    elif message_type == LiveChatMessage.TYPE_PRODUCT:
+        mapped_type = LiveChatMessage.EVENT_PRODUCT
+    elif message_type == LiveChatMessage.TYPE_PAYMENT:
+        mapped_type = LiveChatMessage.EVENT_PAYMENT
+
+    return LiveChatMessage.objects.create(
+        room=room,
+        user=user,
+        message_type=message_type,
+        type=mapped_type,
+        content=validated_data.get('content', ''),
+        payload=validated_data.get('payload', {}),
+        reply_to=reply_to,
+        product=product,
+    )
 
 
 class AntMediaLiveAdapter:

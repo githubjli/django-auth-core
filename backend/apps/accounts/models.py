@@ -841,11 +841,13 @@ class LiveStream(models.Model):
     STATUS_READY = 'ready'
     STATUS_LIVE = 'live'
     STATUS_ENDED = 'ended'
+    STATUS_FAILED = 'failed'
     STATUS_CHOICES = [
         (STATUS_IDLE, 'Idle'),
         (STATUS_READY, 'Ready'),
         (STATUS_LIVE, 'Live'),
         (STATUS_ENDED, 'Ended'),
+        (STATUS_FAILED, 'Failed'),
     ]
     VISIBILITY_PUBLIC = 'public'
     VISIBILITY_UNLISTED = 'unlisted'
@@ -876,6 +878,11 @@ class LiveStream(models.Model):
     stream_key = models.CharField(max_length=255, unique=True, default=generate_stream_key)
     viewer_count = models.PositiveIntegerField(default=0)
     ant_media_no_signal_count = models.PositiveIntegerField(default=0)
+    publish_session_id = models.CharField(max_length=64, blank=True, default='')
+    publish_started_at = models.DateTimeField(null=True, blank=True)
+    publish_session_expires_at = models.DateTimeField(null=True, blank=True)
+    last_publish_signal_at = models.DateTimeField(null=True, blank=True)
+    failure_reason = models.CharField(max_length=128, blank=True, default='')
     started_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -935,11 +942,27 @@ class LiveChatMessage(models.Model):
     TYPE_SYSTEM = 'system'
     TYPE_PRODUCT = 'product'
     TYPE_PAYMENT = 'payment'
+    TYPE_GIFT = 'gift'
+    TYPE_CHAT = 'chat'
     MESSAGE_TYPE_CHOICES = [
+        (TYPE_CHAT, 'Chat'),
         (TYPE_TEXT, 'Text'),
         (TYPE_SYSTEM, 'System'),
+        (TYPE_GIFT, 'Gift'),
         (TYPE_PRODUCT, 'Product'),
         (TYPE_PAYMENT, 'Payment'),
+    ]
+    EVENT_CHAT = 'chat'
+    EVENT_SYSTEM = 'system'
+    EVENT_GIFT = 'gift'
+    EVENT_PRODUCT = 'product'
+    EVENT_PAYMENT = 'payment'
+    EVENT_TYPE_CHOICES = [
+        (EVENT_CHAT, 'Chat'),
+        (EVENT_SYSTEM, 'System'),
+        (EVENT_GIFT, 'Gift'),
+        (EVENT_PRODUCT, 'Product'),
+        (EVENT_PAYMENT, 'Payment'),
     ]
 
     room = models.ForeignKey(
@@ -973,6 +996,8 @@ class LiveChatMessage(models.Model):
         related_name='chat_messages',
     )
     payment_reference = models.CharField(max_length=255, null=True, blank=True)
+    type = models.CharField(max_length=20, choices=EVENT_TYPE_CHOICES, default=EVENT_CHAT)
+    payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

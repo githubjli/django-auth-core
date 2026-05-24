@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.gift_serializers import GiftSendSerializer, GiftSerializer, GiftTransactionSerializer
-from apps.accounts.models import Gift, GiftTransaction, LiveStream
+from apps.accounts.models import Gift, GiftTransaction, LiveStream, LiveChatMessage, LiveChatRoom
 from apps.accounts.services import GiftService
 
 
@@ -26,10 +26,11 @@ class LiveGiftSendAPIView(APIView):
 
     def post(self, request, pk):
         stream = get_object_or_404(LiveStream.objects.select_related('owner'), pk=pk)
-        if stream.status == LiveStream.STATUS_ENDED:
+        if stream.status in {LiveStream.STATUS_ENDED, LiveStream.STATUS_FAILED}:
             return Response({'detail': 'Live stream has ended.'}, status=status.HTTP_400_BAD_REQUEST)
         serializer = GiftSendSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        client_request_id = (request.data.get('client_request_id') or '').strip()
 
         gift = get_object_or_404(Gift, code=serializer.validated_data['gift_code'])
         cutoff = timezone.now() - timedelta(seconds=2)
@@ -66,5 +67,31 @@ class LiveGiftSendAPIView(APIView):
                 return Response({'detail': 'Gift is not active.'}, status=status.HTTP_400_BAD_REQUEST)
             return Response({'detail': error_text}, status=status.HTTP_400_BAD_REQUEST)
 
+        room, _ = LiveChatRoom.objects.get_or_create(stream=stream)
+        message = LiveChatMessage.objects.create(
+            room=room,
+            user=request.user,
+            message_type=LiveChatMessage.TYPE_GIFT,
+            type=LiveChatMessage.EVENT_GIFT,
+            content=f'{request.user.display_name} sent {gift.name} x{serializer.validated_data["quantity"]}',
+            payload={
+                'gift_id': gift.id,
+                'gift_name': gift.name,
+                'quantity': serializer.validated_data['quantity'],
+                'sender': {'id': request.user.id, 'name': request.user.display_name},
+            },
+        )
         response_serializer = GiftTransactionSerializer(tx)
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        return Response(
+            {
+                'ok': True,
+                'event': {
+                    'id': message.id,
+                    'type': message.type,
+                    'message': message.content,
+                    'payload': message.payload,
+                },
+                'transaction': response_serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )

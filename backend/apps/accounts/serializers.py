@@ -1035,13 +1035,17 @@ class LiveChatMessageSerializer(serializers.ModelSerializer):
     live_id = serializers.IntegerField(source='room.stream_id', read_only=True)
     user = serializers.SerializerMethodField()
     product = serializers.SerializerMethodField()
+    message = serializers.CharField(source='content', read_only=True)
 
     class Meta:
         model = LiveChatMessage
         fields = (
             'id',
             'live_id',
+            'type',
+            'payload',
             'message_type',
+            'message',
             'content',
             'created_at',
             'is_pinned',

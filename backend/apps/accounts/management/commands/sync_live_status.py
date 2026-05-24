@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 from django.utils import timezone
+from datetime import timedelta
 
 from apps.accounts.models import LiveStream
 from apps.accounts.services import AntMediaLiveAdapter
@@ -15,8 +16,16 @@ class Command(BaseCommand):
         ended = 0
         warnings = 0
 
-        for stream in LiveStream.objects.filter(status=LiveStream.STATUS_LIVE).iterator():
+        now = timezone.now()
+        ready_timeout = now - timedelta(minutes=5)
+        for stream in LiveStream.objects.filter(status__in=[LiveStream.STATUS_LIVE, LiveStream.STATUS_READY]).iterator():
             checked += 1
+            if stream.status == LiveStream.STATUS_READY and stream.publish_started_at and stream.publish_started_at < ready_timeout:
+                stream.status = LiveStream.STATUS_FAILED
+                stream.failure_reason = 'ready_timeout'
+                stream.save(update_fields=['status', 'failure_reason'])
+                ended += 1
+                continue
             normalized = adapter.normalize_stream_fields(
                 stream,
                 persist_no_signal=True,

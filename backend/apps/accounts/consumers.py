@@ -1,10 +1,8 @@
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
-from django.utils import timezone
-from datetime import timedelta
-
-from apps.accounts.models import LiveChatMessage, LiveChatRoom, LiveStream, Product
+from apps.accounts.models import LiveChatMessage, LiveChatRoom, LiveStream
 from apps.accounts.serializers import LiveChatMessageCreateSerializer, LiveChatMessageSerializer
+from apps.accounts.services import create_live_chat_message
 
 
 class LiveChatConsumer(AsyncJsonWebsocketConsumer):
@@ -35,22 +33,15 @@ class LiveChatConsumer(AsyncJsonWebsocketConsumer):
         if stream is None:
             await self.send_json({'type': 'error', 'detail': 'Stream not found.'})
             return
-        room = await self._get_room(stream)
-        if not room.is_enabled:
-            await self.send_json({'type': 'error', 'detail': 'Chat is disabled for this stream.'})
-            return
-        if room.slow_mode_seconds > 0:
-            limited = await self._is_slow_mode_limited(room, user.id, room.slow_mode_seconds)
-            if limited:
-                await self.send_json({'type': 'error', 'detail': 'Slow mode is enabled. Please wait before sending again.'})
-                return
-
         serializer = LiveChatMessageCreateSerializer(data=content.get('data', {}))
         if not serializer.is_valid():
             await self.send_json({'type': 'error', 'errors': serializer.errors})
             return
 
-        message = await self._create_message(room.id, user.id, serializer.validated_data)
+        message, error_text = await self._create_message(stream.id, user.id, serializer.validated_data)
+        if message is None:
+            await self.send_json({'type': 'error', 'detail': error_text})
+            return
         payload = await self._serialize_message(message)
         await self.channel_layer.group_send(
             self.group_name,
@@ -80,36 +71,14 @@ class LiveChatConsumer(AsyncJsonWebsocketConsumer):
         return room
 
     @database_sync_to_async
-    def _is_slow_mode_limited(self, room, user_id, slow_mode_seconds: int) -> bool:
-        cutoff = timezone.now() - timedelta(seconds=slow_mode_seconds)
-        return LiveChatMessage.objects.filter(
-            room=room,
-            user_id=user_id,
-            created_at__gte=cutoff,
-            is_deleted=False,
-        ).exists()
-
-    @database_sync_to_async
-    def _create_message(self, room_id: int, user_id: int, validated_data: dict):
-        reply_to = None
-        reply_to_id = validated_data.get('reply_to_id')
-        if reply_to_id:
-            reply_to = LiveChatMessage.objects.filter(pk=reply_to_id, room_id=room_id).first()
-
-        product = None
-        if validated_data.get('message_type') == LiveChatMessage.TYPE_PRODUCT:
-            product_id = validated_data.get('product_id')
-            if product_id:
-                product = Product.objects.filter(pk=product_id, status=Product.STATUS_ACTIVE).first()
-
-        return LiveChatMessage.objects.create(
-            room_id=room_id,
-            user_id=user_id,
-            message_type=validated_data.get('message_type', LiveChatMessage.TYPE_TEXT),
-            content=validated_data.get('content', ''),
-            reply_to=reply_to,
-            product=product,
-        )
+    def _create_message(self, stream_id: int, user_id: int, validated_data: dict):
+        try:
+            stream = LiveStream.objects.select_related('owner').get(pk=stream_id)
+            user = stream.owner.__class__.objects.get(pk=user_id)
+            message = create_live_chat_message(stream=stream, user=user, validated_data=validated_data)
+            return message, None
+        except Exception as exc:
+            return None, str(exc)
 
     @database_sync_to_async
     def _serialize_message(self, message):
