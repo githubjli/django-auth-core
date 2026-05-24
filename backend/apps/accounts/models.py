@@ -837,6 +837,14 @@ class ProductRefundRequest(models.Model):
 
 
 class LiveStream(models.Model):
+    THUMBNAIL_CAPTURE_PENDING = 'pending'
+    THUMBNAIL_CAPTURE_SUCCESS = 'success'
+    THUMBNAIL_CAPTURE_FAILED = 'failed'
+    THUMBNAIL_CAPTURE_STATUS_CHOICES = [
+        (THUMBNAIL_CAPTURE_PENDING, 'Pending'),
+        (THUMBNAIL_CAPTURE_SUCCESS, 'Success'),
+        (THUMBNAIL_CAPTURE_FAILED, 'Failed'),
+    ]
     STATUS_IDLE = 'idle'
     STATUS_READY = 'ready'
     STATUS_LIVE = 'live'
@@ -876,6 +884,14 @@ class LiveStream(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_IDLE)
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default=VISIBILITY_PUBLIC)
     stream_key = models.CharField(max_length=255, unique=True, default=generate_stream_key)
+    thumbnail = models.ImageField(upload_to='live/thumbnails/', blank=True)
+    thumbnail_captured_at = models.DateTimeField(null=True, blank=True)
+    thumbnail_capture_status = models.CharField(
+        max_length=16,
+        choices=THUMBNAIL_CAPTURE_STATUS_CHOICES,
+        default=THUMBNAIL_CAPTURE_PENDING,
+    )
+    thumbnail_capture_error = models.TextField(blank=True, default='')
     viewer_count = models.PositiveIntegerField(default=0)
     ant_media_no_signal_count = models.PositiveIntegerField(default=0)
     publish_session_id = models.CharField(max_length=64, blank=True, default='')

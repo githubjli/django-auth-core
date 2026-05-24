@@ -67,6 +67,61 @@ DEFAULT_THUMBNAIL_PNG = base64.b64decode(
 )
 
 
+def capture_live_snapshot(stream: LiveStream, seek_seconds=5):
+    ffmpeg_path = shutil.which('ffmpeg')
+    if not ffmpeg_path:
+        stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
+        stream.thumbnail_capture_error = 'ffmpeg_not_found'
+        stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
+        return False
+    playback_url = AntMediaLiveAdapter().get_playback_url(stream)
+    if not playback_url:
+        stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
+        stream.thumbnail_capture_error = 'playback_url_unavailable'
+        stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
+        return False
+    attempts = [seek_seconds, seek_seconds + 5, seek_seconds + 10]
+    last_error = ''
+    for offset in attempts:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / 'live_snapshot.jpg'
+            completed = subprocess.run(
+                [
+                    ffmpeg_path,
+                    '-y',
+                    '-ss',
+                    str(offset),
+                    '-i',
+                    str(playback_url),
+                    '-frames:v',
+                    '1',
+                    '-q:v',
+                    '2',
+                    str(output_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+                if stream.thumbnail:
+                    stream.thumbnail.delete(save=False)
+                stream.thumbnail.save(
+                    f'live_{stream.pk}_{uuid4().hex}.jpg',
+                    ContentFile(output_path.read_bytes()),
+                    save=False,
+                )
+                stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_SUCCESS
+                stream.thumbnail_capture_error = ''
+                stream.thumbnail_captured_at = timezone.now()
+                stream.save(update_fields=['thumbnail', 'thumbnail_capture_status', 'thumbnail_capture_error', 'thumbnail_captured_at'])
+                return True
+            last_error = (completed.stderr or completed.stdout or 'ffmpeg_failed')[:1000]
+    stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
+    stream.thumbnail_capture_error = last_error or 'snapshot_capture_failed'
+    stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
+    return False
+
+
 def create_live_chat_message(*, stream, user, validated_data: dict):
     if stream.status in {LiveStream.STATUS_ENDED, LiveStream.STATUS_FAILED}:
         raise ValidationError('Live stream has ended.')
@@ -468,6 +523,9 @@ class AntMediaLiveAdapter:
 
     def _get_rtmp_url(self) -> str | None:
         return settings.ANT_MEDIA_RTMP_BASE or None
+
+    def get_playback_url(self, stream: LiveStream) -> str | None:
+        return self._get_playback_url(stream.stream_key)
 
     def _get_playback_url(self, stream_key: str) -> str | None:
         playback_base = settings.ANT_MEDIA_PLAYBACK_BASE

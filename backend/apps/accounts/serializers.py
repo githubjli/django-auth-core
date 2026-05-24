@@ -718,6 +718,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     message = serializers.SerializerMethodField()
     can_start = serializers.SerializerMethodField()
     can_end = serializers.SerializerMethodField()
+    thumbnail_capture_status = serializers.CharField(read_only=True)
+    thumbnail_captured_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = LiveStream
@@ -747,6 +749,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
+            'thumbnail_capture_status',
+            'thumbnail_captured_at',
             'viewer_count',
             'can_start',
             'can_end',
@@ -778,6 +782,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
+            'thumbnail_capture_status',
+            'thumbnail_captured_at',
             'viewer_count',
             'can_start',
             'can_end',
@@ -818,6 +824,11 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(relative_url)
 
     def get_thumbnail_url(self, obj):
+        request = self.context.get('request')
+        if getattr(obj, 'thumbnail', None):
+            if request is None:
+                return obj.thumbnail.url
+            return request.build_absolute_uri(obj.thumbnail.url)
         return self._normalized(obj).get('thumbnail_url')
 
     def get_preview_image_url(self, obj):

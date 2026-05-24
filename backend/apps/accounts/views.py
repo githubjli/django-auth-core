@@ -11,6 +11,7 @@ import json
 import hmac
 import logging
 import secrets
+import threading
 from asgiref.sync import async_to_sync
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
@@ -130,6 +131,7 @@ from apps.accounts.services import (
     MeowPointService,
     GiftService,
     create_live_chat_message,
+    capture_live_snapshot,
 )
 
 User = get_user_model()
@@ -1804,7 +1806,10 @@ class LiveStreamStatusAPIView(APIView):
             stream.ant_media_no_signal_count = 0
             stream.last_publish_signal_at = now
             stream.failure_reason = ''
-            stream.save(update_fields=['status', 'started_at', 'ended_at', 'ant_media_no_signal_count', 'last_publish_signal_at', 'failure_reason'])
+            stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_PENDING
+            stream.thumbnail_capture_error = ''
+            stream.save(update_fields=['status', 'started_at', 'ended_at', 'ant_media_no_signal_count', 'last_publish_signal_at', 'failure_reason', 'thumbnail_capture_status', 'thumbnail_capture_error'])
+            self._trigger_async_snapshot(stream.id)
         elif self.new_status == LiveStream.STATUS_ENDED:
             if stream.status == LiveStream.STATUS_ENDED:
                 return Response(
@@ -1825,6 +1830,16 @@ class LiveStreamStatusAPIView(APIView):
             payload['warning'] = stop_result.get('warning') or 'ant_media_stop_failed'
             payload['warning_detail'] = stop_result.get('message')
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _trigger_async_snapshot(self, stream_id: int):
+        def _runner():
+            try:
+                stream = LiveStream.objects.get(pk=stream_id)
+                capture_live_snapshot(stream, seek_seconds=5)
+            except Exception:
+                logger.exception('live snapshot capture failed stream_id=%s', stream_id)
+
+        threading.Thread(target=_runner, daemon=True).start()
 
 
 class LiveStreamPrepareAPIView(APIView):
