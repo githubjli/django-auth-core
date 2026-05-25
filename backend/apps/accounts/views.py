@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Exists, F, OuterRef, Q
+from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
 from datetime import timedelta
 import json
 import hmac
@@ -27,6 +27,7 @@ from apps.accounts.models import (
     Category,
     Gift,
     GiftTransaction,
+    DramaSeries,
     ChannelSubscription,
     CommentLike,
     LiveChatMessage,
@@ -106,6 +107,7 @@ from apps.accounts.serializers import (
     VideoMetadataSerializer,
     VideoSerializer,
 )
+from apps.accounts.drama_serializers import DramaSeriesSerializer
 from apps.accounts.services import (
     ActiveMembershipExistsError,
     AntMediaLiveAdapter,
@@ -2406,6 +2408,49 @@ class PublicCreatorVideoListAPIView(generics.ListAPIView):
         else:
             queryset = queryset.order_by('-created_at', '-id')
         return queryset
+
+
+class PublicCreatorDramaListAPIView(generics.ListAPIView):
+    serializer_class = DramaSeriesSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=self.kwargs['creator_id'])
+        return (
+            DramaSeries.objects
+            .select_related('owner')
+            .filter(
+                owner=creator,
+                is_active=True,
+                status=DramaSeries.STATUS_PUBLISHED,
+            )
+            .order_by('-created_at', '-id')
+        )
+
+
+class PublicCreatorLiveListAPIView(generics.ListAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=self.kwargs['creator_id'])
+        return (
+            LiveStream.objects
+            .select_related('owner', 'category')
+            .filter(owner=creator)
+            .exclude(visibility=LiveStream.VISIBILITY_PRIVATE)
+            .annotate(
+                status_priority=Case(
+                    When(status=LiveStream.STATUS_LIVE, then=Value(0)),
+                    When(status=LiveStream.STATUS_ENDED, then=Value(1)),
+                    default=Value(2),
+                    output_field=IntegerField(),
+                )
+            )
+            .order_by('status_priority', '-created_at', '-id')
+        )
 
 
 class BillingPlanListAPIView(generics.ListAPIView):

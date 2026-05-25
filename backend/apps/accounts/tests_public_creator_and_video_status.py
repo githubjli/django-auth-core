@@ -3,7 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import ChannelSubscription, Video
+from apps.accounts.models import ChannelSubscription, DramaSeries, LiveStream, Video
 
 
 User = get_user_model()
@@ -115,6 +115,76 @@ class PublicCreatorAPITestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(response.data['viewer_is_following'])
+
+    def test_creator_dramas_returns_only_public_published(self):
+        published = DramaSeries.objects.create(
+            owner=self.creator,
+            title='published',
+            is_active=True,
+            status=DramaSeries.STATUS_PUBLISHED,
+        )
+        DramaSeries.objects.create(
+            owner=self.creator,
+            title='draft',
+            is_active=True,
+            status=DramaSeries.STATUS_DRAFT,
+        )
+        DramaSeries.objects.create(
+            owner=self.creator,
+            title='inactive',
+            is_active=False,
+            status=DramaSeries.STATUS_PUBLISHED,
+        )
+        DramaSeries.objects.create(
+            owner=self.non_creator,
+            title='other',
+            is_active=True,
+            status=DramaSeries.STATUS_PUBLISHED,
+        )
+
+        response = self.client.get(reverse('public-creator-dramas', kwargs={'creator_id': self.creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [item['id'] for item in response.data['results']]
+        self.assertEqual(ids, [published.id])
+
+    def test_creator_lives_returns_only_public_or_unlisted_and_orders_live_then_ended(self):
+        live_stream = LiveStream.objects.create(
+            owner=self.creator,
+            title='live',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+            status=LiveStream.STATUS_LIVE,
+        )
+        ended_stream = LiveStream.objects.create(
+            owner=self.creator,
+            title='ended',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+            status=LiveStream.STATUS_ENDED,
+        )
+        LiveStream.objects.create(
+            owner=self.creator,
+            title='private',
+            visibility=LiveStream.VISIBILITY_PRIVATE,
+            status=LiveStream.STATUS_ENDED,
+        )
+        LiveStream.objects.create(
+            owner=self.non_creator,
+            title='other',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+            status=LiveStream.STATUS_LIVE,
+        )
+
+        response = self.client.get(reverse('public-creator-lives', kwargs={'creator_id': self.creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [item['id'] for item in response.data['results']]
+        self.assertEqual(ids, [live_stream.id, ended_stream.id])
+
+    def test_creator_dramas_and_lives_return_404_for_non_creator(self):
+        drama_response = self.client.get(reverse('public-creator-dramas', kwargs={'creator_id': self.non_creator.id}))
+        live_response = self.client.get(reverse('public-creator-lives', kwargs={'creator_id': self.non_creator.id}))
+        self.assertEqual(drama_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(live_response.status_code, status.HTTP_404_NOT_FOUND)
 
 
 class PublicVideoViewTrackingTestCase(APITestCase):
