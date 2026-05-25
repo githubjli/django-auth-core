@@ -312,6 +312,83 @@ class AccountProfileSerializer(serializers.ModelSerializer):
         return instance
 
 
+class PublicCreatorSerializer(serializers.ModelSerializer):
+    avatar_url = serializers.SerializerMethodField()
+    subscriber_count = serializers.SerializerMethodField()
+    follower_count = serializers.SerializerMethodField()
+    video_count = serializers.SerializerMethodField()
+    like_count = serializers.SerializerMethodField()
+    gift_count = serializers.SerializerMethodField()
+    gift_amount_total = serializers.SerializerMethodField()
+    viewer_is_following = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'display_name',
+            'avatar_url',
+            'bio',
+            'is_creator',
+            'subscriber_count',
+            'follower_count',
+            'video_count',
+            'like_count',
+            'gift_count',
+            'gift_amount_total',
+            'viewer_is_following',
+        )
+
+    def get_avatar_url(self, obj):
+        request = self.context.get('request')
+        if not obj.avatar:
+            return None
+        if request is None:
+            return obj.avatar.url
+        return request.build_absolute_uri(obj.avatar.url)
+
+    def get_subscriber_count(self, obj):
+        return ChannelSubscription.objects.filter(channel=obj).count()
+
+    def get_follower_count(self, obj):
+        return self.get_subscriber_count(obj)
+
+    def get_video_count(self, obj):
+        return Video.objects.filter(
+            owner=obj,
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+        ).count()
+
+    def get_like_count(self, obj):
+        return VideoLike.objects.filter(
+            video__owner=obj,
+            video__visibility=Video.VISIBILITY_PUBLIC,
+            video__status=Video.STATUS_ACTIVE,
+        ).count()
+
+    def get_gift_count(self, obj):
+        return GiftTransaction.objects.filter(
+            receiver=obj,
+            target_type=GiftTransaction.TARGET_VIDEO,
+            video__owner=obj,
+        ).count()
+
+    def get_gift_amount_total(self, obj):
+        aggregate = GiftTransaction.objects.filter(
+            receiver=obj,
+            target_type=GiftTransaction.TARGET_VIDEO,
+            video__owner=obj,
+        ).aggregate(total=Sum('amount'))
+        return aggregate.get('total') or 0
+
+    def get_viewer_is_following(self, obj):
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return False
+        return ChannelSubscription.objects.filter(channel=obj, subscriber=request.user).exists()
+
+
 class AccountPasswordChangeSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(write_only=True)
@@ -641,6 +718,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
     message = serializers.SerializerMethodField()
     can_start = serializers.SerializerMethodField()
     can_end = serializers.SerializerMethodField()
+    thumbnail_capture_status = serializers.CharField(read_only=True)
+    thumbnail_captured_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = LiveStream
@@ -670,6 +749,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
+            'thumbnail_capture_status',
+            'thumbnail_captured_at',
             'viewer_count',
             'can_start',
             'can_end',
@@ -701,6 +782,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
             'thumbnail_url',
             'preview_image_url',
             'snapshot_url',
+            'thumbnail_capture_status',
+            'thumbnail_captured_at',
             'viewer_count',
             'can_start',
             'can_end',
@@ -741,6 +824,11 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(relative_url)
 
     def get_thumbnail_url(self, obj):
+        request = self.context.get('request')
+        if getattr(obj, 'thumbnail', None):
+            if request is None:
+                return obj.thumbnail.url
+            return request.build_absolute_uri(obj.thumbnail.url)
         return self._normalized(obj).get('thumbnail_url')
 
     def get_preview_image_url(self, obj):
@@ -958,13 +1046,17 @@ class LiveChatMessageSerializer(serializers.ModelSerializer):
     live_id = serializers.IntegerField(source='room.stream_id', read_only=True)
     user = serializers.SerializerMethodField()
     product = serializers.SerializerMethodField()
+    message = serializers.CharField(source='content', read_only=True)
 
     class Meta:
         model = LiveChatMessage
         fields = (
             'id',
             'live_id',
+            'type',
+            'payload',
             'message_type',
+            'message',
             'content',
             'created_at',
             'is_pinned',

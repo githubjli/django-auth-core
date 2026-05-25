@@ -29,6 +29,7 @@ urlpatterns = [
     path('api/creator/dramas/', include('apps.accounts.creator_drama_urls')),
     path('api/public/categories/', include('apps.accounts.public_category_urls')),
     path('api/public/videos/', include('apps.accounts.public_video_urls')),
+    path('api/public/creators/', include('apps.accounts.public_creator_urls')),
 ]
 
 if settings.DEBUG:
