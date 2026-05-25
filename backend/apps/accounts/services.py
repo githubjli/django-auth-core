@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import secrets
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib import error, request as urllib_request
@@ -54,6 +55,9 @@ from apps.accounts.models import (
     SellerPayoutAddress,
     UserShippingAddress,
     WalletAddress,
+    LiveChatMessage,
+    LiveChatRoom,
+    LiveStreamProduct,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,175 @@ logger = logging.getLogger(__name__)
 DEFAULT_THUMBNAIL_PNG = base64.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn4n/4AAAAASUVORK5CYII='
 )
+
+
+def capture_live_snapshot(stream: LiveStream, seek_seconds=5):
+    ffmpeg_path = shutil.which('ffmpeg')
+    if not ffmpeg_path:
+        stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
+        stream.thumbnail_capture_error = 'ffmpeg_not_found'
+        stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
+        return False
+    adapter = AntMediaLiveAdapter()
+    playback_url = adapter.get_playback_url(stream)
+    preview_url = adapter._get_preview_image_url(stream.stream_key)
+    logger.info('live_snapshot_capture_start stream_id=%s playback_url=%s preview_url=%s', stream.id, playback_url, preview_url)
+    if not playback_url:
+        stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
+        stream.thumbnail_capture_error = 'playback_url_unavailable'
+        stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
+        return False
+    preview_saved = _try_save_preview_thumbnail(stream=stream, preview_url=preview_url)
+    if preview_saved:
+        return True
+
+    attempts = [10, 20, 30]
+    last_error = ''
+    for idx, delay_seconds in enumerate(attempts):
+        if idx > 0:
+            time.sleep(max(0, delay_seconds - attempts[idx - 1]))
+        ok, probe_error = _probe_remote_url(playback_url)
+        if not ok:
+            last_error = probe_error
+            logger.warning('live_snapshot_capture_probe_failed stream_id=%s playback_url=%s error=%s', stream.id, playback_url, probe_error)
+            continue
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / 'live_snapshot.jpg'
+            ffmpeg_cmd = [
+                ffmpeg_path,
+                '-y',
+                '-rw_timeout',
+                '10000000',
+                '-i',
+                str(playback_url),
+                '-frames:v',
+                '1',
+                '-q:v',
+                '2',
+                str(output_path),
+            ]
+            logger.info('live_snapshot_capture_ffmpeg stream_id=%s command=%s', stream.id, ffmpeg_cmd)
+            completed = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(
+                'live_snapshot_capture_result stream_id=%s returncode=%s stderr=%s',
+                stream.id,
+                completed.returncode,
+                (completed.stderr or '')[:2000],
+            )
+            if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+                if stream.thumbnail:
+                    stream.thumbnail.delete(save=False)
+                stream.thumbnail.save(
+                    f'live_{stream.pk}_{uuid4().hex}.jpg',
+                    ContentFile(output_path.read_bytes()),
+                    save=False,
+                )
+                stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_SUCCESS
+                stream.thumbnail_capture_error = ''
+                stream.thumbnail_captured_at = timezone.now()
+                stream.save(update_fields=['thumbnail', 'thumbnail_capture_status', 'thumbnail_capture_error', 'thumbnail_captured_at'])
+                return True
+            last_error = (completed.stderr or completed.stdout or 'ffmpeg_failed')[:4000]
+    stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
+    stream.thumbnail_capture_error = last_error or 'snapshot_capture_failed'
+    stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
+    return False
+
+
+def _probe_remote_url(url: str) -> tuple[bool, str]:
+    try:
+        head_req = urllib_request.Request(url, method='HEAD')
+        with urllib_request.urlopen(head_req, timeout=3) as response:
+            status_code = getattr(response, 'status', response.getcode())
+            if status_code == 200:
+                return True, ''
+            return False, f'http_status_{status_code}'
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _try_save_preview_thumbnail(*, stream: LiveStream, preview_url: str | None) -> bool:
+    if not preview_url:
+        return False
+    try:
+        with urllib_request.urlopen(preview_url, timeout=3) as response:
+            status_code = getattr(response, 'status', response.getcode())
+            if status_code != 200:
+                return False
+            payload = response.read()
+    except Exception as exc:
+        logger.warning('live_snapshot_preview_fetch_failed stream_id=%s preview_url=%s error=%s', stream.id, preview_url, exc)
+        return False
+    if not payload:
+        return False
+    if stream.thumbnail:
+        stream.thumbnail.delete(save=False)
+    stream.thumbnail.save(
+        f'live_preview_{stream.pk}_{uuid4().hex}.png',
+        ContentFile(payload),
+        save=False,
+    )
+    stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_SUCCESS
+    stream.thumbnail_capture_error = ''
+    stream.thumbnail_captured_at = timezone.now()
+    stream.save(update_fields=['thumbnail', 'thumbnail_capture_status', 'thumbnail_capture_error', 'thumbnail_captured_at'])
+    return True
+
+
+def create_live_chat_message(*, stream, user, validated_data: dict):
+    if stream.status in {LiveStream.STATUS_ENDED, LiveStream.STATUS_FAILED}:
+        raise ValidationError('Live stream has ended.')
+    if stream.visibility != LiveStream.VISIBILITY_PUBLIC and user.id != stream.owner_id:
+        raise ValidationError('Not found.')
+    room, _ = LiveChatRoom.objects.get_or_create(stream=stream)
+    if not room.is_enabled:
+        raise ValidationError('Chat is disabled for this stream.')
+
+    cutoff = timezone.now() - timedelta(seconds=2)
+    if LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists():
+        raise ValidationError('Please wait before sending another chat message.')
+    if room.slow_mode_seconds > 0:
+        cutoff = timezone.now() - timedelta(seconds=room.slow_mode_seconds)
+        if LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists():
+            raise ValidationError('Slow mode is enabled. Please wait before sending again.')
+
+    reply_to = None
+    reply_to_id = validated_data.get('reply_to_id')
+    if reply_to_id:
+        reply_to = LiveChatMessage.objects.filter(pk=reply_to_id, room=room).first()
+
+    product = None
+    message_type = validated_data.get('message_type', LiveChatMessage.TYPE_TEXT)
+    if message_type == LiveChatMessage.TYPE_PRODUCT:
+        product_id = validated_data.get('product_id')
+        product = Product.objects.filter(pk=product_id, status=Product.STATUS_ACTIVE).first()
+        if product is None or not LiveStreamProduct.objects.filter(stream=stream, product=product, is_active=True).exists():
+            raise ValidationError('Product is not active for this live stream.')
+
+    mapped_type = LiveChatMessage.EVENT_CHAT
+    if message_type == LiveChatMessage.TYPE_SYSTEM:
+        mapped_type = LiveChatMessage.EVENT_SYSTEM
+    elif message_type == LiveChatMessage.TYPE_GIFT:
+        mapped_type = LiveChatMessage.EVENT_GIFT
+    elif message_type == LiveChatMessage.TYPE_PRODUCT:
+        mapped_type = LiveChatMessage.EVENT_PRODUCT
+    elif message_type == LiveChatMessage.TYPE_PAYMENT:
+        mapped_type = LiveChatMessage.EVENT_PAYMENT
+
+    return LiveChatMessage.objects.create(
+        room=room,
+        user=user,
+        message_type=message_type,
+        type=mapped_type,
+        content=validated_data.get('content', ''),
+        payload=validated_data.get('payload', {}),
+        reply_to=reply_to,
+        product=product,
+    )
 
 
 class AntMediaLiveAdapter:
@@ -321,11 +494,34 @@ class AntMediaLiveAdapter:
             f"{settings.ANT_MEDIA_BASE_URL}/"
             f"{settings.ANT_MEDIA_REST_APP_NAME}/rest/v2/broadcasts/{stream_key}/stop"
         )
-        request_obj = urllib_request.Request(endpoint, data=b'', method='POST')
+        request_obj = urllib_request.Request(
+            endpoint,
+            data=json.dumps({}).encode('utf-8'),
+            headers={
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            },
+            method='POST',
+        )
         try:
             with urllib_request.urlopen(request_obj, timeout=3) as response:
                 response_body = response.read().decode('utf-8')
                 status_code = getattr(response, 'status', response.getcode())
+        except error.HTTPError as exc:
+            response_body = self._read_error_body(exc)
+            logger.warning(
+                'ant_media stop_broadcast http_error stream_key=%s status=%s body=%s',
+                stream_key,
+                exc.code,
+                response_body,
+            )
+            return {
+                'ok': False,
+                'warning': 'ant_media_stop_failed',
+                'message': 'Live stream ended in Django, but Ant Media stop failed.',
+                'status_code': exc.code,
+                'body': response_body,
+            }
         except (error.URLError, TimeoutError) as exc:
             logger.warning('ant_media stop_broadcast failed stream_key=%s error=%s', stream_key, exc)
             return {
@@ -413,6 +609,9 @@ class AntMediaLiveAdapter:
 
     def _get_rtmp_url(self) -> str | None:
         return settings.ANT_MEDIA_RTMP_BASE or None
+
+    def get_playback_url(self, stream: LiveStream) -> str | None:
+        return self._get_playback_url(stream.stream_key)
 
     def _get_playback_url(self, stream_key: str) -> str | None:
         playback_base = settings.ANT_MEDIA_PLAYBACK_BASE

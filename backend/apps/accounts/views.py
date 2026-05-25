@@ -5,12 +5,13 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Exists, F, OuterRef, Q
+from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
 from datetime import timedelta
 import json
 import hmac
 import logging
 import secrets
+import threading
 from asgiref.sync import async_to_sync
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
@@ -26,6 +27,7 @@ from apps.accounts.models import (
     Category,
     Gift,
     GiftTransaction,
+    DramaSeries,
     ChannelSubscription,
     CommentLike,
     LiveChatMessage,
@@ -93,6 +95,7 @@ from apps.accounts.serializers import (
     SellerProductOrderListSerializer,
     PaymentOrderCreateSerializer,
     PaymentOrderSerializer,
+    PublicCreatorSerializer,
     RegisterSerializer,
     SellerStoreSerializer,
     UserShippingAddressSerializer,
@@ -104,6 +107,7 @@ from apps.accounts.serializers import (
     VideoMetadataSerializer,
     VideoSerializer,
 )
+from apps.accounts.drama_serializers import DramaSeriesSerializer
 from apps.accounts.services import (
     ActiveMembershipExistsError,
     AntMediaLiveAdapter,
@@ -128,6 +132,8 @@ from apps.accounts.services import (
     generate_video_thumbnail,
     MeowPointService,
     GiftService,
+    create_live_chat_message,
+    capture_live_snapshot,
 )
 
 User = get_user_model()
@@ -1187,42 +1193,13 @@ class LiveChatMessageListCreateAPIView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if stream.status == LiveStream.STATUS_ENDED:
             return Response({'detail': 'Live stream has ended.'}, status=status.HTTP_400_BAD_REQUEST)
-        room = self._room(stream)
-        if not room.is_enabled:
-            return Response({'detail': 'Chat is disabled for this stream.'}, status=status.HTTP_409_CONFLICT)
 
         serializer = LiveChatMessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        cutoff = timezone.now() - timedelta(seconds=2)
-        recent_exists = LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists()
-        if recent_exists:
-            return Response({'detail': 'Please wait before sending another chat message.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-        if room.slow_mode_seconds > 0:
-            cutoff = timezone.now() - timedelta(seconds=room.slow_mode_seconds)
-            recent_exists = LiveChatMessage.objects.filter(room=room, user=user, created_at__gte=cutoff, is_deleted=False).exists()
-            if recent_exists:
-                return Response({'detail': 'Slow mode is enabled. Please wait before sending again.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-        reply_to = None
-        reply_to_id = serializer.validated_data.get('reply_to_id')
-        if reply_to_id:
-            reply_to = generics.get_object_or_404(LiveChatMessage, pk=reply_to_id, room=room)
-
-        product = None
-        product_id = serializer.validated_data.get('product_id')
-        if serializer.validated_data.get('message_type') == LiveChatMessage.TYPE_PRODUCT:
-            if not product_id:
-                return Response({'product_id': ['This field is required for product messages.']}, status=status.HTTP_400_BAD_REQUEST)
-            product = generics.get_object_or_404(Product.objects.select_related('store'), pk=product_id, status=Product.STATUS_ACTIVE)
-
-        message = LiveChatMessage.objects.create(
-            room=room,
-            user=user,
-            message_type=serializer.validated_data.get('message_type', LiveChatMessage.TYPE_TEXT),
-            content=serializer.validated_data.get('content', ''),
-            reply_to=reply_to,
-            product=product,
-        )
+        try:
+            message = create_live_chat_message(stream=stream, user=user, validated_data=serializer.validated_data)
+        except ValidationError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         response_serializer = LiveChatMessageSerializer(message, context={'request': request})
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -1614,7 +1591,24 @@ class LiveStreamQuickStartAPIView(APIView):
         ant_stream_id = ensure_result.get('stream_id') or stream.stream_key
         if ant_stream_id != stream.stream_key:
             stream.stream_key = ant_stream_id
-            stream.save(update_fields=['stream_key'])
+        now = timezone.now()
+        stream.status = LiveStream.STATUS_READY
+        stream.publish_started_at = now
+        stream.last_publish_signal_at = now
+        stream.publish_session_id = secrets.token_hex(16)
+        stream.publish_session_expires_at = now + timedelta(minutes=5)
+        stream.failure_reason = ''
+        stream.save(
+            update_fields=[
+                'stream_key',
+                'status',
+                'publish_started_at',
+                'last_publish_signal_at',
+                'publish_session_id',
+                'publish_session_expires_at',
+                'failure_reason',
+            ]
+        )
 
         publish_config = adapter.get_browser_publish_config(stream)
         if not publish_config.get('ok'):
@@ -1629,6 +1623,13 @@ class LiveStreamQuickStartAPIView(APIView):
             'ant_media_reused': bool(ensure_result.get('reused', False)),
             'live': self._live_payload(stream, request),
             'publish_config': publish_config,
+            'publish_session': {
+                'id': stream.publish_session_id,
+                'stream_id': stream.stream_key,
+                'websocket_url': publish_config.get('config', {}).get('websocket_url'),
+                'expires_at': stream.publish_session_expires_at,
+                'max_start_retry': 20,
+            },
             'next_action': 'start_stream',
         }
         if fresh:
@@ -1692,12 +1693,44 @@ class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
 
     def retrieve(self, request, *args, **kwargs):
         stream = self.get_object()
+        self._apply_timeout_compaction(stream)
         stream._normalized_live_fields = AntMediaLiveAdapter().normalize_stream_fields(
             stream,
             persist_no_signal=True,
         )
-        serializer = self.get_serializer(stream)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        normalized = stream._normalized_live_fields
+        payload = {
+            'id': stream.id,
+            'status': stream.status,
+            'effective_status': normalized.get('effective_status'),
+            'can_start': bool(normalized.get('can_start')),
+            'can_end': bool(normalized.get('can_end')),
+            'viewer_count': normalized.get('viewer_count') or 0,
+            'publish': {
+                'connected': normalized.get('effective_status') in {'publishing', 'live', LiveStream.STATUS_LIVE},
+                'source': 'ant_media' if normalized.get('sync_ok') else 'fallback',
+                'last_seen_at': stream.last_publish_signal_at,
+                'sync_ok': bool(normalized.get('sync_ok')),
+                'sync_error': normalized.get('sync_error'),
+            },
+            'errors': [stream.failure_reason] if stream.failure_reason else [],
+            'live': self.get_serializer(stream).data,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+    def _apply_timeout_compaction(self, stream):
+        now = timezone.now()
+        changed = []
+        if stream.status == LiveStream.STATUS_READY and stream.publish_started_at and stream.publish_started_at < now - timedelta(minutes=5):
+            stream.status = LiveStream.STATUS_FAILED
+            stream.failure_reason = 'ready_timeout'
+            changed.extend(['status', 'failure_reason'])
+        if stream.status == LiveStream.STATUS_READY and stream.publish_session_expires_at and stream.publish_session_expires_at < now:
+            stream.status = LiveStream.STATUS_FAILED
+            stream.failure_reason = 'session_expired'
+            changed.extend(['status', 'failure_reason'])
+        if changed:
+            stream.save(update_fields=list(set(changed)))
 
 
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
@@ -1722,11 +1755,29 @@ class LiveStreamStatusAPIView(APIView):
         adapter = AntMediaLiveAdapter()
 
         if self.new_status == LiveStream.STATUS_LIVE:
+            if stream.status == LiveStream.STATUS_LIVE:
+                live_payload = LiveStreamSerializer(stream, context={'request': request}).data
+                return Response(
+                    {'ok': True, 'status': LiveStream.STATUS_LIVE, 'already_started': True, 'live': live_payload},
+                    status=status.HTTP_200_OK,
+                )
+            if stream.status == LiveStream.STATUS_ENDED:
+                return Response({'detail': 'Ended stream cannot be started again.'}, status=status.HTTP_409_CONFLICT)
+            if stream.status == LiveStream.STATUS_FAILED:
+                return Response({'detail': 'Failed stream cannot be started. Please create a new session.'}, status=status.HTTP_409_CONFLICT)
             if stream.status not in [LiveStream.STATUS_IDLE, LiveStream.STATUS_READY]:
                 return Response(
                     {'detail': 'Only idle or ready streams can be started.'},
                     status=status.HTTP_409_CONFLICT,
                 )
+            session_id = (request.data.get('publish_session_id') or '').strip()
+            if stream.publish_session_id and session_id and session_id != stream.publish_session_id:
+                return Response({'detail': 'stream/session mismatch'}, status=status.HTTP_409_CONFLICT)
+            if stream.publish_session_expires_at and stream.publish_session_expires_at < now:
+                stream.status = LiveStream.STATUS_FAILED
+                stream.failure_reason = 'session_expired'
+                stream.save(update_fields=['status', 'failure_reason'])
+                return Response({'detail': 'session expired'}, status=status.HTTP_409_CONFLICT)
             skip_ant_media = request.query_params.get('skip_ant_media') == 'true'
             bypass_enabled = settings.DEBUG or getattr(settings, 'ALLOW_LIVE_START_BYPASS', False)
             if skip_ant_media and not bypass_enabled:
@@ -1755,7 +1806,12 @@ class LiveStreamStatusAPIView(APIView):
             stream.started_at = now
             stream.ended_at = None
             stream.ant_media_no_signal_count = 0
-            stream.save(update_fields=['status', 'started_at', 'ended_at', 'ant_media_no_signal_count'])
+            stream.last_publish_signal_at = now
+            stream.failure_reason = ''
+            stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_PENDING
+            stream.thumbnail_capture_error = ''
+            stream.save(update_fields=['status', 'started_at', 'ended_at', 'ant_media_no_signal_count', 'last_publish_signal_at', 'failure_reason', 'thumbnail_capture_status', 'thumbnail_capture_error'])
+            self._trigger_async_snapshot(stream.id)
         elif self.new_status == LiveStream.STATUS_ENDED:
             if stream.status == LiveStream.STATUS_ENDED:
                 return Response(
@@ -1776,6 +1832,16 @@ class LiveStreamStatusAPIView(APIView):
             payload['warning'] = stop_result.get('warning') or 'ant_media_stop_failed'
             payload['warning_detail'] = stop_result.get('message')
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _trigger_async_snapshot(self, stream_id: int):
+        def _runner():
+            try:
+                stream = LiveStream.objects.get(pk=stream_id)
+                capture_live_snapshot(stream, seek_seconds=5)
+            except Exception:
+                logger.exception('live snapshot capture failed stream_id=%s', stream_id)
+
+        threading.Thread(target=_runner, daemon=True).start()
 
 
 class LiveStreamPrepareAPIView(APIView):
@@ -1957,7 +2023,10 @@ class PublicVideoListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = annotate_videos_for_request(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             self.request,
         )
         category = self.request.query_params.get('category')
@@ -1990,7 +2059,10 @@ class PublicVideoDetailAPIView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return annotate_videos_for_request(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             self.request,
         )
 
@@ -2007,7 +2079,10 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         current_video = generics.get_object_or_404(
-            Video.objects.select_related('category').filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.select_related('category').filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=self.kwargs['pk'],
         )
         limit = self.request.query_params.get('limit', 8)
@@ -2018,7 +2093,10 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
             limit = 8
 
         queryset = annotate_videos_for_request(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC).exclude(pk=current_video.pk),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ).exclude(pk=current_video.pk),
             self.request,
         )
         if current_video.category_id:
@@ -2032,7 +2110,10 @@ class PublicVideoInteractionSummaryAPIView(APIView):
     def get(self, request, pk):
         video = generics.get_object_or_404(
             annotate_videos_for_request(
-                Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+                Video.objects.filter(
+                    visibility=Video.VISIBILITY_PUBLIC,
+                    status=Video.STATUS_ACTIVE,
+                ),
                 request,
             ),
             pk=pk,
@@ -2046,7 +2127,10 @@ class PublicVideoShareTrackAPIView(APIView):
 
     def post(self, request, pk):
         video = generics.get_object_or_404(
-            Video.objects.filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=pk,
         )
         channel = (request.data.get('channel') or '').strip()[:64]
@@ -2075,7 +2159,10 @@ class PublicVideoGiftSendAPIView(APIView):
 
     def post(self, request, pk):
         video = generics.get_object_or_404(
-            Video.objects.select_related('owner').filter(visibility=Video.VISIBILITY_PUBLIC),
+            Video.objects.select_related('owner').filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=pk,
         )
 
@@ -2272,6 +2359,98 @@ class CreatorFollowAPIView(APIView):
             'viewer_is_following': is_following,
             'follower_count': subscriber_count,
         }
+
+
+class PublicCreatorDetailAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, creator_id):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=creator_id)
+        serializer = PublicCreatorSerializer(creator, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PublicCreatorVideoListAPIView(generics.ListAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['mask_locked_file_fields'] = True
+        return context
+
+    def get_queryset(self):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=self.kwargs['creator_id'])
+        queryset = annotate_videos_for_request(
+            Video.objects.filter(
+                owner=creator,
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
+            self.request,
+        )
+
+        category = self.request.query_params.get('category')
+        access_type = self.request.query_params.get('access_type')
+        search = self.request.query_params.get('search')
+        ordering = self.request.query_params.get('ordering')
+
+        category = LEGACY_CATEGORY_SLUG_ALIASES.get(category, category)
+        if category:
+            queryset = queryset.filter(category__slug=category)
+        if access_type:
+            queryset = queryset.filter(access_type=access_type)
+        if search:
+            queryset = queryset.filter(Q(title__icontains=search))
+        if ordering in {'created_at', '-created_at'}:
+            queryset = queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at', '-id')
+        return queryset
+
+
+class PublicCreatorDramaListAPIView(generics.ListAPIView):
+    serializer_class = DramaSeriesSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=self.kwargs['creator_id'])
+        return (
+            DramaSeries.objects
+            .select_related('owner')
+            .filter(
+                owner=creator,
+                is_active=True,
+                status=DramaSeries.STATUS_PUBLISHED,
+            )
+            .order_by('-created_at', '-id')
+        )
+
+
+class PublicCreatorLiveListAPIView(generics.ListAPIView):
+    serializer_class = LiveStreamSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=self.kwargs['creator_id'])
+        return (
+            LiveStream.objects
+            .select_related('owner', 'category')
+            .filter(owner=creator)
+            .exclude(visibility=LiveStream.VISIBILITY_PRIVATE)
+            .annotate(
+                status_priority=Case(
+                    When(status=LiveStream.STATUS_LIVE, then=Value(0)),
+                    When(status=LiveStream.STATUS_ENDED, then=Value(1)),
+                    default=Value(2),
+                    output_field=IntegerField(),
+                )
+            )
+            .order_by('status_priority', '-created_at', '-id')
+        )
 
 
 class BillingPlanListAPIView(generics.ListAPIView):
@@ -2975,6 +3154,7 @@ class PublicVideoCommentListAPIView(generics.ListAPIView):
             Video,
             pk=self.kwargs['pk'],
             visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
         )
         parent_id = self.request.query_params.get('parent_id')
         queryset = VideoComment.objects.filter(video=video, is_deleted=False)
@@ -3027,14 +3207,22 @@ class PublicVideoViewTrackAPIView(APIView):
 
     def post(self, request, pk):
         video = generics.get_object_or_404(
-            Video,
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
             pk=pk,
-            visibility=Video.VISIBILITY_PUBLIC,
         )
         viewer = request.user if request.user.is_authenticated else None
         VideoView.objects.create(video=video, viewer=viewer)
         video = annotate_videos_for_request(Video.objects.filter(pk=video.pk), request).get()
-        serializer = VideoSerializer(video, context={'request': request})
+        serializer = VideoSerializer(
+            video,
+            context={
+                'request': request,
+                'mask_locked_file_fields': True,
+            },
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
