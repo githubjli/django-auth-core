@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import secrets
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib import error, request as urllib_request
@@ -74,33 +75,55 @@ def capture_live_snapshot(stream: LiveStream, seek_seconds=5):
         stream.thumbnail_capture_error = 'ffmpeg_not_found'
         stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
         return False
-    playback_url = AntMediaLiveAdapter().get_playback_url(stream)
+    adapter = AntMediaLiveAdapter()
+    playback_url = adapter.get_playback_url(stream)
+    preview_url = adapter._get_preview_image_url(stream.stream_key)
+    logger.info('live_snapshot_capture_start stream_id=%s playback_url=%s preview_url=%s', stream.id, playback_url, preview_url)
     if not playback_url:
         stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
         stream.thumbnail_capture_error = 'playback_url_unavailable'
         stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
         return False
-    attempts = [seek_seconds, seek_seconds + 5, seek_seconds + 10]
+    preview_saved = _try_save_preview_thumbnail(stream=stream, preview_url=preview_url)
+    if preview_saved:
+        return True
+
+    attempts = [10, 20, 30]
     last_error = ''
-    for offset in attempts:
+    for idx, delay_seconds in enumerate(attempts):
+        if idx > 0:
+            time.sleep(max(0, delay_seconds - attempts[idx - 1]))
+        ok, probe_error = _probe_remote_url(playback_url)
+        if not ok:
+            last_error = probe_error
+            logger.warning('live_snapshot_capture_probe_failed stream_id=%s playback_url=%s error=%s', stream.id, playback_url, probe_error)
+            continue
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / 'live_snapshot.jpg'
+            ffmpeg_cmd = [
+                ffmpeg_path,
+                '-y',
+                '-rw_timeout',
+                '10000000',
+                '-i',
+                str(playback_url),
+                '-frames:v',
+                '1',
+                '-q:v',
+                '2',
+                str(output_path),
+            ]
+            logger.info('live_snapshot_capture_ffmpeg stream_id=%s command=%s', stream.id, ffmpeg_cmd)
             completed = subprocess.run(
-                [
-                    ffmpeg_path,
-                    '-y',
-                    '-ss',
-                    str(offset),
-                    '-i',
-                    str(playback_url),
-                    '-frames:v',
-                    '1',
-                    '-q:v',
-                    '2',
-                    str(output_path),
-                ],
+                ffmpeg_cmd,
                 capture_output=True,
                 text=True,
+            )
+            logger.info(
+                'live_snapshot_capture_result stream_id=%s returncode=%s stderr=%s',
+                stream.id,
+                completed.returncode,
+                (completed.stderr or '')[:2000],
             )
             if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
                 if stream.thumbnail:
@@ -115,11 +138,51 @@ def capture_live_snapshot(stream: LiveStream, seek_seconds=5):
                 stream.thumbnail_captured_at = timezone.now()
                 stream.save(update_fields=['thumbnail', 'thumbnail_capture_status', 'thumbnail_capture_error', 'thumbnail_captured_at'])
                 return True
-            last_error = (completed.stderr or completed.stdout or 'ffmpeg_failed')[:1000]
+            last_error = (completed.stderr or completed.stdout or 'ffmpeg_failed')[:4000]
     stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_FAILED
     stream.thumbnail_capture_error = last_error or 'snapshot_capture_failed'
     stream.save(update_fields=['thumbnail_capture_status', 'thumbnail_capture_error'])
     return False
+
+
+def _probe_remote_url(url: str) -> tuple[bool, str]:
+    try:
+        head_req = urllib_request.Request(url, method='HEAD')
+        with urllib_request.urlopen(head_req, timeout=3) as response:
+            status_code = getattr(response, 'status', response.getcode())
+            if status_code == 200:
+                return True, ''
+            return False, f'http_status_{status_code}'
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _try_save_preview_thumbnail(*, stream: LiveStream, preview_url: str | None) -> bool:
+    if not preview_url:
+        return False
+    try:
+        with urllib_request.urlopen(preview_url, timeout=3) as response:
+            status_code = getattr(response, 'status', response.getcode())
+            if status_code != 200:
+                return False
+            payload = response.read()
+    except Exception as exc:
+        logger.warning('live_snapshot_preview_fetch_failed stream_id=%s preview_url=%s error=%s', stream.id, preview_url, exc)
+        return False
+    if not payload:
+        return False
+    if stream.thumbnail:
+        stream.thumbnail.delete(save=False)
+    stream.thumbnail.save(
+        f'live_preview_{stream.pk}_{uuid4().hex}.png',
+        ContentFile(payload),
+        save=False,
+    )
+    stream.thumbnail_capture_status = LiveStream.THUMBNAIL_CAPTURE_SUCCESS
+    stream.thumbnail_capture_error = ''
+    stream.thumbnail_captured_at = timezone.now()
+    stream.save(update_fields=['thumbnail', 'thumbnail_capture_status', 'thumbnail_capture_error', 'thumbnail_captured_at'])
+    return True
 
 
 def create_live_chat_message(*, stream, user, validated_data: dict):

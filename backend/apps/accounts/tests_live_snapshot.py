@@ -27,7 +27,10 @@ class LiveSnapshotTestCase(APITestCase):
     @patch('apps.accounts.services.subprocess.run')
     @patch('apps.accounts.services.shutil.which', return_value='/usr/bin/ffmpeg')
     @patch('apps.accounts.services.AntMediaLiveAdapter.get_playback_url', return_value='https://x/stream.m3u8')
-    def test_capture_failure_does_not_change_live_status(self, _pb, _which, mock_run):
+    @patch('apps.accounts.services.AntMediaLiveAdapter._get_preview_image_url', return_value='https://x/preview.png')
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    def test_capture_failure_does_not_change_live_status(self, mock_urlopen, _preview, _pb, _which, mock_run):
+        mock_urlopen.side_effect = Exception('unavailable')
         mock_run.return_value.returncode = 1
         mock_run.return_value.stderr = 'failed'
         stream = LiveStream.objects.create(owner=self.creator, title='s', status=LiveStream.STATUS_LIVE)
@@ -42,3 +45,21 @@ class LiveSnapshotTestCase(APITestCase):
         stream.thumbnail.save('t.jpg', ContentFile(b'abc'), save=True)
         data = LiveStreamSerializer(stream).data
         self.assertTrue(data['thumbnail_url'])
+
+    @patch('apps.accounts.services.shutil.which', return_value='/usr/bin/ffmpeg')
+    @patch('apps.accounts.services.AntMediaLiveAdapter.get_playback_url', return_value='https://x/stream.m3u8')
+    @patch('apps.accounts.services.AntMediaLiveAdapter._get_preview_image_url', return_value=None)
+    @patch('apps.accounts.services.urllib_request.urlopen')
+    @patch('apps.accounts.services.subprocess.run')
+    def test_capture_uses_hls_without_ss_and_with_rw_timeout(self, mock_run, mock_urlopen, _preview, _pb, _which):
+        probe_resp = mock_urlopen.return_value.__enter__.return_value
+        probe_resp.status = 200
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stderr = 'failed'
+        stream = LiveStream.objects.create(owner=self.creator, title='s', status=LiveStream.STATUS_LIVE)
+        from apps.accounts.services import capture_live_snapshot
+        capture_live_snapshot(stream)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn('-rw_timeout', cmd)
+        self.assertIn('10000000', cmd)
+        self.assertNotIn('-ss', cmd)
