@@ -27,6 +27,7 @@ from apps.accounts.models import (
     ProductRefundRequest,
     ProductShipment,
     PlatformAssetLedger,
+    SavedProduct,
     SellerPayoutAddress,
     SellerStore,
     SellerPayout,
@@ -1028,6 +1029,33 @@ class ShopProductListSerializer(serializers.ModelSerializer):
 
     def get_sold_count(self, obj):
         return 0
+
+
+class SavedProductSerializer(serializers.ModelSerializer):
+    product = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SavedProduct
+        fields = ('id', 'product', 'created_at')
+        read_only_fields = fields
+
+    def get_product(self, obj):
+        return ShopProductListSerializer(obj.product, context=self.context).data
+
+
+class AddSavedProductSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+
+    def validate(self, attrs):
+        product = Product.objects.select_related('store', 'category').filter(pk=attrs['product_id']).first()
+        if product is None:
+            raise serializers.ValidationError({'product_id': ['Product not found.']})
+        if product.status != Product.STATUS_ACTIVE:
+            raise serializers.ValidationError({'product_id': ['Product is not active.']})
+        if not product.store.is_active:
+            raise serializers.ValidationError({'product_id': ['Seller store is inactive.']})
+        attrs['product'] = product
+        return attrs
 
 
 class LiveStreamProductListingSerializer(serializers.ModelSerializer):

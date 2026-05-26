@@ -45,6 +45,7 @@ from apps.accounts.models import (
     SellerPayoutAddress,
     SellerStore,
     ShopBanner,
+    SavedProduct,
     UserAssetBalance,
     UserAssetTransaction,
     StreamPaymentMethod,
@@ -102,6 +103,8 @@ from apps.accounts.serializers import (
     PaymentOrderSerializer,
     PublicCreatorSerializer,
     RegisterSerializer,
+    SavedProductSerializer,
+    AddSavedProductSerializer,
     ShopBannerSerializer,
     ShopProductListSerializer,
     SellerStoreSerializer,
@@ -1136,6 +1139,69 @@ class ShopProductListAPIView(generics.ListAPIView):
                 Q(title__icontains=q) | Q(description__icontains=q) | Q(slug__icontains=q)
             )
         return queryset
+
+
+class SavedProductPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        return Response({'count': self.page.paginator.count, 'results': data})
+
+
+class CartItemListCreateAPIView(generics.ListCreateAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = SavedProductPagination
+    serializer_class = SavedProductSerializer
+
+    def get_queryset(self):
+        return SavedProduct.objects.select_related('product', 'product__store', 'product__category').filter(
+            user=self.request.user,
+            product__status=Product.STATUS_ACTIVE,
+            product__store__is_active=True,
+        ).order_by('-created_at', '-id')
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return AddSavedProductSerializer
+        return SavedProductSerializer
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        serializer = SavedProductSerializer(page, many=True, context={'request': request})
+        return self.get_paginated_response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        serializer = AddSavedProductSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        saved, _ = SavedProduct.objects.get_or_create(
+            user=request.user,
+            product=serializer.validated_data['product'],
+        )
+        return Response(SavedProductSerializer(saved, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+class CartItemDeleteAPIView(generics.DestroyAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+    queryset = SavedProduct.objects.all()
+
+    def get_queryset(self):
+        return SavedProduct.objects.filter(user=self.request.user)
+
+
+class CartCountAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        count = SavedProduct.objects.filter(
+            user=request.user,
+            product__status=Product.STATUS_ACTIVE,
+            product__store__is_active=True,
+        ).count()
+        return Response({'count': count}, status=status.HTTP_200_OK)
 
 
 class LiveStreamProductManageListCreateAPIView(APIView):

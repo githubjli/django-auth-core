@@ -22,6 +22,7 @@ urlpatterns = [
     path('api/kyc/', include('apps.accounts.kyc_urls')),
     path('api/gifts/', include('apps.accounts.gift_urls')),
     path('api/shop/', include('apps.accounts.shop_urls')),
+    path('api/cart/', include('apps.accounts.cart_urls')),
     path('api/', include('apps.accounts.product_order_urls')),
     path('api/live/', include('apps.accounts.live_urls')),
     path('api/dramas/', include('apps.accounts.drama_urls')),

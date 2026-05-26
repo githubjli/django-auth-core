@@ -44,6 +44,7 @@ from apps.accounts.models import (
     Product,
     ProductCategory,
     SellerPayout,
+    SavedProduct,
     PlatformAssetLedger,
     SellerPayoutAddress,
     SellerStore,
@@ -13928,3 +13929,76 @@ class PlatformAssetTradeAPITestCase(APITestCase):
         self.assertEqual(m2.status_code, 200)
         bal_after = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
         self.assertEqual(bal_after - bal_before, Decimal('12.00'))
+
+class CartSavedProductAPITestCase(APITestCase):
+    def setUp(self):
+        self.user_a = User.objects.create_user(email='cart-a@example.com', password='pw123456')
+        self.user_b = User.objects.create_user(email='cart-b@example.com', password='pw123456')
+        self.seller = User.objects.create_user(email='cart-seller@example.com', password='pw123456')
+        self.store = SellerStore.objects.create(owner=self.seller, name='Cart Store', slug='cart-store', is_active=True)
+        self.product_active = Product.objects.create(
+            store=self.store,
+            title='Cart Product',
+            slug='cart-product',
+            price_amount='10.00',
+            price_currency='USD',
+            meow_points_price='10.00',
+            meow_credit_price='5.00',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        self.product_inactive = Product.objects.create(
+            store=self.store,
+            title='Inactive Product',
+            slug='inactive-product',
+            price_amount='10.00',
+            price_currency='USD',
+            stock_quantity=10,
+            status=Product.STATUS_INACTIVE,
+        )
+
+    def test_unauth_items_requires_auth(self):
+        response = self.client.get(reverse('cart-item-list-create'))
+        self.assertIn(response.status_code, [401, 403])
+
+    def test_add_saved_product_and_idempotent(self):
+        self.client.force_authenticate(user=self.user_a)
+        first = self.client.post(reverse('cart-item-list-create'), {'product_id': self.product_active.id}, format='json')
+        self.assertEqual(first.status_code, 201)
+        second = self.client.post(reverse('cart-item-list-create'), {'product_id': self.product_active.id}, format='json')
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(SavedProduct.objects.filter(user=self.user_a, product=self.product_active).count(), 1)
+
+    def test_user_cannot_delete_other_users_saved(self):
+        saved = SavedProduct.objects.create(user=self.user_b, product=self.product_active)
+        self.client.force_authenticate(user=self.user_a)
+        resp = self.client.delete(reverse('cart-item-delete', args=[saved.id]))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_count_and_list_filter_inactive_product_and_store(self):
+        SavedProduct.objects.create(user=self.user_a, product=self.product_active)
+        SavedProduct.objects.create(user=self.user_a, product=self.product_inactive)
+        self.client.force_authenticate(user=self.user_a)
+        list_resp = self.client.get(reverse('cart-item-list-create'))
+        self.assertEqual(list_resp.status_code, 200)
+        self.assertEqual(list_resp.data['count'], 1)
+        count_resp = self.client.get(reverse('cart-count'))
+        self.assertEqual(count_resp.status_code, 200)
+        self.assertEqual(count_resp.data['count'], 1)
+
+        self.store.is_active = False
+        self.store.save(update_fields=['is_active'])
+        list_resp2 = self.client.get(reverse('cart-item-list-create'))
+        self.assertEqual(list_resp2.data['count'], 0)
+        count_resp2 = self.client.get(reverse('cart-count'))
+        self.assertEqual(count_resp2.data['count'], 0)
+
+    def test_delete_saved_product_success_and_count_decrease(self):
+        saved = SavedProduct.objects.create(user=self.user_a, product=self.product_active)
+        self.client.force_authenticate(user=self.user_a)
+        c1 = self.client.get(reverse('cart-count'))
+        self.assertEqual(c1.data['count'], 1)
+        delete_resp = self.client.delete(reverse('cart-item-delete', args=[saved.id]))
+        self.assertEqual(delete_resp.status_code, 204)
+        c2 = self.client.get(reverse('cart-count'))
+        self.assertEqual(c2.data['count'], 0)

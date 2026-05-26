@@ -42,6 +42,7 @@ from apps.accounts.models import (
     Product,
     ProductCategory,
     ProductOrder,
+    SavedProduct,
     SellerPayout,
     PlatformAssetLedger,
     SellerStore,
@@ -615,6 +616,15 @@ class PlatformAssetLedgerAdmin(admin.ModelAdmin):
     list_display = ('id', 'asset_type', 'direction', 'amount', 'biz_type', 'order_no', 'created_at')
     list_filter = ('asset_type', 'direction', 'biz_type')
     search_fields = ('order_no',)
+    readonly_fields = ('created_at',)
+
+
+@admin.register(SavedProduct)
+class SavedProductAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'product', 'created_at')
+    list_filter = ('created_at', 'product__status')
+    search_fields = ('user__email', 'product__title')
+    ordering = ('-created_at', '-id')
     readonly_fields = ('created_at',)
 
 
