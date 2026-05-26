@@ -26,10 +26,13 @@ from apps.accounts.models import (
     ProductOrder,
     ProductRefundRequest,
     ProductShipment,
+    PlatformAssetLedger,
     SellerPayoutAddress,
     SellerStore,
     SellerPayout,
     ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     StreamPaymentMethod,
     UserShippingAddress,
     Video,
@@ -956,6 +959,8 @@ class ProductSerializer(serializers.ModelSerializer):
             'cover_image_url',
             'price_amount',
             'price_currency',
+            'meow_points_price',
+            'meow_credit_price',
             'stock_quantity',
             'status',
             'created_at',
@@ -1361,6 +1366,7 @@ class ProductOrderCreateSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     quantity = serializers.IntegerField(min_value=1)
     shipping_address_id = serializers.IntegerField()
+    payment_asset = serializers.ChoiceField(choices=ProductOrder.PAYMENT_ASSET_CHOICES)
 
     def validate(self, attrs):
         request = self.context['request']
@@ -1399,7 +1405,14 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
         fields = (
             'order_no',
             'status',
+            'payment_method',
+            'payment_asset',
             'expected_amount',
+            'unit_price_snapshot',
+            'total_amount_snapshot',
+            'platform_fee_rate',
+            'platform_fee_amount',
+            'seller_receivable_amount',
             'currency',
             'pay_to_address',
             'expires_at',
@@ -1430,12 +1443,16 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_pay_to_address(self, obj):
+        if obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
         return obj.payment_order.pay_to_address if obj.payment_order else ''
 
     def get_expires_at(self, obj):
         return obj.payment_order.expires_at if obj.payment_order else None
 
     def get_qr_payload(self, obj):
+        if obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
         if obj.status != ProductOrder.STATUS_PENDING_PAYMENT or not obj.payment_order:
             return None
         return ProductOrderService().build_qr_payload(obj)
@@ -1447,6 +1464,8 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
         return json.dumps(payload, separators=(',', ':'), sort_keys=True)
 
     def get_payment_uri(self, obj):
+        if obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
         if obj.status != ProductOrder.STATUS_PENDING_PAYMENT or not obj.payment_order:
             return ''
         return f'ltt:{obj.payment_order.pay_to_address}?amount={obj.total_amount}&token={obj.currency}&order_no={obj.order_no}'
@@ -1475,9 +1494,22 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
 
     def get_payment_summary(self, obj):
         payment = obj.payment_order
+        if payment is None and obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return {
+                'payment_method': ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET,
+                'payment_status': ProductOrder.STATUS_PAID if obj.status == ProductOrder.STATUS_PAID else obj.status,
+                'txid': '',
+                'confirmations': 0,
+                'actual_amount': obj.total_amount_snapshot,
+                'expected_amount': obj.total_amount_snapshot,
+                'pay_to_address': None,
+                'paid_at': obj.paid_at,
+                'expires_at': None,
+            }
         if payment is None:
             return None
         return {
+            'payment_method': obj.payment_method,
             'payment_status': payment.status,
             'txid': payment.txid,
             'confirmations': payment.confirmations,

@@ -41,8 +41,13 @@ from apps.accounts.models import (
     StreamPaymentMethod,
     Product,
     ProductCategory,
+    ProductOrder,
+    SellerPayout,
+    PlatformAssetLedger,
     SellerStore,
     ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     User,
     UserMembership,
     Video,
@@ -536,6 +541,8 @@ class ProductAdmin(admin.ModelAdmin):
         'store',
         'price_amount',
         'price_currency',
+        'meow_points_price',
+        'meow_credit_price',
         'stock_quantity',
         'status',
         'created_at',
@@ -564,6 +571,51 @@ class ShopBannerAdmin(admin.ModelAdmin):
     search_fields = ('title', 'subtitle', 'target_url')
     ordering = ('sort_order', '-id')
     readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ProductOrder)
+class ProductOrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'order_no', 'buyer', 'seller_store', 'status', 'payment_method', 'payment_asset',
+        'total_amount_snapshot', 'platform_fee_amount', 'seller_receivable_amount', 'created_at',
+    )
+    list_filter = ('status', 'payment_method', 'payment_asset', 'created_at')
+    search_fields = ('order_no', 'buyer__email', 'seller_store__name')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(SellerPayout)
+class SellerPayoutAdmin(admin.ModelAdmin):
+    list_display = (
+        'id', 'product_order', 'seller_store', 'asset_type', 'gross_amount', 'platform_fee_amount', 'net_amount', 'status', 'paid_at'
+    )
+    list_filter = ('status', 'asset_type', 'created_at')
+    search_fields = ('product_order__order_no', 'seller_store__name')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(UserAssetBalance)
+class UserAssetBalanceAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'asset_type', 'balance', 'updated_at')
+    list_filter = ('asset_type',)
+    search_fields = ('user__email',)
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(UserAssetTransaction)
+class UserAssetTransactionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'asset_type', 'direction', 'amount', 'biz_type', 'order_no', 'created_at')
+    list_filter = ('asset_type', 'direction', 'biz_type')
+    search_fields = ('user__email', 'order_no')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(PlatformAssetLedger)
+class PlatformAssetLedgerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'asset_type', 'direction', 'amount', 'biz_type', 'order_no', 'created_at')
+    list_filter = ('asset_type', 'direction', 'biz_type')
+    search_fields = ('order_no',)
+    readonly_fields = ('created_at',)
 
 
 @admin.register(LiveStreamProduct)

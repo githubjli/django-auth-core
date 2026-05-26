@@ -626,6 +626,8 @@ class Product(models.Model):
     cover_image = models.FileField(upload_to='stores/products/', blank=True)
     price_amount = models.DecimalField(max_digits=12, decimal_places=2)
     price_currency = models.CharField(max_length=3, default='USD')
+    meow_points_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    meow_credit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     stock_quantity = models.PositiveIntegerField(default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -696,6 +698,18 @@ class UserShippingAddress(models.Model):
 
 
 class ProductOrder(models.Model):
+    PAYMENT_METHOD_PLATFORM_ASSET = 'platform_asset'
+    PAYMENT_METHOD_BLOCKCHAIN = 'blockchain'
+    PAYMENT_METHOD_CHOICES = [
+        (PAYMENT_METHOD_PLATFORM_ASSET, 'Platform Asset'),
+        (PAYMENT_METHOD_BLOCKCHAIN, 'Blockchain'),
+    ]
+    ASSET_MEOW_POINTS = 'meow_points'
+    ASSET_MEOW_CREDIT = 'meow_credit'
+    PAYMENT_ASSET_CHOICES = [
+        (ASSET_MEOW_POINTS, 'Meow Points'),
+        (ASSET_MEOW_CREDIT, 'Meow Credit'),
+    ]
     STATUS_PENDING_PAYMENT = 'pending_payment'
     STATUS_PAID = 'paid'
     STATUS_SHIPPING = 'shipping'
@@ -742,6 +756,13 @@ class ProductOrder(models.Model):
         related_name='linked_product_order',
     )
     paid_at = models.DateTimeField(null=True, blank=True)
+    payment_method = models.CharField(max_length=24, choices=PAYMENT_METHOD_CHOICES, default=PAYMENT_METHOD_PLATFORM_ASSET)
+    payment_asset = models.CharField(max_length=24, choices=PAYMENT_ASSET_CHOICES, blank=True, default='')
+    unit_price_snapshot = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    total_amount_snapshot = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    platform_fee_rate = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
+    platform_fee_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    seller_receivable_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     stock_locked_at = models.DateTimeField(null=True, blank=True)
     stock_released_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
@@ -803,6 +824,11 @@ class SellerPayout(models.Model):
     )
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=10, default=TOKEN_SYMBOL)
+    asset_type = models.CharField(max_length=24, choices=ProductOrder.PAYMENT_ASSET_CHOICES, blank=True, default='')
+    gross_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    platform_fee_rate = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
+    platform_fee_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    net_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     payout_address = models.CharField(max_length=255, blank=True, default='')
     status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
     txid = models.CharField(max_length=255, blank=True, default='')
@@ -867,6 +893,13 @@ class ProductRefundRequest(models.Model):
     admin_note = models.TextField(blank=True, default='')
     seller_note = models.TextField(blank=True, default='')
     refund_txid = models.CharField(max_length=255, blank=True, default='')
+    refunded_asset_transaction = models.ForeignKey(
+        'UserAssetTransaction',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='refund_requests',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
@@ -1227,6 +1260,67 @@ class StreamPaymentMethod(models.Model):
 
     class Meta:
         ordering = ['sort_order', '-created_at', '-id']
+
+
+class UserAssetBalance(models.Model):
+    ASSET_MEOW_POINTS = 'meow_points'
+    ASSET_MEOW_CREDIT = 'meow_credit'
+    ASSET_CHOICES = [
+        (ASSET_MEOW_POINTS, 'Meow Points'),
+        (ASSET_MEOW_CREDIT, 'Meow Credit'),
+    ]
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='asset_balances')
+    asset_type = models.CharField(max_length=24, choices=ASSET_CHOICES)
+    balance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user', 'asset_type'], name='unique_user_asset_balance')]
+
+
+class UserAssetTransaction(models.Model):
+    DIRECTION_DEBIT = 'debit'
+    DIRECTION_CREDIT = 'credit'
+    DIRECTION_CHOICES = [(DIRECTION_DEBIT, 'Debit'), (DIRECTION_CREDIT, 'Credit')]
+    BIZ_PRODUCT_ORDER = 'product_order'
+    BIZ_PRODUCT_REFUND = 'product_refund'
+    BIZ_SELLER_PAYOUT = 'seller_payout'
+    BIZ_PLATFORM_FEE = 'platform_fee'
+    BIZ_CHOICES = [
+        (BIZ_PRODUCT_ORDER, 'Product Order'),
+        (BIZ_PRODUCT_REFUND, 'Product Refund'),
+        (BIZ_SELLER_PAYOUT, 'Seller Payout'),
+        (BIZ_PLATFORM_FEE, 'Platform Fee'),
+    ]
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='asset_transactions')
+    asset_type = models.CharField(max_length=24, choices=UserAssetBalance.ASSET_CHOICES)
+    direction = models.CharField(max_length=12, choices=DIRECTION_CHOICES)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_before = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
+    biz_type = models.CharField(max_length=24, choices=BIZ_CHOICES)
+    biz_id = models.PositiveIntegerField(null=True, blank=True)
+    order_no = models.CharField(max_length=64, blank=True, default='')
+    note = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class PlatformAssetLedger(models.Model):
+    DIRECTION_CREDIT = 'credit'
+    DIRECTION_DEBIT = 'debit'
+    DIRECTION_CHOICES = [(DIRECTION_CREDIT, 'Credit'), (DIRECTION_DEBIT, 'Debit')]
+    BIZ_PLATFORM_COMMISSION = 'platform_commission'
+    BIZ_REFUND_ADJUSTMENT = 'refund_adjustment'
+    BIZ_CHOICES = [(BIZ_PLATFORM_COMMISSION, 'Platform Commission'), (BIZ_REFUND_ADJUSTMENT, 'Refund Adjustment')]
+    asset_type = models.CharField(max_length=24, choices=UserAssetBalance.ASSET_CHOICES)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    direction = models.CharField(max_length=12, choices=DIRECTION_CHOICES, default=DIRECTION_CREDIT)
+    biz_type = models.CharField(max_length=32, choices=BIZ_CHOICES)
+    biz_id = models.PositiveIntegerField(null=True, blank=True)
+    order_no = models.CharField(max_length=64, blank=True, default='')
+    note = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class PaymentOrder(models.Model):

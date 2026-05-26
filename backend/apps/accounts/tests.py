@@ -44,9 +44,12 @@ from apps.accounts.models import (
     Product,
     ProductCategory,
     SellerPayout,
+    PlatformAssetLedger,
     SellerPayoutAddress,
     SellerStore,
     ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     StreamPaymentMethod,
     UserMembership,
     UserShippingAddress,
@@ -13833,3 +13836,95 @@ class ShopAPITestCase(APITestCase):
         response = self.client.get(reverse('shop-product-list'), {'page': 'abc', 'page_size': 20})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['page'], 1)
+
+class PlatformAssetTradeAPITestCase(APITestCase):
+    def setUp(self):
+        self.buyer = User.objects.create_user(email='asset-buyer@example.com', password='pw123456')
+        self.seller = User.objects.create_user(email='asset-seller@example.com', password='pw123456')
+        self.store = SellerStore.objects.create(owner=self.seller, name='Asset Store', slug='asset-store', is_active=True)
+        self.product = Product.objects.create(
+            store=self.store,
+            title='Asset Product',
+            slug='asset-product',
+            price_amount='10.00',
+            price_currency='USD',
+            meow_points_price='15.00',
+            meow_credit_price='12.00',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        self.addr = UserShippingAddress.objects.create(user=self.buyer, receiver_name='B', country='TH', street_address='x')
+        UserAssetBalance.objects.create(user=self.buyer, asset_type='meow_credit', balance='100.00')
+        UserAssetBalance.objects.create(user=self.buyer, asset_type='meow_points', balance='100.00')
+        self.admin = User.objects.create_user(email='asset-admin@example.com', password='pw123456', is_staff=True, is_superuser=True)
+
+    def _auth(self, user):
+        self.client.force_authenticate(user=user)
+
+    def test_meow_credit_order_success(self):
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 2, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
+        order = ProductOrder.objects.get(order_no=r.data['order_no'])
+        self.assertEqual(order.payment_asset, 'meow_credit')
+        self.assertEqual(order.total_amount_snapshot, Decimal('24.00'))
+        bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
+        self.assertEqual(bal.balance, Decimal('76.00'))
+        self.assertTrue(UserAssetTransaction.objects.filter(user=self.buyer, biz_type='product_order', order_no=order.order_no).exists())
+
+    def test_insufficient_balance_fail_no_stock_deduction(self):
+        bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
+        bal.balance = Decimal('1.00'); bal.save(update_fields=['balance'])
+        old_stock = self.product.stock_quantity
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock_quantity, old_stock)
+
+    def test_unsupported_asset_price_fail(self):
+        self.product.meow_points_price = None
+        self.product.save(update_fields=['meow_points_price'])
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 400)
+
+    def test_shipping_confirm_and_settlement(self):
+        self._auth(self.buyer)
+        create = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_points'}, format='json')
+        order_no = create.data['order_no']
+        self.client.force_authenticate(user=self.seller)
+        ship = self.client.post(reverse('seller-product-order-ship', args=[order_no]), {'carrier': 'TH', 'tracking_number': 'TNX'}, format='json')
+        self.assertEqual(ship.status_code, 200)
+        self.client.force_authenticate(user=self.buyer)
+        recv = self.client.post(reverse('product-order-confirm-received', args=[order_no]), format='json')
+        self.assertEqual(recv.status_code, 200)
+        order = ProductOrder.objects.get(order_no=order_no)
+        self.assertEqual(order.status, ProductOrder.STATUS_COMPLETED)
+        payout = SellerPayout.objects.get(product_order=order)
+        self.assertEqual(payout.status, SellerPayout.STATUS_PENDING)
+        self.client.force_authenticate(user=self.admin)
+        settled = self.client.post(reverse('admin-product-order-mark-settled', args=[order_no]), {'txid': ''}, format='json')
+        self.assertEqual(settled.status_code, 200)
+        order.refresh_from_db(); payout.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_SETTLED)
+        self.assertEqual(payout.status, SellerPayout.STATUS_PAID)
+        seller_bal = UserAssetBalance.objects.get(user=self.seller, asset_type='meow_points')
+        self.assertGreater(seller_bal.balance, Decimal('0'))
+        self.assertTrue(PlatformAssetLedger.objects.filter(order_no=order_no).exists())
+
+    def test_refund_mark_refunded_idempotent_and_settled_forbidden(self):
+        self._auth(self.buyer)
+        create = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_credit'}, format='json')
+        order_no = create.data['order_no']
+        req = self.client.post(reverse('product-order-refund-requests', args=[order_no]), {'reason': 'r'}, format='json')
+        refund_id = req.data['id']
+        bal_before = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
+        self.client.force_authenticate(user=self.admin)
+        m1 = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'admin_note': 'ok'}, format='json')
+        self.assertEqual(m1.status_code, 200)
+        m2 = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'admin_note': 'ok'}, format='json')
+        self.assertEqual(m2.status_code, 200)
+        bal_after = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
+        self.assertEqual(bal_after - bal_before, Decimal('12.00'))

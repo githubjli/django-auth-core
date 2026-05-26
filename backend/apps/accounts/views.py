@@ -45,6 +45,8 @@ from apps.accounts.models import (
     SellerPayoutAddress,
     SellerStore,
     ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     StreamPaymentMethod,
     UserShippingAddress,
     UserMembership,
@@ -461,11 +463,12 @@ class ProductOrderListCreateAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         service = ProductOrderService()
         try:
-            order = service.create_order(
+            order = service.create_order_with_asset(
                 buyer=request.user,
                 product=serializer.validated_data['product'],
                 quantity=serializer.validated_data['quantity'],
                 shipping_address=serializer.validated_data['shipping_address'],
+                payment_asset=serializer.validated_data['payment_asset'],
             )
         except RuntimeError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -819,11 +822,38 @@ class AdminRefundRequestMarkRefundedAPIView(APIView):
         serializer = ProductRefundAdminActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         order = refund.product_order
+        if refund.refunded_asset_transaction_id is not None:
+            return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
+        if order.status == ProductOrder.STATUS_SETTLED:
+            return Response({'detail': 'Settled orders cannot be auto-refunded.'}, status=status.HTTP_400_BAD_REQUEST)
         payout = getattr(order, 'seller_payout', None)
         if payout and payout.status == SellerPayout.STATUS_PENDING:
             payout.status = SellerPayout.STATUS_FAILED
             payout.failure_note = 'refund_marked'
             payout.save(update_fields=['status', 'failure_note', 'updated_at'])
+        if order.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET and order.payment_asset:
+            refund_amount = refund.requested_amount
+            with transaction.atomic():
+                balance, _ = UserAssetBalance.objects.select_for_update().get_or_create(
+                    user=order.buyer, asset_type=order.payment_asset, defaults={'balance': 0}
+                )
+                before = balance.balance
+                after = before + refund_amount
+                balance.balance = after
+                balance.save(update_fields=['balance', 'updated_at'])
+                tx = UserAssetTransaction.objects.create(
+                    user=order.buyer,
+                    asset_type=order.payment_asset,
+                    direction=UserAssetTransaction.DIRECTION_CREDIT,
+                    amount=refund_amount,
+                    balance_before=before,
+                    balance_after=after,
+                    biz_type=UserAssetTransaction.BIZ_PRODUCT_REFUND,
+                    biz_id=refund.id,
+                    order_no=order.order_no,
+                    note='product_refund',
+                )
+                refund.refunded_asset_transaction = tx
         refund.status = ProductRefundRequest.STATUS_REFUNDED
         refund.admin_note = serializer.validated_data.get('admin_note') or ''
         refund.refund_txid = serializer.validated_data.get('refund_txid') or ''
