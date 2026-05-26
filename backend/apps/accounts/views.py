@@ -1733,6 +1733,53 @@ class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
             stream.save(update_fields=list(set(changed)))
 
 
+class LiveStreamWatchConfigAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, pk):
+        stream = generics.get_object_or_404(LiveStream.objects.select_related('owner', 'category'), pk=pk)
+        user = getattr(request, 'user', None)
+        if stream.visibility == LiveStream.VISIBILITY_PRIVATE and not (user and user.is_authenticated and user.id == stream.owner_id):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if stream.status == LiveStream.STATUS_FAILED:
+            return Response({'detail': 'Live stream is failed.'}, status=status.HTTP_409_CONFLICT)
+
+        adapter = AntMediaLiveAdapter()
+        normalized = adapter.normalize_stream_fields(stream)
+        websocket_url = adapter._get_websocket_url()
+        hls_url = adapter._get_playback_url(stream.stream_key)
+        if not websocket_url and not hls_url:
+            return Response(
+                {'detail': 'Playback config unavailable.', 'code': 'playback_config_unavailable'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        serializer_data = LiveStreamSerializer(stream, context={'request': request}).data
+        connected = bool(stream.status == LiveStream.STATUS_LIVE and normalized.get('effective_status') in {'live', 'publishing'})
+        playback_mode = 'webrtc' if websocket_url else 'hls'
+        payload = {
+            'live_id': stream.id,
+            'status': stream.status,
+            'effective_status': normalized.get('effective_status'),
+            'viewer_count': normalized.get('viewer_count') or 0,
+            'playback': {
+                'mode': playback_mode,
+                'stream_id': stream.stream_key,
+                'websocket_url': websocket_url,
+                'hls_url': hls_url,
+                'connected': connected,
+            },
+            'fallback': {
+                'mode': 'hls',
+                'hls_url': hls_url,
+            },
+            'thumbnail_url': serializer_data.get('thumbnail_url'),
+            'preview_image_url': serializer_data.get('preview_image_url'),
+            'snapshot_url': serializer_data.get('snapshot_url'),
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
     serializer_class = LiveStreamSerializer
     permission_classes = [permissions.IsAuthenticated]
