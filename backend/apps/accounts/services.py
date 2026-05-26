@@ -1586,7 +1586,7 @@ class ProductOrderService:
             payment_asset=ProductOrder.ASSET_MEOW_CREDIT,
         )
 
-    def create_order_with_asset(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress, payment_asset: str) -> ProductOrder:
+    def create_order_with_asset(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress | None, payment_asset: str) -> ProductOrder:
         if quantity <= 0:
             raise ValueError('Quantity must be greater than zero.')
         if product.status != Product.STATUS_ACTIVE:
@@ -1595,7 +1595,7 @@ class ProductOrderService:
             raise ValueError('Seller store is not active.')
         if product.stock_quantity < quantity:
             raise ValueError('Insufficient product stock.')
-        if shipping_address.user_id != buyer.id:
+        if shipping_address is not None and shipping_address.user_id != buyer.id:
             raise ValueError('Shipping address does not belong to buyer.')
         unit_price = product.meow_points_price if payment_asset == ProductOrder.ASSET_MEOW_POINTS else product.meow_credit_price
         if unit_price is None or Decimal(str(unit_price)) <= 0:
@@ -1668,7 +1668,7 @@ class ProductOrderService:
                 platform_fee_rate=fee_rate,
                 platform_fee_amount=platform_fee_amount,
                 seller_receivable_amount=seller_receivable_amount,
-                shipping_address_snapshot=self._shipping_snapshot(shipping_address),
+                shipping_address_snapshot=self._shipping_snapshot(shipping_address) if shipping_address is not None else {},
                 payment_order=payment_order,
                 stock_locked_at=now,
                 expires_at=expires_at,

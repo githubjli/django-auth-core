@@ -1141,6 +1141,18 @@ class ShopProductListAPIView(generics.ListAPIView):
         return queryset
 
 
+class ShopProductDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = ShopProductListSerializer
+    permission_classes = [permissions.AllowAny]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        return Product.objects.select_related('store', 'category').filter(
+            status=Product.STATUS_ACTIVE,
+            store__is_active=True,
+        )
+
+
 class SavedProductPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'

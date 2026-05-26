@@ -1004,13 +1004,22 @@ class ShopProductListSerializer(serializers.ModelSerializer):
     original_price = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     badge = serializers.SerializerMethodField()
+    description = serializers.SerializerMethodField()
+    images = serializers.SerializerMethodField()
+    specs = serializers.SerializerMethodField()
     category = ProductCategorySerializer(read_only=True)
     sold_count = serializers.SerializerMethodField()
     stock = serializers.IntegerField(source='stock_quantity', read_only=True)
+    meow_points_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    meow_credit_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, allow_null=True)
 
     class Meta:
         model = Product
-        fields = ('id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge', 'category', 'sold_count', 'stock')
+        fields = (
+            'id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge',
+            'sold_count', 'stock', 'description', 'images', 'specs', 'category',
+            'meow_points_price', 'meow_credit_price',
+        )
         read_only_fields = fields
 
     def get_original_price(self, obj):
@@ -1029,6 +1038,15 @@ class ShopProductListSerializer(serializers.ModelSerializer):
 
     def get_sold_count(self, obj):
         return 0
+
+    def get_description(self, obj):
+        return obj.description or None
+
+    def get_images(self, obj):
+        return []
+
+    def get_specs(self, obj):
+        return []
 
 
 class SavedProductSerializer(serializers.ModelSerializer):
@@ -1393,7 +1411,7 @@ class SellerPayoutSummarySerializer(serializers.ModelSerializer):
 class ProductOrderCreateSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     quantity = serializers.IntegerField(min_value=1)
-    shipping_address_id = serializers.IntegerField()
+    shipping_address_id = serializers.IntegerField(required=False, allow_null=True)
     payment_asset = serializers.ChoiceField(choices=ProductOrder.PAYMENT_ASSET_CHOICES)
 
     def validate(self, attrs):
@@ -1407,9 +1425,12 @@ class ProductOrderCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError({'product_id': ['Seller store is inactive.']})
         if product.stock_quantity < attrs['quantity']:
             raise serializers.ValidationError({'quantity': ['Insufficient stock.']})
-        shipping_address = UserShippingAddress.objects.filter(id=attrs['shipping_address_id'], user=request.user).first()
-        if shipping_address is None:
-            raise serializers.ValidationError({'shipping_address_id': ['Shipping address not found.']})
+        shipping_address = None
+        shipping_address_id = attrs.get('shipping_address_id')
+        if shipping_address_id is not None:
+            shipping_address = UserShippingAddress.objects.filter(id=shipping_address_id, user=request.user).first()
+            if shipping_address is None:
+                raise serializers.ValidationError({'shipping_address_id': ['Shipping address not found.']})
         attrs['product'] = product
         attrs['shipping_address'] = shipping_address
         return attrs

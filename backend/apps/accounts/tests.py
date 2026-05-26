@@ -13723,7 +13723,7 @@ class ShopAPITestCase(APITestCase):
         self.store = SellerStore.objects.create(owner=self.seller, name='Shop', slug='shop-store', is_active=True)
         self.category_food = ProductCategory.objects.create(name='Food', slug='food', is_active=True, sort_order=2)
         ProductCategory.objects.create(name='Hidden', slug='hidden', is_active=False, sort_order=1)
-        Product.objects.create(
+        self.active_product = Product.objects.create(
             store=self.store,
             category=self.category_food,
             title='Apple Juice',
@@ -13731,6 +13731,8 @@ class ShopAPITestCase(APITestCase):
             description='Fresh fruit drink',
             price_amount='12.00',
             price_currency='USD',
+            meow_points_price='20.00',
+            meow_credit_price='2.00',
             stock_quantity=10,
             status=Product.STATUS_ACTIVE,
         )
@@ -13752,6 +13754,8 @@ class ShopAPITestCase(APITestCase):
             description='No category item',
             price_amount='8.50',
             price_currency='USD',
+            meow_points_price=None,
+            meow_credit_price=None,
             stock_quantity=12,
             status=Product.STATUS_ACTIVE,
         )
@@ -13777,9 +13781,30 @@ class ShopAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2)
         first = response.data['results'][0]
-        required_fields = {'id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge', 'category', 'sold_count', 'stock'}
+        required_fields = {
+            'id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge', 'category',
+            'sold_count', 'stock', 'description', 'images', 'specs', 'meow_points_price', 'meow_credit_price'
+        }
         self.assertEqual(set(first.keys()), required_fields)
         self.assertIsInstance(first['price'], str)
+        self.assertTrue(isinstance(first['meow_points_price'], str) or first['meow_points_price'] is None)
+        self.assertTrue(isinstance(first['meow_credit_price'], str) or first['meow_credit_price'] is None)
+        self.assertEqual(first['images'], [])
+        self.assertEqual(first['specs'], [])
+
+    def test_shop_product_detail_shape(self):
+        response = self.client.get(reverse('shop-product-detail', args=[self.active_product.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('meow_points_price', response.data)
+        self.assertIn('meow_credit_price', response.data)
+        self.assertEqual(response.data['images'], [])
+        self.assertEqual(response.data['specs'], [])
+
+    def test_shop_product_price_null_when_missing(self):
+        response = self.client.get(reverse('shop-product-detail', args=[self.uncategorized_product.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['meow_points_price'])
+        self.assertIsNone(response.data['meow_credit_price'])
 
     def test_shop_products_filter_by_category(self):
         response = self.client.get(reverse('shop-product-list'), {'category': 'food'})
@@ -13864,12 +13889,17 @@ class PlatformAssetTradeAPITestCase(APITestCase):
 
     def test_meow_credit_order_success(self):
         self._auth(self.buyer)
-        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 2, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_credit'}, format='json')
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 2, 'shipping_address_id': None, 'payment_asset': 'meow_credit'}, format='json')
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
         order = ProductOrder.objects.get(order_no=r.data['order_no'])
         self.assertEqual(order.payment_asset, 'meow_credit')
         self.assertEqual(order.total_amount_snapshot, Decimal('24.00'))
+        self.assertEqual(order.shipping_address_snapshot, {})
+        self.assertIsInstance(r.data['unit_price_snapshot'], str)
+        self.assertIsInstance(r.data['total_amount_snapshot'], str)
+        self.assertIsInstance(r.data['platform_fee_amount'], str)
+        self.assertIsInstance(r.data['seller_receivable_amount'], str)
         bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
         self.assertEqual(bal.balance, Decimal('76.00'))
         self.assertTrue(UserAssetTransaction.objects.filter(user=self.buyer, biz_type='product_order', order_no=order.order_no).exists())
