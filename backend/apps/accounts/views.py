@@ -38,11 +38,15 @@ from apps.accounts.models import (
     MembershipPlan,
     PaymentOrder,
     Product,
+    ProductCategory,
     ProductOrder,
     ProductRefundRequest,
     SellerPayout,
     SellerPayoutAddress,
     SellerStore,
+    ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     StreamPaymentMethod,
     UserShippingAddress,
     UserMembership,
@@ -88,6 +92,7 @@ from apps.accounts.serializers import (
     ProductOrderMarkSettledSerializer,
     ProductOrderShipSerializer,
     ProductOrderTxHintSerializer,
+    ProductCategorySerializer,
     ProductRefundAdminActionSerializer,
     ProductRefundRequestCreateSerializer,
     ProductRefundRequestSerializer,
@@ -97,6 +102,8 @@ from apps.accounts.serializers import (
     PaymentOrderSerializer,
     PublicCreatorSerializer,
     RegisterSerializer,
+    ShopBannerSerializer,
+    ShopProductListSerializer,
     SellerStoreSerializer,
     UserShippingAddressSerializer,
     StreamPaymentMethodSerializer,
@@ -456,11 +463,12 @@ class ProductOrderListCreateAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         service = ProductOrderService()
         try:
-            order = service.create_order(
+            order = service.create_order_with_asset(
                 buyer=request.user,
                 product=serializer.validated_data['product'],
                 quantity=serializer.validated_data['quantity'],
                 shipping_address=serializer.validated_data['shipping_address'],
+                payment_asset=serializer.validated_data['payment_asset'],
             )
         except RuntimeError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -814,11 +822,38 @@ class AdminRefundRequestMarkRefundedAPIView(APIView):
         serializer = ProductRefundAdminActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         order = refund.product_order
+        if refund.refunded_asset_transaction_id is not None:
+            return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
+        if order.status == ProductOrder.STATUS_SETTLED:
+            return Response({'detail': 'Settled orders cannot be auto-refunded.'}, status=status.HTTP_400_BAD_REQUEST)
         payout = getattr(order, 'seller_payout', None)
         if payout and payout.status == SellerPayout.STATUS_PENDING:
             payout.status = SellerPayout.STATUS_FAILED
             payout.failure_note = 'refund_marked'
             payout.save(update_fields=['status', 'failure_note', 'updated_at'])
+        if order.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET and order.payment_asset:
+            refund_amount = refund.requested_amount
+            with transaction.atomic():
+                balance, _ = UserAssetBalance.objects.select_for_update().get_or_create(
+                    user=order.buyer, asset_type=order.payment_asset, defaults={'balance': 0}
+                )
+                before = balance.balance
+                after = before + refund_amount
+                balance.balance = after
+                balance.save(update_fields=['balance', 'updated_at'])
+                tx = UserAssetTransaction.objects.create(
+                    user=order.buyer,
+                    asset_type=order.payment_asset,
+                    direction=UserAssetTransaction.DIRECTION_CREDIT,
+                    amount=refund_amount,
+                    balance_before=before,
+                    balance_after=after,
+                    biz_type=UserAssetTransaction.BIZ_PRODUCT_REFUND,
+                    biz_id=refund.id,
+                    order_no=order.order_no,
+                    note='product_refund',
+                )
+                refund.refunded_asset_transaction = tx
         refund.status = ProductRefundRequest.STATUS_REFUNDED
         refund.admin_note = serializer.validated_data.get('admin_note') or ''
         refund.refund_txid = serializer.validated_data.get('refund_txid') or ''
@@ -1032,6 +1067,75 @@ class PublicSellerStoreProductListAPIView(APIView):
 
         serializer = ProductSerializer(products, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ShopProductPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+    page_query_param = 'page'
+
+    def get_paginated_response(self, data):
+        return Response(
+            {
+                'count': self.page.paginator.count,
+                'page': self.page.number,
+                'page_size': self.get_page_size(self.request),
+                'results': data,
+            }
+        )
+
+    def get_page_number(self, request, paginator):
+        page_number = request.query_params.get(self.page_query_param, 1)
+        if page_number in self.last_page_strings:
+            return paginator.num_pages
+        try:
+            page_int = int(page_number)
+        except (TypeError, ValueError):
+            return 1
+        if page_int <= 0:
+            return 1
+        return page_int
+
+
+class ShopBannerListAPIView(generics.ListAPIView):
+    serializer_class = ShopBannerSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+    queryset = ShopBanner.objects.filter(is_active=True).order_by('sort_order', '-id')
+
+
+class ShopCategoryListAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        rows = list(
+            ProductCategory.objects.filter(is_active=True).order_by('sort_order', 'id')
+        )
+        payload = [{'id': 0, 'name': 'All', 'slug': 'all'}]
+        payload.extend(ProductCategorySerializer(rows, many=True).data)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class ShopProductListAPIView(generics.ListAPIView):
+    serializer_class = ShopProductListSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = ShopProductPagination
+
+    def get_queryset(self):
+        queryset = Product.objects.select_related('store', 'category').filter(
+            status=Product.STATUS_ACTIVE,
+            store__is_active=True,
+        ).order_by('-created_at', '-id')
+        category = (self.request.query_params.get('category') or '').strip().lower()
+        if category and category != 'all':
+            queryset = queryset.filter(category__slug=category, category__is_active=True)
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            queryset = queryset.filter(
+                Q(title__icontains=q) | Q(description__icontains=q) | Q(slug__icontains=q)
+            )
+        return queryset
 
 
 class LiveStreamProductManageListCreateAPIView(APIView):
