@@ -51,8 +51,11 @@ from apps.accounts.models import (
     ProductOrder,
     ProductShipment,
     ProductRefundRequest,
+    PlatformAssetLedger,
     SellerPayout,
     SellerPayoutAddress,
+    UserAssetBalance,
+    UserAssetTransaction,
     UserShippingAddress,
     WalletAddress,
     LiveChatMessage,
@@ -1567,7 +1570,23 @@ class ProductOrderService:
     def _resolve_receive_address(self) -> str:
         return (settings.PRODUCT_PLATFORM_RECEIVE_ADDRESS or settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
 
+    def _platform_fee_rate(self) -> Decimal:
+        raw = getattr(settings, 'PRODUCT_PLATFORM_FEE_RATE', Decimal('0.10'))
+        rate = Decimal(str(raw))
+        if rate < 0 or rate >= 1:
+            raise ValueError('Invalid platform fee rate configuration.')
+        return rate
+
     def create_order(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress) -> ProductOrder:
+        return self.create_order_with_asset(
+            buyer=buyer,
+            product=product,
+            quantity=quantity,
+            shipping_address=shipping_address,
+            payment_asset=ProductOrder.ASSET_MEOW_CREDIT,
+        )
+
+    def create_order_with_asset(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress | None, payment_asset: str) -> ProductOrder:
         if quantity <= 0:
             raise ValueError('Quantity must be greater than zero.')
         if product.status != Product.STATUS_ACTIVE:
@@ -1576,33 +1595,14 @@ class ProductOrderService:
             raise ValueError('Seller store is not active.')
         if product.stock_quantity < quantity:
             raise ValueError('Insufficient product stock.')
-        if shipping_address.user_id != buyer.id:
+        if shipping_address is not None and shipping_address.user_id != buyer.id:
             raise ValueError('Shipping address does not belong to buyer.')
-        receive_address = ''
-        wallet_id = ''
-        account_id = ''
-        is_dynamic_address = False
-        configured_receive_address = self._resolve_receive_address()
-        if configured_receive_address:
-            receive_address = configured_receive_address
-            wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip()
-            account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip()
-        else:
-            daemon_wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip() or None
-            daemon_account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
-            try:
-                daemon_result = self.daemon_client.address_unused(
-                    wallet_id=daemon_wallet_id,
-                    account_id=daemon_account_id,
-                )
-            except LbryDaemonError as exc:
-                raise RuntimeError('Unable to allocate product payment address from platform wallet.') from exc
-            receive_address = (daemon_result.get('address') or '').strip()
-            wallet_id = (daemon_result.get('wallet_id') or daemon_wallet_id or '').strip()
-            account_id = (daemon_result.get('account_id') or daemon_account_id or '').strip()
-            is_dynamic_address = True
-        if not receive_address:
-            raise RuntimeError('Unable to allocate product payment address from platform wallet.')
+        unit_price = product.meow_points_price if payment_asset == ProductOrder.ASSET_MEOW_POINTS else product.meow_credit_price
+        if unit_price is None or Decimal(str(unit_price)) <= 0:
+            if payment_asset == ProductOrder.ASSET_MEOW_POINTS:
+                raise ValueError('This product does not support MeowPoints payment.')
+            raise ValueError('This product does not support MeowCredit payment.')
+        fee_rate = self._platform_fee_rate()
 
         with transaction.atomic():
             updated = Product.objects.filter(id=product.id, stock_quantity__gte=quantity).update(stock_quantity=F('stock_quantity') - quantity)
@@ -1610,9 +1610,32 @@ class ProductOrderService:
                 raise ValueError('Insufficient product stock.')
             product.refresh_from_db(fields=['stock_quantity'])
             order_no = self._generate_order_no()
-            total_amount = (product.price_amount or Decimal('0')) * Decimal(quantity)
+            unit_price = Decimal(str(unit_price))
+            total_amount = unit_price * Decimal(quantity)
+            platform_fee_amount = (total_amount * fee_rate).quantize(Decimal('0.01'))
+            seller_receivable_amount = (total_amount - platform_fee_amount).quantize(Decimal('0.01'))
             now = timezone.now()
             expires_at = now + timedelta(minutes=int(settings.PRODUCT_ORDER_EXPIRE_MINUTES))
+            balance = UserAssetBalance.objects.select_for_update().filter(user=buyer, asset_type=payment_asset).first()
+            if balance is None or balance.balance < total_amount:
+                raise ValueError('Insufficient MeowPoints balance.' if payment_asset == ProductOrder.ASSET_MEOW_POINTS else 'Insufficient MeowCredit balance.')
+            before = balance.balance
+            after = before - total_amount
+            if after < 0:
+                raise ValueError('Insufficient balance.')
+            balance.balance = after
+            balance.save(update_fields=['balance', 'updated_at'])
+            UserAssetTransaction.objects.create(
+                user=buyer,
+                asset_type=payment_asset,
+                direction=UserAssetTransaction.DIRECTION_DEBIT,
+                amount=total_amount,
+                balance_before=before,
+                balance_after=after,
+                biz_type=UserAssetTransaction.BIZ_PRODUCT_ORDER,
+                order_no=order_no,
+                note='product_order_payment',
+            )
             payment_order = PaymentOrder.objects.create(
                 user=buyer,
                 product=product,
@@ -1621,45 +1644,12 @@ class ProductOrderService:
                 amount=total_amount,
                 expected_amount_lbc=total_amount,
                 currency=TOKEN_SYMBOL,
-                status=PaymentOrder.STATUS_PENDING,
+                status=PaymentOrder.STATUS_PAID,
                 order_no=order_no,
-                pay_to_address=receive_address,
+                pay_to_address='',
                 expires_at=expires_at,
+                paid_at=now,
             )
-            if is_dynamic_address:
-                existing_assigned = WalletAddress.objects.filter(
-                    address=receive_address,
-                    assigned_order__isnull=False,
-                ).exclude(assigned_order=payment_order).first()
-                if existing_assigned is not None:
-                    raise RuntimeError('Unable to allocate product payment address from platform wallet.')
-                wallet_address, _ = WalletAddress.objects.update_or_create(
-                    address=receive_address,
-                    defaults={
-                        'label': f'product:{order_no}',
-                        'usage_type': WalletAddress.USAGE_PRODUCT,
-                        'status': WalletAddress.STATUS_ASSIGNED,
-                        'assigned_order': payment_order,
-                        'assigned_at': now,
-                        'wallet_id': wallet_id,
-                        'account_id': account_id,
-                    },
-                )
-            else:
-                wallet_address, _ = WalletAddress.objects.update_or_create(
-                    address=receive_address,
-                    defaults={
-                        'label': f'product:{order_no}',
-                        'usage_type': WalletAddress.USAGE_PRODUCT,
-                        'status': WalletAddress.STATUS_AVAILABLE,
-                        'assigned_order': None,
-                        'assigned_at': None,
-                        'wallet_id': wallet_id,
-                        'account_id': account_id,
-                    },
-                )
-            payment_order.wallet_address = wallet_address
-            payment_order.save(update_fields=['wallet_address', 'updated_at'])
             product_order = ProductOrder.objects.create(
                 order_no=order_no,
                 buyer=buyer,
@@ -1670,11 +1660,19 @@ class ProductOrderService:
                 quantity=quantity,
                 total_amount=total_amount,
                 currency=TOKEN_SYMBOL,
-                status=ProductOrder.STATUS_PENDING_PAYMENT,
-                shipping_address_snapshot=self._shipping_snapshot(shipping_address),
+                status=ProductOrder.STATUS_PAID,
+                payment_method=ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET,
+                payment_asset=payment_asset,
+                unit_price_snapshot=unit_price,
+                total_amount_snapshot=total_amount,
+                platform_fee_rate=fee_rate,
+                platform_fee_amount=platform_fee_amount,
+                seller_receivable_amount=seller_receivable_amount,
+                shipping_address_snapshot=self._shipping_snapshot(shipping_address) if shipping_address is not None else {},
                 payment_order=payment_order,
                 stock_locked_at=now,
                 expires_at=expires_at,
+                paid_at=now,
             )
             payment_order.target_id = product_order.id
             payment_order.save(update_fields=['target_id', 'updated_at'])
@@ -1746,8 +1744,13 @@ class ProductOrderService:
                 product_order=order,
                 defaults={
                     'seller_store': order.seller_store,
-                    'amount': order.total_amount,
+                    'amount': order.seller_receivable_amount or order.total_amount_snapshot or order.total_amount,
                     'currency': order.currency,
+                    'asset_type': order.payment_asset,
+                    'gross_amount': order.total_amount_snapshot or order.total_amount,
+                    'platform_fee_rate': order.platform_fee_rate,
+                    'platform_fee_amount': order.platform_fee_amount,
+                    'net_amount': order.seller_receivable_amount or order.total_amount_snapshot or order.total_amount,
                     'status': SellerPayout.STATUS_PENDING,
                 },
             )
@@ -1778,6 +1781,36 @@ class ProductOrderService:
             payout.paid_at = now
             payout.failure_note = ''
             payout.save(update_fields=['status', 'txid', 'payout_address', 'note', 'paid_at', 'failure_note', 'updated_at'])
+            if order.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET and order.payment_asset:
+                seller = order.seller_store.owner
+                seller_balance, _ = UserAssetBalance.objects.select_for_update().get_or_create(
+                    user=seller, asset_type=order.payment_asset, defaults={'balance': Decimal('0.00')}
+                )
+                seller_before = seller_balance.balance
+                seller_after = seller_before + (order.seller_receivable_amount or Decimal('0'))
+                seller_balance.balance = seller_after
+                seller_balance.save(update_fields=['balance', 'updated_at'])
+                UserAssetTransaction.objects.create(
+                    user=seller,
+                    asset_type=order.payment_asset,
+                    direction=UserAssetTransaction.DIRECTION_CREDIT,
+                    amount=order.seller_receivable_amount or Decimal('0'),
+                    balance_before=seller_before,
+                    balance_after=seller_after,
+                    biz_type=UserAssetTransaction.BIZ_SELLER_PAYOUT,
+                    biz_id=payout.id,
+                    order_no=order.order_no,
+                    note='seller_payout_settlement',
+                )
+                PlatformAssetLedger.objects.create(
+                    asset_type=order.payment_asset,
+                    amount=order.platform_fee_amount or Decimal('0'),
+                    direction=PlatformAssetLedger.DIRECTION_CREDIT,
+                    biz_type=PlatformAssetLedger.BIZ_PLATFORM_COMMISSION,
+                    biz_id=order.id,
+                    order_no=order.order_no,
+                    note='product_order_platform_fee',
+                )
             order.status = ProductOrder.STATUS_SETTLED
             order.settled_at = now
             order.save(update_fields=['status', 'settled_at', 'updated_at'])
