@@ -38,11 +38,13 @@ from apps.accounts.models import (
     MembershipPlan,
     PaymentOrder,
     Product,
+    ProductCategory,
     ProductOrder,
     ProductRefundRequest,
     SellerPayout,
     SellerPayoutAddress,
     SellerStore,
+    ShopBanner,
     StreamPaymentMethod,
     UserShippingAddress,
     UserMembership,
@@ -88,6 +90,7 @@ from apps.accounts.serializers import (
     ProductOrderMarkSettledSerializer,
     ProductOrderShipSerializer,
     ProductOrderTxHintSerializer,
+    ProductCategorySerializer,
     ProductRefundAdminActionSerializer,
     ProductRefundRequestCreateSerializer,
     ProductRefundRequestSerializer,
@@ -97,6 +100,8 @@ from apps.accounts.serializers import (
     PaymentOrderSerializer,
     PublicCreatorSerializer,
     RegisterSerializer,
+    ShopBannerSerializer,
+    ShopProductListSerializer,
     SellerStoreSerializer,
     UserShippingAddressSerializer,
     StreamPaymentMethodSerializer,
@@ -1032,6 +1037,62 @@ class PublicSellerStoreProductListAPIView(APIView):
 
         serializer = ProductSerializer(products, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ShopProductPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        return Response(
+            {
+                'count': self.page.paginator.count,
+                'page': self.page.number,
+                'page_size': self.get_page_size(self.request),
+                'results': data,
+            }
+        )
+
+
+class ShopBannerListAPIView(generics.ListAPIView):
+    serializer_class = ShopBannerSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+    queryset = ShopBanner.objects.filter(is_active=True).order_by('sort_order', '-id')
+
+
+class ShopCategoryListAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        rows = list(
+            ProductCategory.objects.filter(is_active=True).order_by('sort_order', 'id')
+        )
+        payload = [{'id': 0, 'name': 'All', 'slug': 'all'}]
+        payload.extend(ProductCategorySerializer(rows, many=True).data)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class ShopProductListAPIView(generics.ListAPIView):
+    serializer_class = ShopProductListSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = ShopProductPagination
+
+    def get_queryset(self):
+        queryset = Product.objects.select_related('store', 'category').filter(
+            status=Product.STATUS_ACTIVE,
+            store__is_active=True,
+        ).order_by('-created_at', '-id')
+        category = (self.request.query_params.get('category') or '').strip().lower()
+        if category and category != 'all':
+            queryset = queryset.filter(category__slug=category, category__is_active=True)
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            queryset = queryset.filter(
+                Q(title__icontains=q) | Q(description__icontains=q) | Q(slug__icontains=q)
+            )
+        return queryset
 
 
 class LiveStreamProductManageListCreateAPIView(APIView):

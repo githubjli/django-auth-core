@@ -613,6 +613,13 @@ class Product(models.Model):
         on_delete=models.CASCADE,
         related_name='products',
     )
+    category = models.ForeignKey(
+        'ProductCategory',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='products',
+    )
     title = models.CharField(max_length=255)
     slug = models.SlugField(max_length=120)
     description = models.TextField(blank=True)
@@ -629,6 +636,38 @@ class Product(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['store', 'slug'], name='unique_product_slug_per_store')
         ]
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class ProductCategory(models.Model):
+    name = models.CharField(max_length=120)
+    slug = models.SlugField(max_length=120, unique=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ShopBanner(models.Model):
+    title = models.CharField(max_length=255)
+    subtitle = models.CharField(max_length=255, blank=True, default='')
+    image_url = models.URLField()
+    target_url = models.URLField(blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', '-id']
 
     def __str__(self) -> str:
         return self.title
