@@ -2162,7 +2162,7 @@ class PublicVideoInteractionSummaryAPIView(APIView):
                     status=Video.STATUS_ACTIVE,
                 ),
                 request,
-            ),
+            ).filter(status=Video.STATUS_ACTIVE),
             pk=pk,
         )
         serializer = VideoInteractionSummarySerializer(video, context={'request': request})
