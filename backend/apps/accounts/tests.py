@@ -13740,6 +13740,17 @@ class ShopAPITestCase(APITestCase):
             stock_quantity=5,
             status=Product.STATUS_DRAFT,
         )
+        self.uncategorized_product = Product.objects.create(
+            store=self.store,
+            category=None,
+            title='Water Bottle',
+            slug='water-bottle',
+            description='No category item',
+            price_amount='8.50',
+            price_currency='USD',
+            stock_quantity=12,
+            status=Product.STATUS_ACTIVE,
+        )
         ShopBanner.objects.create(title='Visible', subtitle='S1', image_url='https://example.com/a.jpg', target_url='https://example.com', is_active=True, sort_order=1)
         ShopBanner.objects.create(title='Hidden', subtitle='S2', image_url='https://example.com/b.jpg', is_active=False, sort_order=0)
 
@@ -13760,8 +13771,11 @@ class ShopAPITestCase(APITestCase):
     def test_shop_products_only_active(self):
         response = self.client.get(reverse('shop-product-list'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['count'], 1)
-        self.assertEqual(response.data['results'][0]['name'], 'Apple Juice')
+        self.assertEqual(response.data['count'], 2)
+        first = response.data['results'][0]
+        required_fields = {'id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge', 'category', 'sold_count', 'stock'}
+        self.assertEqual(set(first.keys()), required_fields)
+        self.assertIsInstance(first['price'], str)
 
     def test_shop_products_filter_by_category(self):
         response = self.client.get(reverse('shop-product-list'), {'category': 'food'})
@@ -13769,10 +13783,38 @@ class ShopAPITestCase(APITestCase):
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['category']['slug'], 'food')
 
+    def test_shop_products_category_all_no_filter(self):
+        response = self.client.get(reverse('shop-product-list'), {'category': 'all'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
     def test_shop_products_search_q(self):
         response = self.client.get(reverse('shop-product-list'), {'q': 'fruit'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
+
+    def test_shop_products_search_q_no_match_returns_empty(self):
+        response = self.client.get(reverse('shop-product-list'), {'q': 'no-match-keyword'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+        self.assertEqual(response.data['results'], [])
+
+    def test_shop_products_empty_results_shape(self):
+        Product.objects.filter(status=Product.STATUS_ACTIVE).update(status=Product.STATUS_INACTIVE)
+        response = self.client.get(reverse('shop-product-list'), {'page': 1, 'page_size': 20})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+        self.assertEqual(response.data['page'], 1)
+        self.assertEqual(response.data['page_size'], 20)
+        self.assertEqual(response.data['results'], [])
+
+    def test_shop_products_uncategorized_and_no_thumbnail(self):
+        response = self.client.get(reverse('shop-product-list'), {'q': 'water'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        item = response.data['results'][0]
+        self.assertIsNone(item['category'])
+        self.assertIsNone(item['thumbnail_url'])
 
     def test_shop_products_pagination_shape(self):
         response = self.client.get(reverse('shop-product-list'), {'page': 1, 'page_size': 20})
@@ -13781,3 +13823,13 @@ class ShopAPITestCase(APITestCase):
         self.assertIn('page', response.data)
         self.assertIn('page_size', response.data)
         self.assertIn('results', response.data)
+
+    def test_shop_products_page_size_over_max_limited(self):
+        response = self.client.get(reverse('shop-product-list'), {'page': 1, 'page_size': 9999})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['page_size'], 100)
+
+    def test_shop_products_invalid_page_falls_back_to_page_one(self):
+        response = self.client.get(reverse('shop-product-list'), {'page': 'abc', 'page_size': 20})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['page'], 1)
