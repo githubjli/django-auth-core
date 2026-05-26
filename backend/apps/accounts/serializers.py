@@ -22,12 +22,14 @@ from apps.accounts.models import (
     LiveStreamProduct,
     PaymentOrder,
     Product,
+    ProductCategory,
     ProductOrder,
     ProductRefundRequest,
     ProductShipment,
     SellerPayoutAddress,
     SellerStore,
     SellerPayout,
+    ShopBanner,
     StreamPaymentMethod,
     UserShippingAddress,
     Video,
@@ -937,6 +939,7 @@ class SellerStoreSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     store_id = serializers.IntegerField(source='store.id', read_only=True)
+    category_id = serializers.IntegerField(source='category.id', read_only=True, allow_null=True)
     cover_image_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -946,6 +949,8 @@ class ProductSerializer(serializers.ModelSerializer):
             'store_id',
             'title',
             'slug',
+            'category',
+            'category_id',
             'description',
             'cover_image',
             'cover_image_url',
@@ -959,6 +964,7 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'id',
             'store_id',
+            'category_id',
             'created_at',
             'updated_at',
         )
@@ -970,6 +976,53 @@ class ProductSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.cover_image.url
         return request.build_absolute_uri(obj.cover_image.url)
+
+
+class ShopBannerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShopBanner
+        fields = ('id', 'image_url', 'title', 'subtitle', 'target_url')
+        read_only_fields = fields
+
+
+class ProductCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductCategory
+        fields = ('id', 'name', 'slug')
+        read_only_fields = fields
+
+
+class ShopProductListSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(source='title', read_only=True)
+    price = serializers.DecimalField(source='price_amount', max_digits=12, decimal_places=2, read_only=True)
+    original_price = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    badge = serializers.SerializerMethodField()
+    category = ProductCategorySerializer(read_only=True)
+    sold_count = serializers.SerializerMethodField()
+    stock = serializers.IntegerField(source='stock_quantity', read_only=True)
+
+    class Meta:
+        model = Product
+        fields = ('id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge', 'category', 'sold_count', 'stock')
+        read_only_fields = fields
+
+    def get_original_price(self, obj):
+        return None
+
+    def get_thumbnail_url(self, obj):
+        request = self.context.get('request')
+        if not obj.cover_image:
+            return None
+        if request is None:
+            return obj.cover_image.url
+        return request.build_absolute_uri(obj.cover_image.url)
+
+    def get_badge(self, obj):
+        return None
+
+    def get_sold_count(self, obj):
+        return 0
 
 
 class LiveStreamProductListingSerializer(serializers.ModelSerializer):

@@ -40,7 +40,9 @@ from apps.accounts.models import (
     PaymentOrder,
     StreamPaymentMethod,
     Product,
+    ProductCategory,
     SellerStore,
+    ShopBanner,
     User,
     UserMembership,
     Video,
@@ -539,11 +541,29 @@ class ProductAdmin(admin.ModelAdmin):
         'created_at',
         'updated_at',
     )
-    list_filter = ('status', 'price_currency', 'created_at')
+    list_filter = ('status', 'price_currency', 'category', 'created_at')
     search_fields = ('title', 'slug', 'store__name', 'store__slug', 'store__owner__email')
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
-    autocomplete_fields = ('store',)
+    autocomplete_fields = ('store', 'category')
+
+
+@admin.register(ProductCategory)
+class ProductCategoryAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'slug', 'is_active', 'sort_order', 'created_at', 'updated_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('name', 'slug')
+    ordering = ('sort_order', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ShopBanner)
+class ShopBannerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'title', 'is_active', 'sort_order', 'target_url', 'created_at', 'updated_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('title', 'subtitle', 'target_url')
+    ordering = ('sort_order', '-id')
+    readonly_fields = ('created_at', 'updated_at')
 
 
 @admin.register(LiveStreamProduct)
