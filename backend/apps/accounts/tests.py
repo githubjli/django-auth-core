@@ -42,9 +42,15 @@ from apps.accounts.models import (
     ProductRefundRequest,
     ProductShipment,
     Product,
+    ProductCategory,
     SellerPayout,
+    SavedProduct,
+    PlatformAssetLedger,
     SellerPayoutAddress,
     SellerStore,
+    ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     StreamPaymentMethod,
     UserMembership,
     UserShippingAddress,
@@ -13709,3 +13715,438 @@ class UnifiedContentMappingTestCase(APITestCase):
         self.assertIsNone(payload['view_count'])
         self.assertIsNone(payload['like_count'])
         self.assertIsNone(payload['comment_count'])
+
+
+class ShopAPITestCase(APITestCase):
+    def setUp(self):
+        self.seller = User.objects.create_user(email='shop-seller@example.com', password='password123')
+        self.store = SellerStore.objects.create(owner=self.seller, name='Shop', slug='shop-store', is_active=True)
+        self.category_food = ProductCategory.objects.create(name='Food', slug='food', is_active=True, sort_order=2)
+        ProductCategory.objects.create(name='Hidden', slug='hidden', is_active=False, sort_order=1)
+        self.active_product = Product.objects.create(
+            store=self.store,
+            category=self.category_food,
+            title='Apple Juice',
+            slug='apple-juice',
+            description='Fresh fruit drink',
+            price_amount='12.00',
+            price_currency='USD',
+            meow_points_price='20.00',
+            meow_credit_price='2.00',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        Product.objects.create(
+            store=self.store,
+            category=self.category_food,
+            title='Draft Product',
+            slug='draft-product',
+            price_amount='9.00',
+            price_currency='USD',
+            stock_quantity=5,
+            status=Product.STATUS_DRAFT,
+        )
+        self.uncategorized_product = Product.objects.create(
+            store=self.store,
+            category=None,
+            title='Water Bottle',
+            slug='water-bottle',
+            description='No category item',
+            price_amount='8.50',
+            price_currency='USD',
+            meow_points_price=None,
+            meow_credit_price=None,
+            stock_quantity=12,
+            status=Product.STATUS_ACTIVE,
+        )
+        ShopBanner.objects.create(title='Visible', subtitle='S1', image_url='https://example.com/a.jpg', target_url='https://example.com', is_active=True, sort_order=1)
+        ShopBanner.objects.create(title='Hidden', subtitle='S2', image_url='https://example.com/b.jpg', is_active=False, sort_order=0)
+
+    def test_shop_banners_only_active(self):
+        response = self.client.get(reverse('shop-banner-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['title'], 'Visible')
+
+    def test_shop_categories_only_active(self):
+        response = self.client.get(reverse('shop-category-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slugs = [row['slug'] for row in response.data]
+        self.assertIn('all', slugs)
+        self.assertIn('food', slugs)
+        self.assertNotIn('hidden', slugs)
+
+    def test_shop_products_only_active(self):
+        response = self.client.get(reverse('shop-product-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+        first = response.data['results'][0]
+        required_fields = {
+            'id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge', 'category',
+            'sold_count', 'stock', 'description', 'images', 'specs', 'meow_points_price', 'meow_credit_price'
+        }
+        self.assertEqual(set(first.keys()), required_fields)
+        self.assertIsInstance(first['price'], str)
+        self.assertTrue(isinstance(first['meow_points_price'], str) or first['meow_points_price'] is None)
+        self.assertTrue(isinstance(first['meow_credit_price'], str) or first['meow_credit_price'] is None)
+        self.assertEqual(first['images'], [])
+        self.assertEqual(first['specs'], [])
+
+    def test_shop_product_detail_shape(self):
+        response = self.client.get(reverse('shop-product-detail', args=[self.active_product.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('meow_points_price', response.data)
+        self.assertIn('meow_credit_price', response.data)
+        self.assertEqual(response.data['images'], [])
+        self.assertEqual(response.data['specs'], [])
+
+    def test_shop_product_price_null_when_missing(self):
+        response = self.client.get(reverse('shop-product-detail', args=[self.uncategorized_product.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['meow_points_price'])
+        self.assertIsNone(response.data['meow_credit_price'])
+
+    def test_shop_products_filter_by_category(self):
+        response = self.client.get(reverse('shop-product-list'), {'category': 'food'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['category']['slug'], 'food')
+
+    def test_shop_products_category_all_no_filter(self):
+        response = self.client.get(reverse('shop-product-list'), {'category': 'all'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_shop_products_search_q(self):
+        response = self.client.get(reverse('shop-product-list'), {'q': 'fruit'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_shop_products_search_q_no_match_returns_empty(self):
+        response = self.client.get(reverse('shop-product-list'), {'q': 'no-match-keyword'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+        self.assertEqual(response.data['results'], [])
+
+    def test_shop_products_empty_results_shape(self):
+        Product.objects.filter(status=Product.STATUS_ACTIVE).update(status=Product.STATUS_INACTIVE)
+        response = self.client.get(reverse('shop-product-list'), {'page': 1, 'page_size': 20})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+        self.assertEqual(response.data['page'], 1)
+        self.assertEqual(response.data['page_size'], 20)
+        self.assertEqual(response.data['results'], [])
+
+    def test_shop_products_uncategorized_and_no_thumbnail(self):
+        response = self.client.get(reverse('shop-product-list'), {'q': 'water'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        item = response.data['results'][0]
+        self.assertIsNone(item['category'])
+        self.assertIsNone(item['thumbnail_url'])
+
+    def test_shop_products_pagination_shape(self):
+        response = self.client.get(reverse('shop-product-list'), {'page': 1, 'page_size': 20})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('count', response.data)
+        self.assertIn('page', response.data)
+        self.assertIn('page_size', response.data)
+        self.assertIn('results', response.data)
+
+    def test_shop_products_page_size_over_max_limited(self):
+        response = self.client.get(reverse('shop-product-list'), {'page': 1, 'page_size': 9999})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['page_size'], 100)
+
+    def test_shop_products_invalid_page_falls_back_to_page_one(self):
+        response = self.client.get(reverse('shop-product-list'), {'page': 'abc', 'page_size': 20})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['page'], 1)
+
+class PlatformAssetTradeAPITestCase(APITestCase):
+    def setUp(self):
+        self.buyer = User.objects.create_user(email='asset-buyer@example.com', password='pw123456')
+        self.seller = User.objects.create_user(email='asset-seller@example.com', password='pw123456')
+        self.store = SellerStore.objects.create(owner=self.seller, name='Asset Store', slug='asset-store', is_active=True)
+        self.product = Product.objects.create(
+            store=self.store,
+            title='Asset Product',
+            slug='asset-product',
+            price_amount='10.00',
+            price_currency='USD',
+            meow_points_price='15.00',
+            meow_credit_price='12.00',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        self.addr = UserShippingAddress.objects.create(user=self.buyer, receiver_name='B', country='TH', street_address='x')
+        UserAssetBalance.objects.create(user=self.buyer, asset_type='meow_credit', balance='100.00')
+        UserAssetBalance.objects.create(user=self.buyer, asset_type='meow_points', balance='100.00')
+        self.admin = User.objects.create_user(email='asset-admin@example.com', password='pw123456', is_staff=True, is_superuser=True)
+
+    def _auth(self, user):
+        self.client.force_authenticate(user=user)
+
+    def test_meow_credit_order_success(self):
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 2, 'shipping_address_id': None, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
+        order = ProductOrder.objects.get(order_no=r.data['order_no'])
+        self.assertEqual(order.payment_asset, 'meow_credit')
+        self.assertEqual(order.total_amount_snapshot, Decimal('24.00'))
+        self.assertEqual(order.shipping_address_snapshot, {})
+        self.assertIsInstance(r.data['unit_price_snapshot'], str)
+        self.assertIsInstance(r.data['total_amount_snapshot'], str)
+        self.assertIsInstance(r.data['platform_fee_amount'], str)
+        self.assertIsInstance(r.data['seller_receivable_amount'], str)
+        self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
+        self.assertIsNone(r.data['pay_to_address'])
+        self.assertIsNone(r.data['qr_payload'])
+        self.assertIsNone(r.data['payment_uri'])
+        self.assertIn('product_name_snapshot', r.data)
+        self.assertEqual(r.data['product_name_snapshot'], 'Asset Product')
+        self.assertIn('product_snapshot', r.data)
+        self.assertEqual(r.data['product_snapshot']['name'], 'Asset Product')
+        self.assertIn('product_thumbnail_snapshot', r.data)
+
+    def test_meow_points_order_success_paid(self):
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': None, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
+        bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
+        self.assertEqual(bal.balance, Decimal('76.00'))
+        self.assertTrue(UserAssetTransaction.objects.filter(user=self.buyer, biz_type='product_order', order_no=order.order_no).exists())
+
+    def test_insufficient_balance_fail_no_stock_deduction(self):
+        bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
+        bal.balance = Decimal('1.00'); bal.save(update_fields=['balance'])
+        old_stock = self.product.stock_quantity
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock_quantity, old_stock)
+
+    def test_unsupported_asset_price_fail(self):
+        self.product.meow_points_price = None
+        self.product.save(update_fields=['meow_points_price'])
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 400)
+
+    def test_shipping_confirm_and_settlement(self):
+        self._auth(self.buyer)
+        create = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_points'}, format='json')
+        order_no = create.data['order_no']
+        self.client.force_authenticate(user=self.seller)
+        ship = self.client.post(reverse('seller-product-order-ship', args=[order_no]), {'carrier': 'TH', 'tracking_number': 'TNX'}, format='json')
+        self.assertEqual(ship.status_code, 200)
+        self.client.force_authenticate(user=self.buyer)
+        recv = self.client.post(reverse('product-order-confirm-received', args=[order_no]), format='json')
+        self.assertEqual(recv.status_code, 200)
+        order = ProductOrder.objects.get(order_no=order_no)
+        self.assertEqual(order.status, ProductOrder.STATUS_COMPLETED)
+        payout = SellerPayout.objects.get(product_order=order)
+        self.assertEqual(payout.status, SellerPayout.STATUS_PENDING)
+        self.client.force_authenticate(user=self.admin)
+        settled = self.client.post(reverse('admin-product-order-mark-settled', args=[order_no]), {'txid': ''}, format='json')
+        self.assertEqual(settled.status_code, 200)
+        order.refresh_from_db(); payout.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_SETTLED)
+        self.assertEqual(payout.status, SellerPayout.STATUS_PAID)
+        seller_bal = UserAssetBalance.objects.get(user=self.seller, asset_type='meow_points')
+        self.assertGreater(seller_bal.balance, Decimal('0'))
+        self.assertTrue(PlatformAssetLedger.objects.filter(order_no=order_no).exists())
+
+    def test_refund_mark_refunded_idempotent_and_settled_forbidden(self):
+        self._auth(self.buyer)
+        create = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_credit'}, format='json')
+        order_no = create.data['order_no']
+        req = self.client.post(reverse('product-order-refund-requests', args=[order_no]), {'reason': 'r'}, format='json')
+        refund_id = req.data['id']
+        bal_before = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
+        self.client.force_authenticate(user=self.admin)
+        m1 = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'admin_note': 'ok'}, format='json')
+        self.assertEqual(m1.status_code, 200)
+        m2 = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'admin_note': 'ok'}, format='json')
+        self.assertEqual(m2.status_code, 200)
+        bal_after = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
+        self.assertEqual(bal_after - bal_before, Decimal('12.00'))
+
+    def test_order_list_contains_required_product_snapshot_fields(self):
+        self._auth(self.buyer)
+        create = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 2, 'shipping_address_id': None, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(create.status_code, 201)
+        listed = self.client.get(reverse('product-order-list-create'))
+        self.assertEqual(listed.status_code, 200)
+        row = listed.data[0]
+        self.assertIn('product_name_snapshot', row)
+        self.assertEqual(row['product_name_snapshot'], 'Asset Product')
+        self.assertIn('product_snapshot', row)
+        self.assertEqual(row['product_snapshot']['name'], 'Asset Product')
+        self.assertIn('product_thumbnail_snapshot', row)
+        self.assertIsInstance(row['total_amount_snapshot'], str)
+        self.assertEqual(row['total_amount_snapshot'], '24.00')
+
+class CartSavedProductAPITestCase(APITestCase):
+    def setUp(self):
+        self.user_a = User.objects.create_user(email='cart-a@example.com', password='pw123456')
+        self.user_b = User.objects.create_user(email='cart-b@example.com', password='pw123456')
+        self.seller = User.objects.create_user(email='cart-seller@example.com', password='pw123456')
+        self.store = SellerStore.objects.create(owner=self.seller, name='Cart Store', slug='cart-store', is_active=True)
+        self.product_active = Product.objects.create(
+            store=self.store,
+            title='Cart Product',
+            slug='cart-product',
+            price_amount='10.00',
+            price_currency='USD',
+            meow_points_price='10.00',
+            meow_credit_price='5.00',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        self.product_inactive = Product.objects.create(
+            store=self.store,
+            title='Inactive Product',
+            slug='inactive-product',
+            price_amount='10.00',
+            price_currency='USD',
+            stock_quantity=10,
+            status=Product.STATUS_INACTIVE,
+        )
+
+    def test_unauth_items_requires_auth(self):
+        response = self.client.get(reverse('cart-item-list-create'))
+        self.assertIn(response.status_code, [401, 403])
+
+    def test_add_saved_product_and_idempotent(self):
+        self.client.force_authenticate(user=self.user_a)
+        first = self.client.post(reverse('cart-item-list-create'), {'product_id': self.product_active.id}, format='json')
+        self.assertEqual(first.status_code, 201)
+        second = self.client.post(reverse('cart-item-list-create'), {'product_id': self.product_active.id}, format='json')
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(SavedProduct.objects.filter(user=self.user_a, product=self.product_active).count(), 1)
+
+    def test_user_cannot_delete_other_users_saved(self):
+        saved = SavedProduct.objects.create(user=self.user_b, product=self.product_active)
+        self.client.force_authenticate(user=self.user_a)
+        resp = self.client.delete(reverse('cart-item-delete', args=[saved.id]))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_count_and_list_filter_inactive_product_and_store(self):
+        SavedProduct.objects.create(user=self.user_a, product=self.product_active)
+        SavedProduct.objects.create(user=self.user_a, product=self.product_inactive)
+        self.client.force_authenticate(user=self.user_a)
+        list_resp = self.client.get(reverse('cart-item-list-create'))
+        self.assertEqual(list_resp.status_code, 200)
+        self.assertEqual(list_resp.data['count'], 1)
+        count_resp = self.client.get(reverse('cart-count'))
+        self.assertEqual(count_resp.status_code, 200)
+        self.assertEqual(count_resp.data['count'], 1)
+
+        self.store.is_active = False
+        self.store.save(update_fields=['is_active'])
+        list_resp2 = self.client.get(reverse('cart-item-list-create'))
+        self.assertEqual(list_resp2.data['count'], 0)
+        count_resp2 = self.client.get(reverse('cart-count'))
+        self.assertEqual(count_resp2.data['count'], 0)
+
+    def test_delete_saved_product_success_and_count_decrease(self):
+        saved = SavedProduct.objects.create(user=self.user_a, product=self.product_active)
+        self.client.force_authenticate(user=self.user_a)
+        c1 = self.client.get(reverse('cart-count'))
+        self.assertEqual(c1.data['count'], 1)
+        delete_resp = self.client.delete(reverse('cart-item-delete', args=[saved.id]))
+        self.assertEqual(delete_resp.status_code, 204)
+        c2 = self.client.get(reverse('cart-count'))
+        self.assertEqual(c2.data['count'], 0)
+
+class MobileShippingAddressAPITestCase(APITestCase):
+    def setUp(self):
+        self.user_a = User.objects.create_user(email='ship-a@example.com', password='pw123456')
+        self.user_b = User.objects.create_user(email='ship-b@example.com', password='pw123456')
+        self.seller = User.objects.create_user(email='ship-seller@example.com', password='pw123456')
+        self.store = SellerStore.objects.create(owner=self.seller, name='Ship Store', slug='ship-store', is_active=True)
+        self.product = Product.objects.create(
+            store=self.store,
+            title='Ship Product',
+            slug='ship-product',
+            price_amount='10.00',
+            price_currency='USD',
+            meow_points_price='10.00',
+            meow_credit_price='5.00',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        UserAssetBalance.objects.create(user=self.user_a, asset_type='meow_points', balance='100.00')
+
+    def _payload(self, is_default=True):
+        return {
+            'receiver_name': 'Jenny',
+            'phone': '123456789',
+            'country': 'Singapore',
+            'state': '',
+            'city': 'Singapore',
+            'district': '',
+            'address_line1': 'xxx street',
+            'address_line2': '',
+            'postal_code': '123456',
+            'is_default': is_default,
+        }
+
+    def test_create_address_success(self):
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.post(reverse('shipping-address-list-create'), self._payload(), format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['receiver_name'], 'Jenny')
+
+    def test_list_only_own_addresses(self):
+        UserShippingAddress.objects.create(user=self.user_a, receiver_name='A', country='SG', street_address='a1')
+        UserShippingAddress.objects.create(user=self.user_b, receiver_name='B', country='SG', street_address='b1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.get(reverse('shipping-address-list-create'))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data), 1)
+
+    def test_cannot_patch_other_user_address(self):
+        other = UserShippingAddress.objects.create(user=self.user_b, receiver_name='B', country='SG', street_address='b1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.patch(reverse('shipping-address-detail', args=[other.id]), {'receiver_name': 'X'}, format='json')
+        self.assertEqual(r.status_code, 404)
+
+    def test_cannot_delete_other_user_address(self):
+        other = UserShippingAddress.objects.create(user=self.user_b, receiver_name='B', country='SG', street_address='b1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.delete(reverse('shipping-address-detail', args=[other.id]))
+        self.assertEqual(r.status_code, 404)
+
+    def test_default_address_mutual_exclusive(self):
+        self.client.force_authenticate(user=self.user_a)
+        first = self.client.post(reverse('shipping-address-list-create'), self._payload(is_default=True), format='json')
+        second_payload = self._payload(is_default=True)
+        second_payload['receiver_name'] = 'Jenny2'
+        second = self.client.post(reverse('shipping-address-list-create'), second_payload, format='json')
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(UserShippingAddress.objects.filter(user=self.user_a, is_default=True).count(), 1)
+
+    def test_delete_address_success(self):
+        addr = UserShippingAddress.objects.create(user=self.user_a, receiver_name='A', country='SG', street_address='a1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.delete(reverse('shipping-address-detail', args=[addr.id]))
+        self.assertEqual(r.status_code, 204)
+
+    def test_product_order_can_use_shipping_address_id(self):
+        addr = UserShippingAddress.objects.create(user=self.user_a, receiver_name='A', country='SG', street_address='a1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.post(reverse('product-order-list-create'), {
+            'product_id': self.product.id,
+            'quantity': 1,
+            'payment_asset': 'meow_points',
+            'shipping_address_id': addr.id,
+        }, format='json')
+        self.assertEqual(r.status_code, 201)
+        order = ProductOrder.objects.get(order_no=r.data['order_no'])
+        self.assertEqual(order.shipping_address_snapshot.get('street_address'), 'a1')
