@@ -1865,6 +1865,7 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
 
 class MembershipPlanSerializer(serializers.ModelSerializer):
     settlement = serializers.SerializerMethodField()
+    supported_payment_assets = serializers.SerializerMethodField()
 
     class Meta:
         model = MembershipPlan
@@ -1874,6 +1875,7 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'name',
             'description',
             'price_lbc',
+            'supported_payment_assets',
             'settlement',
             'duration_days',
             'is_active',
@@ -1888,6 +1890,13 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'token_symbol': TOKEN_SYMBOL,
             'token_peg': TOKEN_PEG,
         }
+
+    def get_supported_payment_assets(self, obj):
+        return [
+            PaymentOrder.PAYMENT_ASSET_THB_LTT,
+            PaymentOrder.PAYMENT_ASSET_MEOW_POINTS,
+            PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT,
+        ]
 
 
 class ManualMembershipTxHintSubmitSerializer(serializers.Serializer):
@@ -1935,6 +1944,11 @@ class MembershipOrderCreateSerializer(serializers.Serializer):
     # Phase 2A/2B contract intentionally uses plan_code (stable business key),
     # not plan_id, to reduce client coupling to internal DB identifiers.
     plan_code = serializers.ChoiceField(choices=MembershipPlan.CODE_CHOICES)
+    payment_asset = serializers.ChoiceField(
+        choices=PaymentOrder.PAYMENT_ASSET_CHOICES,
+        required=False,
+        default=PaymentOrder.PAYMENT_ASSET_THB_LTT,
+    )
 
     def validate(self, attrs):
         plan = MembershipPlan.objects.filter(code=attrs['plan_code'], is_active=True).first()
@@ -1946,17 +1960,31 @@ class MembershipOrderCreateSerializer(serializers.Serializer):
 
 class MembershipOrderSerializer(serializers.ModelSerializer):
     plan = serializers.SerializerMethodField()
-    qr_text = serializers.CharField(source='pay_to_address', read_only=True)
+    pay_to_address = serializers.SerializerMethodField()
+    qr_text = serializers.SerializerMethodField()
     settlement = serializers.SerializerMethodField()
+    plan_code = serializers.CharField(source='plan_code_snapshot', read_only=True)
+    plan_name = serializers.CharField(source='plan_name_snapshot', read_only=True)
+    payment_method = serializers.CharField(source='payment_method_code', read_only=True)
+    qr_payload = serializers.SerializerMethodField()
+    payment_uri = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentOrder
         fields = (
             'order_no',
+            'plan_code',
+            'plan_name',
             'plan',
+            'payment_method',
+            'payment_asset',
+            'amount_snapshot',
+            'paid_amount',
             'expected_amount_lbc',
             'settlement',
             'pay_to_address',
+            'qr_payload',
+            'payment_uri',
             'qr_text',
             'status',
             'expires_at',
@@ -1980,6 +2008,26 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
             'token_symbol': TOKEN_SYMBOL,
             'token_peg': TOKEN_PEG,
         }
+
+    def get_pay_to_address(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
+        return obj.pay_to_address or None
+
+    def get_qr_text(self, obj):
+        return self.get_pay_to_address(obj)
+
+    def get_qr_payload(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
+        return obj.pay_to_address or None
+
+    def get_payment_uri(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
+        if not obj.pay_to_address or not obj.expected_amount_lbc:
+            return None
+        return f"{TOKEN_SYMBOL.lower()}:{obj.pay_to_address}?amount={obj.expected_amount_lbc}"
 
 
 class MembershipOrderTxHintSerializer(serializers.Serializer):

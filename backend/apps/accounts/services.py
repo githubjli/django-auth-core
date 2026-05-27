@@ -903,6 +903,19 @@ class MembershipOrderService:
     def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
         self.daemon_client = daemon_client or self.daemon_client_class()
 
+    def create_order_with_payment_asset(self, *, user, plan: MembershipPlan, payment_asset: str) -> tuple[PaymentOrder, bool]:
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_THB_LTT:
+            order, reused = self.create_order(user=user, plan=plan)
+            if order.payment_method_code != PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN or order.payment_asset != PaymentOrder.PAYMENT_ASSET_THB_LTT:
+                order.payment_method_code = PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN
+                order.payment_asset = PaymentOrder.PAYMENT_ASSET_THB_LTT
+                order.amount_snapshot = plan.price_lbc
+                order.save(update_fields=['payment_method_code', 'payment_asset', 'amount_snapshot', 'updated_at'])
+            return order, reused
+        if payment_asset in {PaymentOrder.PAYMENT_ASSET_MEOW_POINTS, PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT}:
+            return self.create_platform_asset_order(user=user, plan=plan, payment_asset=payment_asset)
+        raise LbryDaemonInvalidParamsError('Unsupported payment asset.')
+
     @transaction.atomic
     def create_order(self, *, user, plan: MembershipPlan) -> tuple[PaymentOrder, bool]:
         now = timezone.now()
@@ -940,6 +953,9 @@ class MembershipOrderService:
                 expires_at=timezone.now() + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES),
                 amount='0.00',
                 currency=TOKEN_SYMBOL,
+                payment_method_code=PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN,
+                payment_asset=PaymentOrder.PAYMENT_ASSET_THB_LTT,
+                amount_snapshot=plan.price_lbc,
             )
 
             platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
@@ -1008,6 +1024,74 @@ class MembershipOrderService:
                 True,
             )
             raise MembershipOrderPersistenceError('Failed to persist membership order/address assignment.') from exc
+
+    @transaction.atomic
+    def create_platform_asset_order(self, *, user, plan: MembershipPlan, payment_asset: str) -> tuple[PaymentOrder, bool]:
+        now = timezone.now()
+        active_membership = UserMembership.objects.filter(
+            user=user,
+            status=UserMembership.STATUS_ACTIVE,
+            ends_at__gt=now,
+        ).select_related('plan').order_by('-ends_at', '-id').first()
+        if active_membership is not None:
+            raise ActiveMembershipExistsError(active_membership)
+
+        rate_map = getattr(settings, 'MEMBERSHIP_PAYMENT_ASSET_RATES', {}) or {}
+        rate = Decimal(str(rate_map.get(payment_asset, '1')))
+        amount_snapshot = Decimal(str(plan.price_lbc))
+        paid_amount = amount_snapshot * rate
+
+        balance = UserAssetBalance.objects.select_for_update().filter(user=user, asset_type=payment_asset).first()
+        if balance is None or balance.balance < paid_amount:
+            raise LbryDaemonInvalidParamsError(
+                f"Insufficient {'MeowPoints' if payment_asset == UserAssetBalance.ASSET_MEOW_POINTS else 'MeowCredit'} balance."
+            )
+        before = balance.balance
+        after = before - paid_amount
+        if after < 0:
+            raise LbryDaemonInvalidParamsError('Insufficient balance.')
+        balance.balance = after
+        balance.save(update_fields=['balance', 'updated_at'])
+
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=None,
+            actual_amount_lbc=paid_amount,
+            status=PaymentOrder.STATUS_PAID,
+            paid_at=now,
+            order_no=self._generate_order_no(),
+            amount=paid_amount,
+            amount_snapshot=amount_snapshot,
+            paid_amount=paid_amount,
+            currency=payment_asset,
+            payment_method_code=PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET,
+            payment_asset=payment_asset,
+            expires_at=None,
+            pay_to_address='',
+            txid='',
+            confirmations=0,
+        )
+        tx = UserAssetTransaction.objects.create(
+            user=user,
+            asset_type=payment_asset,
+            direction=UserAssetTransaction.DIRECTION_DEBIT,
+            amount=paid_amount,
+            balance_before=before,
+            balance_after=after,
+            biz_type=UserAssetTransaction.BIZ_MEMBERSHIP_ORDER,
+            biz_id=order.id,
+            order_no=order.order_no,
+            note=f'Membership order {order.order_no}',
+        )
+        order.asset_transaction = tx
+        order.save(update_fields=['asset_transaction', 'updated_at'])
+        MembershipActivationService().activate_for_order(order=order)
+        return order, False
 
     def _generate_order_no(self) -> str:
         for _ in range(8):

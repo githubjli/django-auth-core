@@ -1307,11 +1307,13 @@ class UserAssetTransaction(models.Model):
     BIZ_PRODUCT_REFUND = 'product_refund'
     BIZ_SELLER_PAYOUT = 'seller_payout'
     BIZ_PLATFORM_FEE = 'platform_fee'
+    BIZ_MEMBERSHIP_ORDER = 'membership_order'
     BIZ_CHOICES = [
         (BIZ_PRODUCT_ORDER, 'Product Order'),
         (BIZ_PRODUCT_REFUND, 'Product Refund'),
         (BIZ_SELLER_PAYOUT, 'Seller Payout'),
         (BIZ_PLATFORM_FEE, 'Platform Fee'),
+        (BIZ_MEMBERSHIP_ORDER, 'Membership Order'),
     ]
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='asset_transactions')
     asset_type = models.CharField(max_length=24, choices=UserAssetBalance.ASSET_CHOICES)
@@ -1344,6 +1346,20 @@ class PlatformAssetLedger(models.Model):
 
 
 class PaymentOrder(models.Model):
+    PAYMENT_METHOD_BLOCKCHAIN = 'blockchain'
+    PAYMENT_METHOD_PLATFORM_ASSET = 'platform_asset'
+    PAYMENT_METHOD_CHOICES = [
+        (PAYMENT_METHOD_BLOCKCHAIN, 'Blockchain'),
+        (PAYMENT_METHOD_PLATFORM_ASSET, 'Platform Asset'),
+    ]
+    PAYMENT_ASSET_THB_LTT = 'thb_ltt'
+    PAYMENT_ASSET_MEOW_POINTS = 'meow_points'
+    PAYMENT_ASSET_MEOW_CREDIT = 'meow_credit'
+    PAYMENT_ASSET_CHOICES = [
+        (PAYMENT_ASSET_THB_LTT, 'THB-LTT'),
+        (PAYMENT_ASSET_MEOW_POINTS, 'Meow Points'),
+        (PAYMENT_ASSET_MEOW_CREDIT, 'Meow Credit'),
+    ]
     TYPE_TIP = 'tip'
     TYPE_PRODUCT = 'product'
     TYPE_PAID_PROGRAM = 'paid_program'
@@ -1406,7 +1422,18 @@ class PaymentOrder(models.Model):
     )
     order_type = models.CharField(max_length=24, choices=ORDER_TYPE_CHOICES)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount_snapshot = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
+    paid_amount = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
     currency = models.CharField(max_length=10, default='USD')
+    payment_method_code = models.CharField(max_length=24, choices=PAYMENT_METHOD_CHOICES, default=PAYMENT_METHOD_BLOCKCHAIN)
+    payment_asset = models.CharField(max_length=24, choices=PAYMENT_ASSET_CHOICES, default=PAYMENT_ASSET_THB_LTT)
+    asset_transaction = models.ForeignKey(
+        'UserAssetTransaction',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='membership_payment_orders',
+    )
     status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING)
     client_request_id = models.CharField(max_length=128, blank=True, default='')
     external_reference = models.CharField(max_length=255, blank=True)

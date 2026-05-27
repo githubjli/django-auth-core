@@ -14295,3 +14295,60 @@ class VideoRecommendationsAPITestCase(APITestCase):
         self.assertIn('view_count', item)
         self.assertIn('like_count', item)
         self.assertIn('created_at', item)
+
+
+class MembershipPaymentAssetAPITestCase(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email='member-asset@example.com', password='pw123456')
+        self.plan = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_MONTHLY,
+            name='Monthly',
+            description='Monthly',
+            price_lbc=Decimal('100.00000000'),
+            duration_days=30,
+            is_active=True,
+        )
+        self.client.force_authenticate(self.user)
+
+    def test_plans_include_supported_payment_assets(self):
+        r = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('supported_payment_assets', r.data[0])
+
+    def test_default_payment_asset_thb_ltt(self):
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
+        self.assertIn(r.status_code, [200, 201])
+        self.assertEqual(r.data['payment_asset'], 'thb_ltt')
+        self.assertEqual(r.data['payment_method'], 'blockchain')
+
+    def test_meow_credit_success_and_balance_debit(self):
+        UserAssetBalance.objects.create(user=self.user, asset_type='meow_credit', balance=Decimal('120.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['status'], 'paid')
+        self.assertEqual(r.data['payment_method'], 'platform_asset')
+        self.assertIsNone(r.data['pay_to_address'])
+        bal = UserAssetBalance.objects.get(user=self.user, asset_type='meow_credit')
+        self.assertEqual(bal.balance, Decimal('20.00'))
+        self.assertTrue(UserAssetTransaction.objects.filter(order_no=r.data['order_no'], biz_type='membership_order').exists())
+
+    def test_meow_points_insufficient_balance(self):
+        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('20.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('Insufficient', r.data['detail'])
+
+    def test_membership_me_active_after_platform_asset_paid(self):
+        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('120.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        me = self.client.get(reverse('membership-me'))
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.data['status'], 'active')
+
+    def test_platform_asset_tx_hint_not_supported(self):
+        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('120.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        hint = self.client.post(reverse('membership-order-tx-hint', args=[r.data['order_no']]), {'txid': 'abc'}, format='json')
+        self.assertEqual(hint.status_code, 400)

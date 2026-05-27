@@ -2859,6 +2859,9 @@ class ManualMembershipPaymentInfoAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        payment_asset = (request.query_params.get('payment_asset') or PaymentOrder.PAYMENT_ASSET_THB_LTT).strip()
+        if payment_asset != PaymentOrder.PAYMENT_ASSET_THB_LTT:
+            return Response({'detail': 'manual flow only supports thb_ltt.'}, status=status.HTTP_400_BAD_REQUEST)
         plan_code = (request.query_params.get('plan_code') or '').strip()
         if not plan_code:
             return Response({'plan_code': ['This query parameter is required.']}, status=status.HTTP_400_BAD_REQUEST)
@@ -2907,6 +2910,9 @@ class ManualMembershipTxHintListAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
+        payment_asset = (request.data.get('payment_asset') or PaymentOrder.PAYMENT_ASSET_THB_LTT).strip()
+        if payment_asset != PaymentOrder.PAYMENT_ASSET_THB_LTT:
+            return Response({'detail': 'manual tx-hint only supports thb_ltt.'}, status=status.HTTP_400_BAD_REQUEST)
         serializer = ManualMembershipTxHintSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         plan = generics.get_object_or_404(
@@ -3208,9 +3214,10 @@ class MembershipOrderCreateAPIView(APIView):
         serializer = MembershipOrderCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         plan = serializer.validated_data['plan']
+        payment_asset = serializer.validated_data.get('payment_asset', PaymentOrder.PAYMENT_ASSET_THB_LTT)
         service = MembershipOrderService()
         try:
-            order, reused = service.create_order(user=request.user, plan=plan)
+            order, reused = service.create_order_with_payment_asset(user=request.user, plan=plan, payment_asset=payment_asset)
         except ActiveMembershipExistsError as exc:
             membership = exc.membership
             payload = {
@@ -3231,6 +3238,9 @@ class MembershipOrderCreateAPIView(APIView):
             logger.exception('membership_order_create daemon_connection_error user_id=%s', request.user.id)
             return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except LbryDaemonInvalidParamsError as exc:
+            detail = str(exc) or 'Invalid membership payment parameters.'
+            if payment_asset in {PaymentOrder.PAYMENT_ASSET_MEOW_POINTS, PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT}:
+                return Response({'detail': detail}, status=status.HTTP_400_BAD_REQUEST)
             logger.exception('membership_order_create daemon_invalid_params user_id=%s', request.user.id)
             return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except LbryDaemonRpcError as exc:
@@ -3282,6 +3292,8 @@ class MembershipOrderTxHintAPIView(APIView):
         )
         serializer = MembershipOrderTxHintSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        if order.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return Response({'detail': 'tx-hint is not supported for platform asset orders.'}, status=status.HTTP_400_BAD_REQUEST)
 
         hint_txid = serializer.validated_data['txid']
         if order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
@@ -3310,6 +3322,8 @@ class MembershipOrderVerifyNowAPIView(APIView):
             order_no=order_no,
         )
         try:
+            if order.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+                return Response({'detail': 'verify-now is not supported for platform asset orders.'}, status=status.HTTP_400_BAD_REQUEST)
             verification = PaymentDetectionService().verify_order_once(order=order, txid_hint=order.txid)
         except LbryDaemonError:
             return Response({'detail': 'Verification attempt failed.'}, status=status.HTTP_502_BAD_GATEWAY)
