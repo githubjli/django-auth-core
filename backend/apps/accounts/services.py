@@ -904,13 +904,20 @@ class MembershipOrderService:
         self.daemon_client = daemon_client or self.daemon_client_class()
 
     def create_order_with_payment_asset(self, *, user, plan: MembershipPlan, payment_asset: str) -> tuple[PaymentOrder, bool]:
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_THB_LTT and not plan.allow_blockchain_payment:
+            raise LbryDaemonInvalidParamsError('This membership plan does not support thb_ltt payment.')
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS and not plan.allow_meow_points_payment:
+            raise LbryDaemonInvalidParamsError('This membership plan does not support meow_points payment.')
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT and not plan.allow_meow_credit_payment:
+            raise LbryDaemonInvalidParamsError('This membership plan does not support meow_credit payment.')
         if payment_asset == PaymentOrder.PAYMENT_ASSET_THB_LTT:
             order, reused = self.create_order(user=user, plan=plan)
             if order.payment_method_code != PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN or order.payment_asset != PaymentOrder.PAYMENT_ASSET_THB_LTT:
                 order.payment_method_code = PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN
                 order.payment_asset = PaymentOrder.PAYMENT_ASSET_THB_LTT
-                order.amount_snapshot = plan.price_lbc
-                order.save(update_fields=['payment_method_code', 'payment_asset', 'amount_snapshot', 'updated_at'])
+                order.amount_snapshot = self._membership_base_price(plan)
+                order.exchange_rate_snapshot = Decimal('1')
+                order.save(update_fields=['payment_method_code', 'payment_asset', 'amount_snapshot', 'exchange_rate_snapshot', 'updated_at'])
             return order, reused
         if payment_asset in {PaymentOrder.PAYMENT_ASSET_MEOW_POINTS, PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT}:
             return self.create_platform_asset_order(user=user, plan=plan, payment_asset=payment_asset)
@@ -955,7 +962,8 @@ class MembershipOrderService:
                 currency=TOKEN_SYMBOL,
                 payment_method_code=PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN,
                 payment_asset=PaymentOrder.PAYMENT_ASSET_THB_LTT,
-                amount_snapshot=plan.price_lbc,
+                amount_snapshot=self._membership_base_price(plan),
+                exchange_rate_snapshot=Decimal('1'),
             )
 
             platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
@@ -1038,7 +1046,7 @@ class MembershipOrderService:
 
         rate_map = getattr(settings, 'MEMBERSHIP_PAYMENT_ASSET_RATES', {}) or {}
         rate = Decimal(str(rate_map.get(payment_asset, '1')))
-        amount_snapshot = Decimal(str(plan.price_lbc))
+        amount_snapshot = self._membership_base_price(plan)
         paid_amount = amount_snapshot * rate
 
         balance = UserAssetBalance.objects.select_for_update().filter(user=user, asset_type=payment_asset).first()
@@ -1068,6 +1076,7 @@ class MembershipOrderService:
             amount=paid_amount,
             amount_snapshot=amount_snapshot,
             paid_amount=paid_amount,
+            exchange_rate_snapshot=rate,
             currency=payment_asset,
             payment_method_code=PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET,
             payment_asset=payment_asset,
@@ -1087,11 +1096,22 @@ class MembershipOrderService:
             biz_id=order.id,
             order_no=order.order_no,
             note=f'Membership order {order.order_no}',
+            metadata={
+                'source': 'membership_order',
+                'plan_code': plan.code,
+                'plan_name': plan.name,
+                'payment_asset': payment_asset,
+                'base_price_amount': f'{amount_snapshot:.8f}',
+                'exchange_rate': f'{rate:.8f}',
+            },
         )
         order.asset_transaction = tx
         order.save(update_fields=['asset_transaction', 'updated_at'])
         MembershipActivationService().activate_for_order(order=order)
         return order, False
+
+    def _membership_base_price(self, plan: MembershipPlan) -> Decimal:
+        return Decimal(str(plan.base_price_amount if plan.base_price_amount is not None else plan.price_lbc))
 
     def _generate_order_no(self) -> str:
         for _ in range(8):

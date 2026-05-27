@@ -1866,6 +1866,7 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
 class MembershipPlanSerializer(serializers.ModelSerializer):
     settlement = serializers.SerializerMethodField()
     supported_payment_assets = serializers.SerializerMethodField()
+    base_price_amount = serializers.SerializerMethodField()
 
     class Meta:
         model = MembershipPlan
@@ -1875,6 +1876,8 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'name',
             'description',
             'price_lbc',
+            'base_price_amount',
+            'base_price_asset',
             'supported_payment_assets',
             'settlement',
             'duration_days',
@@ -1892,11 +1895,17 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
         }
 
     def get_supported_payment_assets(self, obj):
-        return [
-            PaymentOrder.PAYMENT_ASSET_THB_LTT,
-            PaymentOrder.PAYMENT_ASSET_MEOW_POINTS,
-            PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT,
-        ]
+        assets = []
+        if obj.allow_blockchain_payment:
+            assets.append(PaymentOrder.PAYMENT_ASSET_THB_LTT)
+        if obj.allow_meow_points_payment:
+            assets.append(PaymentOrder.PAYMENT_ASSET_MEOW_POINTS)
+        if obj.allow_meow_credit_payment:
+            assets.append(PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT)
+        return assets
+
+    def get_base_price_amount(self, obj):
+        return obj.base_price_amount if obj.base_price_amount is not None else obj.price_lbc
 
 
 class ManualMembershipTxHintSubmitSerializer(serializers.Serializer):
@@ -1979,6 +1988,7 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
             'payment_method',
             'payment_asset',
             'amount_snapshot',
+            'exchange_rate_snapshot',
             'paid_amount',
             'expected_amount_lbc',
             'settlement',

@@ -723,7 +723,20 @@ class PaymentOrderAdmin(admin.ModelAdmin):
 
 @admin.register(MembershipPlan)
 class MembershipPlanAdmin(admin.ModelAdmin):
-    list_display = ('id', 'code', 'name', 'price_lbc', 'duration_days', 'is_active', 'sort_order')
+    list_display = (
+        'id',
+        'code',
+        'name',
+        'price_lbc',
+        'base_price_amount',
+        'base_price_asset',
+        'allow_blockchain_payment',
+        'allow_meow_points_payment',
+        'allow_meow_credit_payment',
+        'duration_days',
+        'is_active',
+        'sort_order',
+    )
     list_filter = ('is_active', 'code')
     search_fields = ('code', 'name', 'description')
     ordering = ('sort_order', 'id')
