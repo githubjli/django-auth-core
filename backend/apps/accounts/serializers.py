@@ -22,12 +22,18 @@ from apps.accounts.models import (
     LiveStreamProduct,
     PaymentOrder,
     Product,
+    ProductCategory,
     ProductOrder,
     ProductRefundRequest,
     ProductShipment,
+    PlatformAssetLedger,
+    SavedProduct,
     SellerPayoutAddress,
     SellerStore,
     SellerPayout,
+    ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     StreamPaymentMethod,
     UserShippingAddress,
     Video,
@@ -937,6 +943,7 @@ class SellerStoreSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     store_id = serializers.IntegerField(source='store.id', read_only=True)
+    category_id = serializers.IntegerField(source='category.id', read_only=True, allow_null=True)
     cover_image_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -946,11 +953,15 @@ class ProductSerializer(serializers.ModelSerializer):
             'store_id',
             'title',
             'slug',
+            'category',
+            'category_id',
             'description',
             'cover_image',
             'cover_image_url',
             'price_amount',
             'price_currency',
+            'meow_points_price',
+            'meow_credit_price',
             'stock_quantity',
             'status',
             'created_at',
@@ -959,6 +970,7 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'id',
             'store_id',
+            'category_id',
             'created_at',
             'updated_at',
         )
@@ -970,6 +982,98 @@ class ProductSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.cover_image.url
         return request.build_absolute_uri(obj.cover_image.url)
+
+
+class ShopBannerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShopBanner
+        fields = ('id', 'image_url', 'title', 'subtitle', 'target_url')
+        read_only_fields = fields
+
+
+class ProductCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductCategory
+        fields = ('id', 'name', 'slug')
+        read_only_fields = fields
+
+
+class ShopProductListSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(source='title', read_only=True)
+    price = serializers.DecimalField(source='price_amount', max_digits=12, decimal_places=2, read_only=True)
+    original_price = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    badge = serializers.SerializerMethodField()
+    description = serializers.SerializerMethodField()
+    images = serializers.SerializerMethodField()
+    specs = serializers.SerializerMethodField()
+    category = ProductCategorySerializer(read_only=True)
+    sold_count = serializers.SerializerMethodField()
+    stock = serializers.IntegerField(source='stock_quantity', read_only=True)
+    meow_points_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    meow_credit_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+
+    class Meta:
+        model = Product
+        fields = (
+            'id', 'name', 'price', 'original_price', 'thumbnail_url', 'badge',
+            'sold_count', 'stock', 'description', 'images', 'specs', 'category',
+            'meow_points_price', 'meow_credit_price',
+        )
+        read_only_fields = fields
+
+    def get_original_price(self, obj):
+        return None
+
+    def get_thumbnail_url(self, obj):
+        request = self.context.get('request')
+        if not obj.cover_image:
+            return None
+        if request is None:
+            return obj.cover_image.url
+        return request.build_absolute_uri(obj.cover_image.url)
+
+    def get_badge(self, obj):
+        return None
+
+    def get_sold_count(self, obj):
+        return 0
+
+    def get_description(self, obj):
+        return obj.description or None
+
+    def get_images(self, obj):
+        return []
+
+    def get_specs(self, obj):
+        return []
+
+
+class SavedProductSerializer(serializers.ModelSerializer):
+    product = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SavedProduct
+        fields = ('id', 'product', 'created_at')
+        read_only_fields = fields
+
+    def get_product(self, obj):
+        return ShopProductListSerializer(obj.product, context=self.context).data
+
+
+class AddSavedProductSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+
+    def validate(self, attrs):
+        product = Product.objects.select_related('store', 'category').filter(pk=attrs['product_id']).first()
+        if product is None:
+            raise serializers.ValidationError({'product_id': ['Product not found.']})
+        if product.status != Product.STATUS_ACTIVE:
+            raise serializers.ValidationError({'product_id': ['Product is not active.']})
+        if not product.store.is_active:
+            raise serializers.ValidationError({'product_id': ['Seller store is inactive.']})
+        attrs['product'] = product
+        return attrs
 
 
 class LiveStreamProductListingSerializer(serializers.ModelSerializer):
@@ -1272,6 +1376,51 @@ class UserShippingAddressSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+class MobileShippingAddressSerializer(serializers.ModelSerializer):
+    state = serializers.CharField(source='province', required=False, allow_blank=True)
+    address_line1 = serializers.CharField(source='street_address')
+    address_line2 = serializers.CharField(required=False, allow_blank=True, write_only=True)
+
+    class Meta:
+        model = UserShippingAddress
+        fields = (
+            'id',
+            'receiver_name',
+            'phone',
+            'country',
+            'state',
+            'city',
+            'district',
+            'address_line1',
+            'address_line2',
+            'postal_code',
+            'is_default',
+        )
+        read_only_fields = ('id',)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['address_line2'] = ''
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop('address_line2', None)
+        user = self.context['request'].user
+        is_default = bool(validated_data.get('is_default'))
+        if is_default:
+            UserShippingAddress.objects.filter(user=user, is_default=True).update(is_default=False)
+        elif not UserShippingAddress.objects.filter(user=user).exists():
+            validated_data['is_default'] = True
+        return UserShippingAddress.objects.create(user=user, **validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop('address_line2', None)
+        is_default = validated_data.get('is_default')
+        if is_default:
+            UserShippingAddress.objects.filter(user=instance.user, is_default=True).exclude(id=instance.id).update(is_default=False)
+        return super().update(instance, validated_data)
+
+
 class ProductShipmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductShipment
@@ -1307,7 +1456,8 @@ class SellerPayoutSummarySerializer(serializers.ModelSerializer):
 class ProductOrderCreateSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     quantity = serializers.IntegerField(min_value=1)
-    shipping_address_id = serializers.IntegerField()
+    shipping_address_id = serializers.IntegerField(required=False, allow_null=True)
+    payment_asset = serializers.ChoiceField(choices=ProductOrder.PAYMENT_ASSET_CHOICES)
 
     def validate(self, attrs):
         request = self.context['request']
@@ -1320,9 +1470,12 @@ class ProductOrderCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError({'product_id': ['Seller store is inactive.']})
         if product.stock_quantity < attrs['quantity']:
             raise serializers.ValidationError({'quantity': ['Insufficient stock.']})
-        shipping_address = UserShippingAddress.objects.filter(id=attrs['shipping_address_id'], user=request.user).first()
-        if shipping_address is None:
-            raise serializers.ValidationError({'shipping_address_id': ['Shipping address not found.']})
+        shipping_address = None
+        shipping_address_id = attrs.get('shipping_address_id')
+        if shipping_address_id is not None:
+            shipping_address = UserShippingAddress.objects.filter(id=shipping_address_id, user=request.user).first()
+            if shipping_address is None:
+                raise serializers.ValidationError({'shipping_address_id': ['Shipping address not found.']})
         attrs['product'] = product
         attrs['shipping_address'] = shipping_address
         return attrs
@@ -1340,13 +1493,23 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
     payment_state = serializers.SerializerMethodField()
     payment_summary = serializers.SerializerMethodField()
     refund_summary = serializers.SerializerMethodField()
+    product_name_snapshot = serializers.SerializerMethodField()
+    product_thumbnail_snapshot = serializers.SerializerMethodField()
+    product_snapshot = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductOrder
         fields = (
             'order_no',
             'status',
+            'payment_method',
+            'payment_asset',
             'expected_amount',
+            'unit_price_snapshot',
+            'total_amount_snapshot',
+            'platform_fee_rate',
+            'platform_fee_amount',
+            'seller_receivable_amount',
             'currency',
             'pay_to_address',
             'expires_at',
@@ -1354,6 +1517,9 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
             'qr_text',
             'payment_uri',
             'product_title_snapshot',
+            'product_name_snapshot',
+            'product_thumbnail_snapshot',
+            'product_snapshot',
             'product_price_snapshot',
             'quantity',
             'total_amount',
@@ -1376,13 +1542,35 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    def get_product_name_snapshot(self, obj):
+        return obj.product_title_snapshot or (obj.product.title if obj.product_id else '')
+
+    def get_product_thumbnail_snapshot(self, obj):
+        product = getattr(obj, 'product', None)
+        if product is None or not product.cover_image:
+            return None
+        request = self.context.get('request')
+        if request is None:
+            return product.cover_image.url
+        return request.build_absolute_uri(product.cover_image.url)
+
+    def get_product_snapshot(self, obj):
+        return {
+            'name': self.get_product_name_snapshot(obj),
+            'thumbnail_url': self.get_product_thumbnail_snapshot(obj),
+        }
+
     def get_pay_to_address(self, obj):
+        if obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
         return obj.payment_order.pay_to_address if obj.payment_order else ''
 
     def get_expires_at(self, obj):
         return obj.payment_order.expires_at if obj.payment_order else None
 
     def get_qr_payload(self, obj):
+        if obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
         if obj.status != ProductOrder.STATUS_PENDING_PAYMENT or not obj.payment_order:
             return None
         return ProductOrderService().build_qr_payload(obj)
@@ -1394,6 +1582,8 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
         return json.dumps(payload, separators=(',', ':'), sort_keys=True)
 
     def get_payment_uri(self, obj):
+        if obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
         if obj.status != ProductOrder.STATUS_PENDING_PAYMENT or not obj.payment_order:
             return ''
         return f'ltt:{obj.payment_order.pay_to_address}?amount={obj.total_amount}&token={obj.currency}&order_no={obj.order_no}'
@@ -1422,9 +1612,22 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
 
     def get_payment_summary(self, obj):
         payment = obj.payment_order
+        if payment is None and obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return {
+                'payment_method': ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET,
+                'payment_status': ProductOrder.STATUS_PAID if obj.status == ProductOrder.STATUS_PAID else obj.status,
+                'txid': '',
+                'confirmations': 0,
+                'actual_amount': obj.total_amount_snapshot,
+                'expected_amount': obj.total_amount_snapshot,
+                'pay_to_address': None,
+                'paid_at': obj.paid_at,
+                'expires_at': None,
+            }
         if payment is None:
             return None
         return {
+            'payment_method': obj.payment_method,
             'payment_status': payment.status,
             'txid': payment.txid,
             'confirmations': payment.confirmations,
@@ -1662,6 +1865,8 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
 
 class MembershipPlanSerializer(serializers.ModelSerializer):
     settlement = serializers.SerializerMethodField()
+    supported_payment_assets = serializers.SerializerMethodField()
+    base_price_amount = serializers.SerializerMethodField()
 
     class Meta:
         model = MembershipPlan
@@ -1671,6 +1876,9 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'name',
             'description',
             'price_lbc',
+            'base_price_amount',
+            'base_price_asset',
+            'supported_payment_assets',
             'settlement',
             'duration_days',
             'is_active',
@@ -1685,6 +1893,19 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'token_symbol': TOKEN_SYMBOL,
             'token_peg': TOKEN_PEG,
         }
+
+    def get_supported_payment_assets(self, obj):
+        assets = []
+        if obj.allow_blockchain_payment:
+            assets.append(PaymentOrder.PAYMENT_ASSET_THB_LTT)
+        if obj.allow_meow_points_payment:
+            assets.append(PaymentOrder.PAYMENT_ASSET_MEOW_POINTS)
+        if obj.allow_meow_credit_payment:
+            assets.append(PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT)
+        return assets
+
+    def get_base_price_amount(self, obj):
+        return obj.base_price_amount if obj.base_price_amount is not None else obj.price_lbc
 
 
 class ManualMembershipTxHintSubmitSerializer(serializers.Serializer):
@@ -1732,6 +1953,11 @@ class MembershipOrderCreateSerializer(serializers.Serializer):
     # Phase 2A/2B contract intentionally uses plan_code (stable business key),
     # not plan_id, to reduce client coupling to internal DB identifiers.
     plan_code = serializers.ChoiceField(choices=MembershipPlan.CODE_CHOICES)
+    payment_asset = serializers.ChoiceField(
+        choices=PaymentOrder.PAYMENT_ASSET_CHOICES,
+        required=False,
+        default=PaymentOrder.PAYMENT_ASSET_THB_LTT,
+    )
 
     def validate(self, attrs):
         plan = MembershipPlan.objects.filter(code=attrs['plan_code'], is_active=True).first()
@@ -1743,17 +1969,32 @@ class MembershipOrderCreateSerializer(serializers.Serializer):
 
 class MembershipOrderSerializer(serializers.ModelSerializer):
     plan = serializers.SerializerMethodField()
-    qr_text = serializers.CharField(source='pay_to_address', read_only=True)
+    pay_to_address = serializers.SerializerMethodField()
+    qr_text = serializers.SerializerMethodField()
     settlement = serializers.SerializerMethodField()
+    plan_code = serializers.CharField(source='plan_code_snapshot', read_only=True)
+    plan_name = serializers.CharField(source='plan_name_snapshot', read_only=True)
+    payment_method = serializers.CharField(source='payment_method_code', read_only=True)
+    qr_payload = serializers.SerializerMethodField()
+    payment_uri = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentOrder
         fields = (
             'order_no',
+            'plan_code',
+            'plan_name',
             'plan',
+            'payment_method',
+            'payment_asset',
+            'amount_snapshot',
+            'exchange_rate_snapshot',
+            'paid_amount',
             'expected_amount_lbc',
             'settlement',
             'pay_to_address',
+            'qr_payload',
+            'payment_uri',
             'qr_text',
             'status',
             'expires_at',
@@ -1777,6 +2018,26 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
             'token_symbol': TOKEN_SYMBOL,
             'token_peg': TOKEN_PEG,
         }
+
+    def get_pay_to_address(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
+        return obj.pay_to_address or None
+
+    def get_qr_text(self, obj):
+        return self.get_pay_to_address(obj)
+
+    def get_qr_payload(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
+        return obj.pay_to_address or None
+
+    def get_payment_uri(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return None
+        if not obj.pay_to_address or not obj.expected_amount_lbc:
+            return None
+        return f"{TOKEN_SYMBOL.lower()}:{obj.pay_to_address}?amount={obj.expected_amount_lbc}"
 
 
 class MembershipOrderTxHintSerializer(serializers.Serializer):
