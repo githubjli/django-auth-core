@@ -1376,6 +1376,51 @@ class UserShippingAddressSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+class MobileShippingAddressSerializer(serializers.ModelSerializer):
+    state = serializers.CharField(source='province', required=False, allow_blank=True)
+    address_line1 = serializers.CharField(source='street_address')
+    address_line2 = serializers.CharField(required=False, allow_blank=True, write_only=True)
+
+    class Meta:
+        model = UserShippingAddress
+        fields = (
+            'id',
+            'receiver_name',
+            'phone',
+            'country',
+            'state',
+            'city',
+            'district',
+            'address_line1',
+            'address_line2',
+            'postal_code',
+            'is_default',
+        )
+        read_only_fields = ('id',)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['address_line2'] = ''
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop('address_line2', None)
+        user = self.context['request'].user
+        is_default = bool(validated_data.get('is_default'))
+        if is_default:
+            UserShippingAddress.objects.filter(user=user, is_default=True).update(is_default=False)
+        elif not UserShippingAddress.objects.filter(user=user).exists():
+            validated_data['is_default'] = True
+        return UserShippingAddress.objects.create(user=user, **validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop('address_line2', None)
+        is_default = validated_data.get('is_default')
+        if is_default:
+            UserShippingAddress.objects.filter(user=instance.user, is_default=True).exclude(id=instance.id).update(is_default=False)
+        return super().update(instance, validated_data)
+
+
 class ProductShipmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductShipment

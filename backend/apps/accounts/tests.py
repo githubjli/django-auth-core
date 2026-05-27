@@ -14032,3 +14032,91 @@ class CartSavedProductAPITestCase(APITestCase):
         self.assertEqual(delete_resp.status_code, 204)
         c2 = self.client.get(reverse('cart-count'))
         self.assertEqual(c2.data['count'], 0)
+
+class MobileShippingAddressAPITestCase(APITestCase):
+    def setUp(self):
+        self.user_a = User.objects.create_user(email='ship-a@example.com', password='pw123456')
+        self.user_b = User.objects.create_user(email='ship-b@example.com', password='pw123456')
+        self.seller = User.objects.create_user(email='ship-seller@example.com', password='pw123456')
+        self.store = SellerStore.objects.create(owner=self.seller, name='Ship Store', slug='ship-store', is_active=True)
+        self.product = Product.objects.create(
+            store=self.store,
+            title='Ship Product',
+            slug='ship-product',
+            price_amount='10.00',
+            price_currency='USD',
+            meow_points_price='10.00',
+            meow_credit_price='5.00',
+            stock_quantity=10,
+            status=Product.STATUS_ACTIVE,
+        )
+        UserAssetBalance.objects.create(user=self.user_a, asset_type='meow_points', balance='100.00')
+
+    def _payload(self, is_default=True):
+        return {
+            'receiver_name': 'Jenny',
+            'phone': '123456789',
+            'country': 'Singapore',
+            'state': '',
+            'city': 'Singapore',
+            'district': '',
+            'address_line1': 'xxx street',
+            'address_line2': '',
+            'postal_code': '123456',
+            'is_default': is_default,
+        }
+
+    def test_create_address_success(self):
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.post(reverse('shipping-address-list-create'), self._payload(), format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['receiver_name'], 'Jenny')
+
+    def test_list_only_own_addresses(self):
+        UserShippingAddress.objects.create(user=self.user_a, receiver_name='A', country='SG', street_address='a1')
+        UserShippingAddress.objects.create(user=self.user_b, receiver_name='B', country='SG', street_address='b1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.get(reverse('shipping-address-list-create'))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data), 1)
+
+    def test_cannot_patch_other_user_address(self):
+        other = UserShippingAddress.objects.create(user=self.user_b, receiver_name='B', country='SG', street_address='b1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.patch(reverse('shipping-address-detail', args=[other.id]), {'receiver_name': 'X'}, format='json')
+        self.assertEqual(r.status_code, 404)
+
+    def test_cannot_delete_other_user_address(self):
+        other = UserShippingAddress.objects.create(user=self.user_b, receiver_name='B', country='SG', street_address='b1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.delete(reverse('shipping-address-detail', args=[other.id]))
+        self.assertEqual(r.status_code, 404)
+
+    def test_default_address_mutual_exclusive(self):
+        self.client.force_authenticate(user=self.user_a)
+        first = self.client.post(reverse('shipping-address-list-create'), self._payload(is_default=True), format='json')
+        second_payload = self._payload(is_default=True)
+        second_payload['receiver_name'] = 'Jenny2'
+        second = self.client.post(reverse('shipping-address-list-create'), second_payload, format='json')
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(UserShippingAddress.objects.filter(user=self.user_a, is_default=True).count(), 1)
+
+    def test_delete_address_success(self):
+        addr = UserShippingAddress.objects.create(user=self.user_a, receiver_name='A', country='SG', street_address='a1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.delete(reverse('shipping-address-detail', args=[addr.id]))
+        self.assertEqual(r.status_code, 204)
+
+    def test_product_order_can_use_shipping_address_id(self):
+        addr = UserShippingAddress.objects.create(user=self.user_a, receiver_name='A', country='SG', street_address='a1')
+        self.client.force_authenticate(user=self.user_a)
+        r = self.client.post(reverse('product-order-list-create'), {
+            'product_id': self.product.id,
+            'quantity': 1,
+            'payment_asset': 'meow_points',
+            'shipping_address_id': addr.id,
+        }, format='json')
+        self.assertEqual(r.status_code, 201)
+        order = ProductOrder.objects.get(order_no=r.data['order_no'])
+        self.assertEqual(order.shipping_address_snapshot.get('street_address'), 'a1')

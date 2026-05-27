@@ -75,6 +75,7 @@ from apps.accounts.serializers import (
     MembershipOrderTxHintSerializer,
     MembershipOrderSerializer,
     MembershipPlanSerializer,
+    MobileShippingAddressSerializer,
     MyMembershipSerializer,
     WalletPrototypePayOrderSerializer,
     WalletPrototypePayProductOrderSerializer,
@@ -429,6 +430,39 @@ class AccountShippingAddressListCreateAPIView(generics.ListCreateAPIView):
 
 class AccountShippingAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = UserShippingAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        return UserShippingAddress.objects.filter(user=self.request.user)
+
+    def perform_destroy(self, instance):
+        was_default = instance.is_default
+        user = instance.user
+        instance.delete()
+        if was_default:
+            next_address = UserShippingAddress.objects.filter(user=user).order_by('-updated_at', '-id').first()
+            if next_address:
+                next_address.is_default = True
+                next_address.save(update_fields=['is_default', 'updated_at'])
+
+
+class ShippingAddressListCreateAPIView(generics.ListCreateAPIView):
+    serializer_class = MobileShippingAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return UserShippingAddress.objects.filter(user=self.request.user)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
+
+class ShippingAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = MobileShippingAddressSerializer
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = 'id'
 
