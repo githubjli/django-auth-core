@@ -14150,3 +14150,72 @@ class MobileShippingAddressAPITestCase(APITestCase):
         self.assertEqual(r.status_code, 201)
         order = ProductOrder.objects.get(order_no=r.data['order_no'])
         self.assertEqual(order.shipping_address_snapshot.get('street_address'), 'a1')
+
+class VideoRecommendationsAPITestCase(APITestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(email='rec-owner@example.com', password='pw123456')
+        self.other = User.objects.create_user(email='rec-other@example.com', password='pw123456')
+        self.cat = Category.objects.get(slug='technology')
+        self.current = Video.objects.create(
+            owner=self.owner,
+            title='Current Video',
+            description='x',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+            category=self.cat,
+        )
+        self.same_cat_1 = Video.objects.create(owner=self.other, title='Same Cat 1', visibility=Video.VISIBILITY_PUBLIC, status=Video.STATUS_ACTIVE, category=self.cat)
+        self.same_cat_2 = Video.objects.create(owner=self.other, title='Same Cat 2', visibility=Video.VISIBILITY_PUBLIC, status=Video.STATUS_ACTIVE, category=self.cat)
+        self.other_cat = Video.objects.create(owner=self.other, title='Other Cat', visibility=Video.VISIBILITY_PUBLIC, status=Video.STATUS_ACTIVE)
+        self.private_video = Video.objects.create(owner=self.other, title='Private', visibility=Video.VISIBILITY_PRIVATE, status=Video.STATUS_ACTIVE, category=self.cat)
+        self.inactive_video = Video.objects.create(owner=self.other, title='Inactive', visibility=Video.VISIBILITY_PUBLIC, status=Video.STATUS_FLAGGED, category=self.cat)
+
+    def test_not_found_returns_404(self):
+        r = self.client.get(reverse('video-recommendations', args=[999999]))
+        self.assertEqual(r.status_code, 404)
+
+    def test_result_excludes_current_video(self):
+        r = self.client.get(reverse('video-recommendations', args=[self.current.id]))
+        self.assertEqual(r.status_code, 200)
+        ids = [item['id'] for item in r.data]
+        self.assertNotIn(self.current.id, ids)
+
+    def test_default_limit_10(self):
+        for i in range(20):
+            Video.objects.create(owner=self.other, title=f'v{i}', visibility=Video.VISIBILITY_PUBLIC, status=Video.STATUS_ACTIVE)
+        r = self.client.get(reverse('video-recommendations', args=[self.current.id]))
+        self.assertEqual(r.status_code, 200)
+        self.assertLessEqual(len(r.data), 10)
+
+    def test_limit_param_and_max_30(self):
+        for i in range(50):
+            Video.objects.create(owner=self.other, title=f'l{i}', visibility=Video.VISIBILITY_PUBLIC, status=Video.STATUS_ACTIVE)
+        r1 = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 5})
+        self.assertEqual(len(r1.data), 5)
+        r2 = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 999})
+        self.assertLessEqual(len(r2.data), 30)
+
+    def test_only_public_active_returned(self):
+        r = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 30})
+        ids = [item['id'] for item in r.data]
+        self.assertNotIn(self.private_video.id, ids)
+        self.assertNotIn(self.inactive_video.id, ids)
+
+    def test_prefer_same_category(self):
+        r = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 2})
+        ids = [item['id'] for item in r.data]
+        self.assertIn(self.same_cat_1.id, ids)
+        self.assertIn(self.same_cat_2.id, ids)
+
+    def test_response_fields_match_video_serializer(self):
+        r = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 1})
+        self.assertEqual(r.status_code, 200)
+        item = r.data[0]
+        self.assertIn('id', item)
+        self.assertIn('title', item)
+        self.assertIn('file_url', item)
+        self.assertIn('thumbnail_url', item)
+        self.assertIn('creator', item)
+        self.assertIn('view_count', item)
+        self.assertIn('like_count', item)
+        self.assertIn('created_at', item)

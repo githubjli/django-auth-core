@@ -2367,6 +2367,55 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
         return queryset.order_by('-created_at', '-id')[:limit]
 
 
+class VideoRecommendationsAPIView(generics.ListAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['mask_locked_file_fields'] = True
+        return context
+
+    def get_queryset(self):
+        current_video = generics.get_object_or_404(
+            Video.objects.select_related('category', 'owner').filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
+            pk=self.kwargs['pk'],
+        )
+        try:
+            limit = int(self.request.query_params.get('limit', 10) or 10)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 30))
+        base = annotate_videos_for_request(
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ).exclude(pk=current_video.pk),
+            self.request,
+        )
+        preferred = base
+        if current_video.category_id:
+            preferred = preferred.filter(category_id=current_video.category_id)
+        else:
+            preferred = preferred.filter(owner_id=current_video.owner_id)
+        preferred_ids = list(preferred.order_by('-created_at', '-id').values_list('id', flat=True)[:limit])
+        if len(preferred_ids) < limit:
+            fallback_ids = list(
+                base.exclude(id__in=preferred_ids)
+                .order_by('-created_at', '-id')
+                .values_list('id', flat=True)[: limit - len(preferred_ids)]
+            )
+            preferred_ids.extend(fallback_ids)
+        if not preferred_ids:
+            return base.none()
+        ordering = Case(*[When(pk=pk, then=pos) for pos, pk in enumerate(preferred_ids)], output_field=IntegerField())
+        return base.filter(pk__in=preferred_ids).order_by(ordering)
+
+
 class PublicVideoInteractionSummaryAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
