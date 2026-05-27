@@ -2385,35 +2385,57 @@ class VideoRecommendationsAPIView(generics.ListAPIView):
             ),
             pk=self.kwargs['pk'],
         )
+
         try:
             limit = int(self.request.query_params.get('limit', 10) or 10)
         except (TypeError, ValueError):
             limit = 10
         limit = max(1, min(limit, 30))
+
+        exclude_ids = {current_video.pk}
+        raw_exclude_ids = self.request.query_params.get('exclude_ids', '')
+        for raw in raw_exclude_ids.split(','):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                exclude_ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+
         base = annotate_videos_for_request(
             Video.objects.filter(
                 visibility=Video.VISIBILITY_PUBLIC,
                 status=Video.STATUS_ACTIVE,
-            ).exclude(pk=current_video.pk),
+            ),
             self.request,
         )
-        preferred = base
-        if current_video.category_id:
-            preferred = preferred.filter(category_id=current_video.category_id)
-        else:
-            preferred = preferred.filter(owner_id=current_video.owner_id)
-        preferred_ids = list(preferred.order_by('-created_at', '-id').values_list('id', flat=True)[:limit])
-        if len(preferred_ids) < limit:
-            fallback_ids = list(
-                base.exclude(id__in=preferred_ids)
+
+        ordered_ids = []
+
+        def append_ids(qs, remaining):
+            if remaining <= 0:
+                return
+            ids = list(
+                qs.exclude(id__in=exclude_ids)
                 .order_by('-created_at', '-id')
-                .values_list('id', flat=True)[: limit - len(preferred_ids)]
+                .values_list('id', flat=True)[:remaining]
             )
-            preferred_ids.extend(fallback_ids)
-        if not preferred_ids:
+            ordered_ids.extend(ids)
+            exclude_ids.update(ids)
+
+        if current_video.category_id:
+            append_ids(base.filter(category_id=current_video.category_id), limit - len(ordered_ids))
+
+        append_ids(base.filter(owner_id=current_video.owner_id), limit - len(ordered_ids))
+
+        append_ids(base, limit - len(ordered_ids))
+
+        if not ordered_ids:
             return base.none()
-        ordering = Case(*[When(pk=pk, then=pos) for pos, pk in enumerate(preferred_ids)], output_field=IntegerField())
-        return base.filter(pk__in=preferred_ids).order_by(ordering)
+
+        ordering = Case(*[When(pk=pk, then=pos) for pos, pk in enumerate(ordered_ids)], output_field=IntegerField())
+        return base.filter(pk__in=ordered_ids).order_by(ordering)
 
 
 class PublicVideoInteractionSummaryAPIView(APIView):

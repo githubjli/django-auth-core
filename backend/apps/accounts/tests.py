@@ -14207,6 +14207,82 @@ class VideoRecommendationsAPITestCase(APITestCase):
         self.assertIn(self.same_cat_1.id, ids)
         self.assertIn(self.same_cat_2.id, ids)
 
+
+    def test_vip_current_falls_back_to_other_public_active(self):
+        self.current.access_type = Video.ACCESS_VIP
+        self.current.save(update_fields=['access_type'])
+        # Only one additional VIP video
+        self.same_cat_1.access_type = Video.ACCESS_VIP
+        self.same_cat_1.save(update_fields=['access_type'])
+        self.same_cat_2.access_type = Video.ACCESS_FREE
+        self.same_cat_2.save(update_fields=['access_type'])
+
+        for i in range(40):
+            Video.objects.create(
+                owner=self.other,
+                title=f'free-{i}',
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+                access_type=Video.ACCESS_FREE,
+            )
+
+        r = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 30})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data), 30)
+
+    def test_free_current_fallback_when_same_category_insufficient(self):
+        limited_cat = Category.objects.create(name='Limited', slug='limited-rec')
+        current = Video.objects.create(
+            owner=self.owner,
+            title='Current Limited',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+            category=limited_cat,
+            access_type=Video.ACCESS_FREE,
+        )
+        Video.objects.create(
+            owner=self.other,
+            title='Only same category',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+            category=limited_cat,
+        )
+        for i in range(12):
+            Video.objects.create(
+                owner=self.other,
+                title=f'other-cat-{i}',
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+                category=self.cat,
+            )
+
+        r = self.client.get(reverse('video-recommendations', args=[current.id]), {'limit': 10})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data), 10)
+
+    def test_no_duplicate_results(self):
+        r = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 30})
+        self.assertEqual(r.status_code, 200)
+        ids = [item['id'] for item in r.data]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_exclude_ids_filters_results(self):
+        r = self.client.get(
+            reverse('video-recommendations', args=[self.current.id]),
+            {'limit': 30, 'exclude_ids': f'{self.same_cat_1.id},{self.other_cat.id}'},
+        )
+        self.assertEqual(r.status_code, 200)
+        ids = [item['id'] for item in r.data]
+        self.assertNotIn(self.same_cat_1.id, ids)
+        self.assertNotIn(self.other_cat.id, ids)
+        self.assertNotIn(self.current.id, ids)
+
+    def test_exclude_ids_invalid_values_ignored(self):
+        r = self.client.get(
+            reverse('video-recommendations', args=[self.current.id]),
+            {'limit': 10, 'exclude_ids': 'abc,!, ,3.14'},
+        )
+        self.assertEqual(r.status_code, 200)
     def test_response_fields_match_video_serializer(self):
         r = self.client.get(reverse('video-recommendations', args=[self.current.id]), {'limit': 1})
         self.assertEqual(r.status_code, 200)
