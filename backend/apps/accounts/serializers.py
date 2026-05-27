@@ -1493,6 +1493,9 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
     payment_state = serializers.SerializerMethodField()
     payment_summary = serializers.SerializerMethodField()
     refund_summary = serializers.SerializerMethodField()
+    product_name_snapshot = serializers.SerializerMethodField()
+    product_thumbnail_snapshot = serializers.SerializerMethodField()
+    product_snapshot = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductOrder
@@ -1514,6 +1517,9 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
             'qr_text',
             'payment_uri',
             'product_title_snapshot',
+            'product_name_snapshot',
+            'product_thumbnail_snapshot',
+            'product_snapshot',
             'product_price_snapshot',
             'quantity',
             'total_amount',
@@ -1535,6 +1541,24 @@ class ProductOrderDetailSerializer(serializers.ModelSerializer):
             'updated_at',
         )
         read_only_fields = fields
+
+    def get_product_name_snapshot(self, obj):
+        return obj.product_title_snapshot or (obj.product.title if obj.product_id else '')
+
+    def get_product_thumbnail_snapshot(self, obj):
+        product = getattr(obj, 'product', None)
+        if product is None or not product.cover_image:
+            return None
+        request = self.context.get('request')
+        if request is None:
+            return product.cover_image.url
+        return request.build_absolute_uri(product.cover_image.url)
+
+    def get_product_snapshot(self, obj):
+        return {
+            'name': self.get_product_name_snapshot(obj),
+            'thumbnail_url': self.get_product_thumbnail_snapshot(obj),
+        }
 
     def get_pay_to_address(self, obj):
         if obj.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET:

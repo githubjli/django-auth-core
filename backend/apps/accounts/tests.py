@@ -13900,6 +13900,21 @@ class PlatformAssetTradeAPITestCase(APITestCase):
         self.assertIsInstance(r.data['total_amount_snapshot'], str)
         self.assertIsInstance(r.data['platform_fee_amount'], str)
         self.assertIsInstance(r.data['seller_receivable_amount'], str)
+        self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
+        self.assertIsNone(r.data['pay_to_address'])
+        self.assertIsNone(r.data['qr_payload'])
+        self.assertIsNone(r.data['payment_uri'])
+        self.assertIn('product_name_snapshot', r.data)
+        self.assertEqual(r.data['product_name_snapshot'], 'Asset Product')
+        self.assertIn('product_snapshot', r.data)
+        self.assertEqual(r.data['product_snapshot']['name'], 'Asset Product')
+        self.assertIn('product_thumbnail_snapshot', r.data)
+
+    def test_meow_points_order_success_paid(self):
+        self._auth(self.buyer)
+        r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': None, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
         bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
         self.assertEqual(bal.balance, Decimal('76.00'))
         self.assertTrue(UserAssetTransaction.objects.filter(user=self.buyer, biz_type='product_order', order_no=order.order_no).exists())
@@ -13959,6 +13974,21 @@ class PlatformAssetTradeAPITestCase(APITestCase):
         self.assertEqual(m2.status_code, 200)
         bal_after = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
         self.assertEqual(bal_after - bal_before, Decimal('12.00'))
+
+    def test_order_list_contains_required_product_snapshot_fields(self):
+        self._auth(self.buyer)
+        create = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 2, 'shipping_address_id': None, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(create.status_code, 201)
+        listed = self.client.get(reverse('product-order-list-create'))
+        self.assertEqual(listed.status_code, 200)
+        row = listed.data[0]
+        self.assertIn('product_name_snapshot', row)
+        self.assertEqual(row['product_name_snapshot'], 'Asset Product')
+        self.assertIn('product_snapshot', row)
+        self.assertEqual(row['product_snapshot']['name'], 'Asset Product')
+        self.assertIn('product_thumbnail_snapshot', row)
+        self.assertIsInstance(row['total_amount_snapshot'], str)
+        self.assertEqual(row['total_amount_snapshot'], '24.00')
 
 class CartSavedProductAPITestCase(APITestCase):
     def setUp(self):
