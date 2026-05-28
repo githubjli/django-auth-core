@@ -8,6 +8,7 @@ import os
 import importlib.util
 from pathlib import Path
 from datetime import timedelta
+from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
@@ -244,3 +245,10 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+PRODUCT_PLATFORM_FEE_RATE = Decimal(os.getenv('PRODUCT_PLATFORM_FEE_RATE', '0.10'))
+MEMBERSHIP_PAYMENT_ASSET_RATES = {
+    'thb_ltt': os.getenv('MEMBERSHIP_RATE_THB_LTT', '1'),
+    'meow_points': os.getenv('MEMBERSHIP_RATE_MEOW_POINTS', '1'),
+    'meow_credit': os.getenv('MEMBERSHIP_RATE_MEOW_CREDIT', '1'),
+}
