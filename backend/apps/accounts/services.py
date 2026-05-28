@@ -49,8 +49,10 @@ from apps.accounts.models import (
     PaymentOrder,
     Product,
     ProductOrder,
+    PaymentAssetRate,
     ProductShipment,
     ProductRefundRequest,
+    PlatformAssetLedger,
     SellerPayout,
     SellerPayoutAddress,
     UserShippingAddress,
@@ -61,6 +63,40 @@ from apps.accounts.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_membership_payment_asset_rate(payment_asset: str) -> Decimal:
+    configured = PaymentAssetRate.objects.filter(asset_code=payment_asset, is_active=True).order_by('sort_order', 'asset_code').first()
+    if configured is not None:
+        rate = Decimal(str(configured.exchange_rate))
+    else:
+        rate_map = getattr(settings, 'MEMBERSHIP_PAYMENT_ASSET_RATES', {}) or {}
+        rate = Decimal(str(rate_map.get(payment_asset, '1')))
+    if rate <= 0:
+        raise LbryDaemonInvalidParamsError(f'Invalid membership payment rate for asset: {payment_asset}')
+    return rate
+
+
+def _get_wallet_balance_and_update(*, user, payment_asset: str, debit_amount: Decimal) -> tuple[Decimal, Decimal]:
+    debit_value = Decimal(str(debit_amount)).quantize(Decimal('0.01'))
+    if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS:
+        wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=user)[0]
+    else:
+        wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+    before = Decimal(str(wallet.balance))
+    if before < debit_value:
+        raise LbryDaemonInvalidParamsError(
+            f"Insufficient {'MeowPoints' if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS else 'MeowCredit'} balance."
+        )
+    after = (before - debit_value).quantize(Decimal('0.01'))
+    wallet.balance = after
+    if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS:
+        wallet.total_spent = (Decimal(str(wallet.total_spent)) + debit_value).quantize(Decimal('0.01'))
+        wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+    else:
+        wallet.total_spent = (Decimal(str(wallet.total_spent)) + debit_value).quantize(Decimal('0.01'))
+        wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+    return before, after
 
 
 DEFAULT_THUMBNAIL_PNG = base64.b64decode(
@@ -676,12 +712,6 @@ class MembershipOrderPersistenceError(LbryDaemonError):
     pass
 
 
-class ActiveMembershipExistsError(LbryDaemonError):
-    def __init__(self, membership: UserMembership):
-        self.membership = membership
-        super().__init__('Active membership already exists.')
-
-
 class WalletPrototypeError(LbryDaemonError):
     pass
 
@@ -900,20 +930,36 @@ class MembershipOrderService:
     def __init__(self, *, daemon_client: LbryDaemonClient | None = None):
         self.daemon_client = daemon_client or self.daemon_client_class()
 
+    def create_order_with_payment_asset(self, *, user, plan: MembershipPlan, payment_asset: str) -> tuple[PaymentOrder, bool]:
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_THB_LTT and not plan.allow_blockchain_payment:
+            raise LbryDaemonInvalidParamsError('This membership plan does not support thb_ltt payment.')
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS and not plan.allow_meow_points_payment:
+            raise LbryDaemonInvalidParamsError('This membership plan does not support meow_points payment.')
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT and not plan.allow_meow_credit_payment:
+            raise LbryDaemonInvalidParamsError('This membership plan does not support meow_credit payment.')
+        if payment_asset == PaymentOrder.PAYMENT_ASSET_THB_LTT:
+            order, reused = self.create_order(user=user, plan=plan)
+            if order.payment_method_code != PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN or order.payment_asset != PaymentOrder.PAYMENT_ASSET_THB_LTT:
+                order.payment_method_code = PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN
+                order.payment_asset = PaymentOrder.PAYMENT_ASSET_THB_LTT
+                order.amount_snapshot = self._membership_base_price(plan)
+                order.exchange_rate_snapshot = get_membership_payment_asset_rate(PaymentOrder.PAYMENT_ASSET_THB_LTT)
+                order.save(update_fields=['payment_method_code', 'payment_asset', 'amount_snapshot', 'exchange_rate_snapshot', 'updated_at'])
+            return order, reused
+        if payment_asset in {PaymentOrder.PAYMENT_ASSET_MEOW_POINTS, PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT}:
+            return self.create_platform_asset_order(user=user, plan=plan, payment_asset=payment_asset)
+        raise LbryDaemonInvalidParamsError('Unsupported payment asset.')
+
     @transaction.atomic
     def create_order(self, *, user, plan: MembershipPlan) -> tuple[PaymentOrder, bool]:
         now = timezone.now()
-        active_membership = UserMembership.objects.filter(
-            user=user,
-            status=UserMembership.STATUS_ACTIVE,
-            ends_at__gt=now,
-        ).select_related('plan').order_by('-ends_at', '-id').first()
-        if active_membership is not None:
-            raise ActiveMembershipExistsError(active_membership)
-
         existing_pending = PaymentOrder.objects.filter(
             user=user,
             order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            payment_method_code=PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN,
+            payment_asset=PaymentOrder.PAYMENT_ASSET_THB_LTT,
             status=PaymentOrder.STATUS_PENDING,
             expires_at__gt=now,
         ).order_by('-created_at', '-id').first()
@@ -937,6 +983,10 @@ class MembershipOrderService:
                 expires_at=timezone.now() + timedelta(minutes=settings.MEMBERSHIP_ORDER_EXPIRE_MINUTES),
                 amount='0.00',
                 currency=TOKEN_SYMBOL,
+                payment_method_code=PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN,
+                payment_asset=PaymentOrder.PAYMENT_ASSET_THB_LTT,
+                amount_snapshot=self._membership_base_price(plan),
+                exchange_rate_snapshot=get_membership_payment_asset_rate(PaymentOrder.PAYMENT_ASSET_THB_LTT),
             )
 
             platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
@@ -1005,6 +1055,68 @@ class MembershipOrderService:
                 True,
             )
             raise MembershipOrderPersistenceError('Failed to persist membership order/address assignment.') from exc
+
+    @transaction.atomic
+    def create_platform_asset_order(self, *, user, plan: MembershipPlan, payment_asset: str) -> tuple[PaymentOrder, bool]:
+        now = timezone.now()
+
+        rate = get_membership_payment_asset_rate(payment_asset)
+        amount_snapshot = self._membership_base_price(plan)
+        paid_amount = amount_snapshot * rate
+
+        before, after = _get_wallet_balance_and_update(user=user, payment_asset=payment_asset, debit_amount=paid_amount)
+
+        order = PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            plan_code_snapshot=plan.code,
+            plan_name_snapshot=plan.name,
+            expected_amount_lbc=None,
+            actual_amount_lbc=paid_amount,
+            status=PaymentOrder.STATUS_PAID,
+            paid_at=now,
+            order_no=self._generate_order_no(),
+            amount=paid_amount,
+            amount_snapshot=amount_snapshot,
+            paid_amount=paid_amount,
+            exchange_rate_snapshot=rate,
+            currency=payment_asset,
+            payment_method_code=PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET,
+            payment_asset=payment_asset,
+            expires_at=None,
+            pay_to_address='',
+            txid='',
+            confirmations=0,
+        )
+        tx = UserAssetTransaction.objects.create(
+            user=user,
+            asset_type=payment_asset,
+            direction=UserAssetTransaction.DIRECTION_DEBIT,
+            amount=paid_amount,
+            balance_before=before,
+            balance_after=after,
+            biz_type=UserAssetTransaction.BIZ_MEMBERSHIP_ORDER,
+            biz_id=order.id,
+            order_no=order.order_no,
+            note=f'Membership order {order.order_no}',
+            metadata={
+                'source': 'membership_order',
+                'plan_code': plan.code,
+                'plan_name': plan.name,
+                'payment_asset': payment_asset,
+                'base_price_amount': f'{amount_snapshot:.8f}',
+                'exchange_rate': f'{rate:.8f}',
+            },
+        )
+        order.asset_transaction = tx
+        order.save(update_fields=['asset_transaction', 'updated_at'])
+        MembershipActivationService().activate_for_order(order=order)
+        return order, False
+
+    def _membership_base_price(self, plan: MembershipPlan) -> Decimal:
+        return Decimal(str(plan.base_price_amount if plan.base_price_amount is not None else plan.price_lbc))
 
     def _generate_order_no(self) -> str:
         for _ in range(8):
@@ -1131,7 +1243,7 @@ class MembershipActivationService:
 
         existing = UserMembership.objects.filter(source_order=order).select_related('plan').first()
         if existing is not None:
-            return existing, False
+            return existing
 
         plan = MembershipPlan.objects.filter(pk=order.target_id).first()
         if plan is None:
@@ -1567,7 +1679,23 @@ class ProductOrderService:
     def _resolve_receive_address(self) -> str:
         return (settings.PRODUCT_PLATFORM_RECEIVE_ADDRESS or settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
 
+    def _platform_fee_rate(self) -> Decimal:
+        raw = getattr(settings, 'PRODUCT_PLATFORM_FEE_RATE', Decimal('0.10'))
+        rate = Decimal(str(raw))
+        if rate < 0 or rate >= 1:
+            raise ValueError('Invalid platform fee rate configuration.')
+        return rate
+
     def create_order(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress) -> ProductOrder:
+        return self.create_order_with_asset(
+            buyer=buyer,
+            product=product,
+            quantity=quantity,
+            shipping_address=shipping_address,
+            payment_asset=ProductOrder.ASSET_MEOW_CREDIT,
+        )
+
+    def create_order_with_asset(self, *, buyer, product, quantity: int, shipping_address: UserShippingAddress | None, payment_asset: str) -> ProductOrder:
         if quantity <= 0:
             raise ValueError('Quantity must be greater than zero.')
         if product.status != Product.STATUS_ACTIVE:
@@ -1576,33 +1704,14 @@ class ProductOrderService:
             raise ValueError('Seller store is not active.')
         if product.stock_quantity < quantity:
             raise ValueError('Insufficient product stock.')
-        if shipping_address.user_id != buyer.id:
+        if shipping_address is not None and shipping_address.user_id != buyer.id:
             raise ValueError('Shipping address does not belong to buyer.')
-        receive_address = ''
-        wallet_id = ''
-        account_id = ''
-        is_dynamic_address = False
-        configured_receive_address = self._resolve_receive_address()
-        if configured_receive_address:
-            receive_address = configured_receive_address
-            wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip()
-            account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip()
-        else:
-            daemon_wallet_id = (settings.LBRY_PLATFORM_WALLET_ID or '').strip() or None
-            daemon_account_id = (settings.LBRY_PLATFORM_ACCOUNT_ID or '').strip() or None
-            try:
-                daemon_result = self.daemon_client.address_unused(
-                    wallet_id=daemon_wallet_id,
-                    account_id=daemon_account_id,
-                )
-            except LbryDaemonError as exc:
-                raise RuntimeError('Unable to allocate product payment address from platform wallet.') from exc
-            receive_address = (daemon_result.get('address') or '').strip()
-            wallet_id = (daemon_result.get('wallet_id') or daemon_wallet_id or '').strip()
-            account_id = (daemon_result.get('account_id') or daemon_account_id or '').strip()
-            is_dynamic_address = True
-        if not receive_address:
-            raise RuntimeError('Unable to allocate product payment address from platform wallet.')
+        unit_price = product.meow_points_price if payment_asset == ProductOrder.ASSET_MEOW_POINTS else product.meow_credit_price
+        if unit_price is None or Decimal(str(unit_price)) <= 0:
+            if payment_asset == ProductOrder.ASSET_MEOW_POINTS:
+                raise ValueError('This product does not support MeowPoints payment.')
+            raise ValueError('This product does not support MeowCredit payment.')
+        fee_rate = self._platform_fee_rate()
 
         with transaction.atomic():
             updated = Product.objects.filter(id=product.id, stock_quantity__gte=quantity).update(stock_quantity=F('stock_quantity') - quantity)
@@ -1610,9 +1719,24 @@ class ProductOrderService:
                 raise ValueError('Insufficient product stock.')
             product.refresh_from_db(fields=['stock_quantity'])
             order_no = self._generate_order_no()
-            total_amount = (product.price_amount or Decimal('0')) * Decimal(quantity)
+            unit_price = Decimal(str(unit_price))
+            total_amount = unit_price * Decimal(quantity)
+            platform_fee_amount = (total_amount * fee_rate).quantize(Decimal('0.01'))
+            seller_receivable_amount = (total_amount - platform_fee_amount).quantize(Decimal('0.01'))
             now = timezone.now()
             expires_at = now + timedelta(minutes=int(settings.PRODUCT_ORDER_EXPIRE_MINUTES))
+            before, after = _get_wallet_balance_and_update(user=buyer, payment_asset=payment_asset, debit_amount=total_amount)
+            UserAssetTransaction.objects.create(
+                user=buyer,
+                asset_type=payment_asset,
+                direction=UserAssetTransaction.DIRECTION_DEBIT,
+                amount=total_amount,
+                balance_before=before,
+                balance_after=after,
+                biz_type=UserAssetTransaction.BIZ_PRODUCT_ORDER,
+                order_no=order_no,
+                note='product_order_payment',
+            )
             payment_order = PaymentOrder.objects.create(
                 user=buyer,
                 product=product,
@@ -1621,45 +1745,12 @@ class ProductOrderService:
                 amount=total_amount,
                 expected_amount_lbc=total_amount,
                 currency=TOKEN_SYMBOL,
-                status=PaymentOrder.STATUS_PENDING,
+                status=PaymentOrder.STATUS_PAID,
                 order_no=order_no,
-                pay_to_address=receive_address,
+                pay_to_address='',
                 expires_at=expires_at,
+                paid_at=now,
             )
-            if is_dynamic_address:
-                existing_assigned = WalletAddress.objects.filter(
-                    address=receive_address,
-                    assigned_order__isnull=False,
-                ).exclude(assigned_order=payment_order).first()
-                if existing_assigned is not None:
-                    raise RuntimeError('Unable to allocate product payment address from platform wallet.')
-                wallet_address, _ = WalletAddress.objects.update_or_create(
-                    address=receive_address,
-                    defaults={
-                        'label': f'product:{order_no}',
-                        'usage_type': WalletAddress.USAGE_PRODUCT,
-                        'status': WalletAddress.STATUS_ASSIGNED,
-                        'assigned_order': payment_order,
-                        'assigned_at': now,
-                        'wallet_id': wallet_id,
-                        'account_id': account_id,
-                    },
-                )
-            else:
-                wallet_address, _ = WalletAddress.objects.update_or_create(
-                    address=receive_address,
-                    defaults={
-                        'label': f'product:{order_no}',
-                        'usage_type': WalletAddress.USAGE_PRODUCT,
-                        'status': WalletAddress.STATUS_AVAILABLE,
-                        'assigned_order': None,
-                        'assigned_at': None,
-                        'wallet_id': wallet_id,
-                        'account_id': account_id,
-                    },
-                )
-            payment_order.wallet_address = wallet_address
-            payment_order.save(update_fields=['wallet_address', 'updated_at'])
             product_order = ProductOrder.objects.create(
                 order_no=order_no,
                 buyer=buyer,
@@ -1670,11 +1761,19 @@ class ProductOrderService:
                 quantity=quantity,
                 total_amount=total_amount,
                 currency=TOKEN_SYMBOL,
-                status=ProductOrder.STATUS_PENDING_PAYMENT,
-                shipping_address_snapshot=self._shipping_snapshot(shipping_address),
+                status=ProductOrder.STATUS_PAID,
+                payment_method=ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET,
+                payment_asset=payment_asset,
+                unit_price_snapshot=unit_price,
+                total_amount_snapshot=total_amount,
+                platform_fee_rate=fee_rate,
+                platform_fee_amount=platform_fee_amount,
+                seller_receivable_amount=seller_receivable_amount,
+                shipping_address_snapshot=self._shipping_snapshot(shipping_address) if shipping_address is not None else {},
                 payment_order=payment_order,
                 stock_locked_at=now,
                 expires_at=expires_at,
+                paid_at=now,
             )
             payment_order.target_id = product_order.id
             payment_order.save(update_fields=['target_id', 'updated_at'])
@@ -1746,8 +1845,13 @@ class ProductOrderService:
                 product_order=order,
                 defaults={
                     'seller_store': order.seller_store,
-                    'amount': order.total_amount,
+                    'amount': order.seller_receivable_amount or order.total_amount_snapshot or order.total_amount,
                     'currency': order.currency,
+                    'asset_type': order.payment_asset,
+                    'gross_amount': order.total_amount_snapshot or order.total_amount,
+                    'platform_fee_rate': order.platform_fee_rate,
+                    'platform_fee_amount': order.platform_fee_amount,
+                    'net_amount': order.seller_receivable_amount or order.total_amount_snapshot or order.total_amount,
                     'status': SellerPayout.STATUS_PENDING,
                 },
             )
@@ -1778,6 +1882,48 @@ class ProductOrderService:
             payout.paid_at = now
             payout.failure_note = ''
             payout.save(update_fields=['status', 'txid', 'payout_address', 'note', 'paid_at', 'failure_note', 'updated_at'])
+            if order.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET and order.payment_asset:
+                seller = order.seller_store.owner
+                amount = Decimal(str(order.seller_receivable_amount or Decimal('0'))).quantize(Decimal('0.01'))
+                if order.payment_asset == ProductOrder.ASSET_MEOW_POINTS:
+                    seller_wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=seller)[0]
+                    seller_wallet.balance = (Decimal(str(seller_wallet.balance)) + amount).quantize(Decimal('0.01'))
+                    seller_wallet.total_earned = (Decimal(str(seller_wallet.total_earned)) + amount).quantize(Decimal('0.01'))
+                    seller_wallet.save(update_fields=['balance', 'total_earned', 'updated_at'])
+                    MeowPointLedger.objects.create(
+                        user=seller,
+                        entry_type=MeowPointLedger.TYPE_REFUND,
+                        amount=amount,
+                        balance_before=(seller_wallet.balance - amount),
+                        balance_after=seller_wallet.balance,
+                        target_type='seller_payout',
+                        target_id=payout.id,
+                        note='seller_payout_settlement',
+                    )
+                else:
+                    seller_wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=seller)[0]
+                    seller_wallet.balance = (Decimal(str(seller_wallet.balance)) + amount).quantize(Decimal('0.01'))
+                    seller_wallet.save(update_fields=['balance', 'updated_at'])
+                    MeowCreditLedger.objects.create(
+                        user=seller,
+                        entry_type=MeowCreditLedger.TYPE_REFUND,
+                        status=MeowCreditLedger.STATUS_COMPLETED,
+                        amount=amount,
+                        balance_before=(seller_wallet.balance - amount),
+                        balance_after=seller_wallet.balance,
+                        target_type='seller_payout',
+                        target_id=payout.id,
+                        note='seller_payout_settlement',
+                    )
+                PlatformAssetLedger.objects.create(
+                    asset_type=order.payment_asset,
+                    amount=order.platform_fee_amount or Decimal('0'),
+                    direction=PlatformAssetLedger.DIRECTION_CREDIT,
+                    biz_type=PlatformAssetLedger.BIZ_PLATFORM_COMMISSION,
+                    biz_id=order.id,
+                    order_no=order.order_no,
+                    note='product_order_platform_fee',
+                )
             order.status = ProductOrder.STATUS_SETTLED
             order.settled_at = now
             order.save(update_fields=['status', 'settled_at', 'updated_at'])

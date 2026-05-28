@@ -7,6 +7,7 @@ from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
 from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
 from datetime import timedelta
+from decimal import Decimal
 import json
 import hmac
 import logging
@@ -36,13 +37,20 @@ from apps.accounts.models import (
     LiveStreamProduct,
     ManualMembershipPayment,
     MembershipPlan,
+    MeowCreditLedger,
+    MeowCreditWallet,
+    MeowPointLedger,
+    MeowPointWallet,
     PaymentOrder,
     Product,
+    ProductCategory,
     ProductOrder,
     ProductRefundRequest,
     SellerPayout,
     SellerPayoutAddress,
     SellerStore,
+    ShopBanner,
+    SavedProduct,
     StreamPaymentMethod,
     UserShippingAddress,
     UserMembership,
@@ -70,6 +78,7 @@ from apps.accounts.serializers import (
     MembershipOrderTxHintSerializer,
     MembershipOrderSerializer,
     MembershipPlanSerializer,
+    MobileShippingAddressSerializer,
     MyMembershipSerializer,
     WalletPrototypePayOrderSerializer,
     WalletPrototypePayProductOrderSerializer,
@@ -88,6 +97,7 @@ from apps.accounts.serializers import (
     ProductOrderMarkSettledSerializer,
     ProductOrderShipSerializer,
     ProductOrderTxHintSerializer,
+    ProductCategorySerializer,
     ProductRefundAdminActionSerializer,
     ProductRefundRequestCreateSerializer,
     ProductRefundRequestSerializer,
@@ -97,6 +107,10 @@ from apps.accounts.serializers import (
     PaymentOrderSerializer,
     PublicCreatorSerializer,
     RegisterSerializer,
+    SavedProductSerializer,
+    AddSavedProductSerializer,
+    ShopBannerSerializer,
+    ShopProductListSerializer,
     SellerStoreSerializer,
     UserShippingAddressSerializer,
     StreamPaymentMethodSerializer,
@@ -109,7 +123,6 @@ from apps.accounts.serializers import (
 )
 from apps.accounts.drama_serializers import DramaSeriesSerializer
 from apps.accounts.services import (
-    ActiveMembershipExistsError,
     AntMediaLiveAdapter,
     LbryDaemonConnectionError,
     LbryDaemonError,
@@ -436,6 +449,39 @@ class AccountShippingAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView)
                 next_address.save(update_fields=['is_default', 'updated_at'])
 
 
+class ShippingAddressListCreateAPIView(generics.ListCreateAPIView):
+    serializer_class = MobileShippingAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return UserShippingAddress.objects.filter(user=self.request.user)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
+
+class ShippingAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = MobileShippingAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        return UserShippingAddress.objects.filter(user=self.request.user)
+
+    def perform_destroy(self, instance):
+        was_default = instance.is_default
+        user = instance.user
+        instance.delete()
+        if was_default:
+            next_address = UserShippingAddress.objects.filter(user=user).order_by('-updated_at', '-id').first()
+            if next_address:
+                next_address.is_default = True
+                next_address.save(update_fields=['is_default', 'updated_at'])
+
+
 class ProductOrderListCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser, FormParser]
@@ -456,11 +502,12 @@ class ProductOrderListCreateAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         service = ProductOrderService()
         try:
-            order = service.create_order(
+            order = service.create_order_with_asset(
                 buyer=request.user,
                 product=serializer.validated_data['product'],
                 quantity=serializer.validated_data['quantity'],
                 shipping_address=serializer.validated_data['shipping_address'],
+                payment_asset=serializer.validated_data['payment_asset'],
             )
         except RuntimeError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -814,11 +861,54 @@ class AdminRefundRequestMarkRefundedAPIView(APIView):
         serializer = ProductRefundAdminActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         order = refund.product_order
+        if refund.refunded_asset_transaction_id is not None:
+            return Response(ProductRefundRequestSerializer(refund).data, status=status.HTTP_200_OK)
+        if order.status == ProductOrder.STATUS_SETTLED:
+            return Response({'detail': 'Settled orders cannot be auto-refunded.'}, status=status.HTTP_400_BAD_REQUEST)
         payout = getattr(order, 'seller_payout', None)
         if payout and payout.status == SellerPayout.STATUS_PENDING:
             payout.status = SellerPayout.STATUS_FAILED
             payout.failure_note = 'refund_marked'
             payout.save(update_fields=['status', 'failure_note', 'updated_at'])
+        if order.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET and order.payment_asset:
+            refund_amount = refund.requested_amount
+            with transaction.atomic():
+                amount = Decimal(str(refund_amount)).quantize(Decimal('0.01'))
+                if order.payment_asset == ProductOrder.ASSET_MEOW_POINTS:
+                    wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=order.buyer)[0]
+                    before = Decimal(str(wallet.balance))
+                    after = (before + amount).quantize(Decimal('0.01'))
+                    wallet.balance = after
+                    wallet.total_earned = (Decimal(str(wallet.total_earned)) + amount).quantize(Decimal('0.01'))
+                    wallet.save(update_fields=['balance', 'total_earned', 'updated_at'])
+                    MeowPointLedger.objects.create(
+                        user=order.buyer,
+                        entry_type=MeowPointLedger.TYPE_REFUND,
+                        amount=amount,
+                        balance_before=before,
+                        balance_after=after,
+                        target_type='product_refund',
+                        target_id=refund.id,
+                        note='product_refund',
+                    )
+                else:
+                    wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=order.buyer)[0]
+                    before = Decimal(str(wallet.balance))
+                    after = (before + amount).quantize(Decimal('0.01'))
+                    wallet.balance = after
+                    wallet.save(update_fields=['balance', 'updated_at'])
+                    MeowCreditLedger.objects.create(
+                        user=order.buyer,
+                        entry_type=MeowCreditLedger.TYPE_REFUND,
+                        status=MeowCreditLedger.STATUS_COMPLETED,
+                        amount=amount,
+                        balance_before=before,
+                        balance_after=after,
+                        target_type='product_refund',
+                        target_id=refund.id,
+                        note='product_refund',
+                    )
+                refund.refunded_asset_transaction = None
         refund.status = ProductRefundRequest.STATUS_REFUNDED
         refund.admin_note = serializer.validated_data.get('admin_note') or ''
         refund.refund_txid = serializer.validated_data.get('refund_txid') or ''
@@ -1032,6 +1122,150 @@ class PublicSellerStoreProductListAPIView(APIView):
 
         serializer = ProductSerializer(products, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ShopProductPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+    page_query_param = 'page'
+
+    def get_paginated_response(self, data):
+        return Response(
+            {
+                'count': self.page.paginator.count,
+                'page': self.page.number,
+                'page_size': self.get_page_size(self.request),
+                'results': data,
+            }
+        )
+
+    def get_page_number(self, request, paginator):
+        page_number = request.query_params.get(self.page_query_param, 1)
+        if page_number in self.last_page_strings:
+            return paginator.num_pages
+        try:
+            page_int = int(page_number)
+        except (TypeError, ValueError):
+            return 1
+        if page_int <= 0:
+            return 1
+        return page_int
+
+
+class ShopBannerListAPIView(generics.ListAPIView):
+    serializer_class = ShopBannerSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+    queryset = ShopBanner.objects.filter(is_active=True).order_by('sort_order', '-id')
+
+
+class ShopCategoryListAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        rows = list(
+            ProductCategory.objects.filter(is_active=True).order_by('sort_order', 'id')
+        )
+        payload = [{'id': 0, 'name': 'All', 'slug': 'all'}]
+        payload.extend(ProductCategorySerializer(rows, many=True).data)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class ShopProductListAPIView(generics.ListAPIView):
+    serializer_class = ShopProductListSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = ShopProductPagination
+
+    def get_queryset(self):
+        queryset = Product.objects.select_related('store', 'category').filter(
+            status=Product.STATUS_ACTIVE,
+            store__is_active=True,
+        ).order_by('-created_at', '-id')
+        category = (self.request.query_params.get('category') or '').strip().lower()
+        if category and category != 'all':
+            queryset = queryset.filter(category__slug=category, category__is_active=True)
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            queryset = queryset.filter(
+                Q(title__icontains=q) | Q(description__icontains=q) | Q(slug__icontains=q)
+            )
+        return queryset
+
+
+class ShopProductDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = ShopProductListSerializer
+    permission_classes = [permissions.AllowAny]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        return Product.objects.select_related('store', 'category').filter(
+            status=Product.STATUS_ACTIVE,
+            store__is_active=True,
+        )
+
+
+class SavedProductPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        return Response({'count': self.page.paginator.count, 'results': data})
+
+
+class CartItemListCreateAPIView(generics.ListCreateAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = SavedProductPagination
+    serializer_class = SavedProductSerializer
+
+    def get_queryset(self):
+        return SavedProduct.objects.select_related('product', 'product__store', 'product__category').filter(
+            user=self.request.user,
+            product__status=Product.STATUS_ACTIVE,
+            product__store__is_active=True,
+        ).order_by('-created_at', '-id')
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return AddSavedProductSerializer
+        return SavedProductSerializer
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        serializer = SavedProductSerializer(page, many=True, context={'request': request})
+        return self.get_paginated_response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        serializer = AddSavedProductSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        saved, _ = SavedProduct.objects.get_or_create(
+            user=request.user,
+            product=serializer.validated_data['product'],
+        )
+        return Response(SavedProductSerializer(saved, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+class CartItemDeleteAPIView(generics.DestroyAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+    queryset = SavedProduct.objects.all()
+
+    def get_queryset(self):
+        return SavedProduct.objects.filter(user=self.request.user)
+
+
+class CartCountAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        count = SavedProduct.objects.filter(
+            user=request.user,
+            product__status=Product.STATUS_ACTIVE,
+            product__store__is_active=True,
+        ).count()
+        return Response({'count': count}, status=status.HTTP_200_OK)
 
 
 class LiveStreamProductManageListCreateAPIView(APIView):
@@ -2151,6 +2385,77 @@ class PublicRelatedVideoListAPIView(generics.ListAPIView):
         return queryset.order_by('-created_at', '-id')[:limit]
 
 
+class VideoRecommendationsAPIView(generics.ListAPIView):
+    serializer_class = VideoSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['mask_locked_file_fields'] = True
+        return context
+
+    def get_queryset(self):
+        current_video = generics.get_object_or_404(
+            Video.objects.select_related('category', 'owner').filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
+            pk=self.kwargs['pk'],
+        )
+
+        try:
+            limit = int(self.request.query_params.get('limit', 10) or 10)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 30))
+
+        exclude_ids = {current_video.pk}
+        raw_exclude_ids = self.request.query_params.get('exclude_ids', '')
+        for raw in raw_exclude_ids.split(','):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                exclude_ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+
+        base = annotate_videos_for_request(
+            Video.objects.filter(
+                visibility=Video.VISIBILITY_PUBLIC,
+                status=Video.STATUS_ACTIVE,
+            ),
+            self.request,
+        )
+
+        ordered_ids = []
+
+        def append_ids(qs, remaining):
+            if remaining <= 0:
+                return
+            ids = list(
+                qs.exclude(id__in=exclude_ids)
+                .order_by('-created_at', '-id')
+                .values_list('id', flat=True)[:remaining]
+            )
+            ordered_ids.extend(ids)
+            exclude_ids.update(ids)
+
+        if current_video.category_id:
+            append_ids(base.filter(category_id=current_video.category_id), limit - len(ordered_ids))
+
+        append_ids(base.filter(owner_id=current_video.owner_id), limit - len(ordered_ids))
+
+        append_ids(base, limit - len(ordered_ids))
+
+        if not ordered_ids:
+            return base.none()
+
+        ordering = Case(*[When(pk=pk, then=pos) for pos, pk in enumerate(ordered_ids)], output_field=IntegerField())
+        return base.filter(pk__in=ordered_ids).order_by(ordering)
+
+
 class PublicVideoInteractionSummaryAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -2572,6 +2877,9 @@ class ManualMembershipPaymentInfoAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        payment_asset = (request.query_params.get('payment_asset') or PaymentOrder.PAYMENT_ASSET_THB_LTT).strip()
+        if payment_asset != PaymentOrder.PAYMENT_ASSET_THB_LTT:
+            return Response({'detail': 'manual flow only supports thb_ltt.'}, status=status.HTTP_400_BAD_REQUEST)
         plan_code = (request.query_params.get('plan_code') or '').strip()
         if not plan_code:
             return Response({'plan_code': ['This query parameter is required.']}, status=status.HTTP_400_BAD_REQUEST)
@@ -2620,6 +2928,9 @@ class ManualMembershipTxHintListAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
+        payment_asset = (request.data.get('payment_asset') or PaymentOrder.PAYMENT_ASSET_THB_LTT).strip()
+        if payment_asset != PaymentOrder.PAYMENT_ASSET_THB_LTT:
+            return Response({'detail': 'manual tx-hint only supports thb_ltt.'}, status=status.HTTP_400_BAD_REQUEST)
         serializer = ManualMembershipTxHintSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         plan = generics.get_object_or_404(
@@ -2917,33 +3228,32 @@ class MembershipOrderCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser, FormParser]
 
+    def get(self, request):
+        orders = (
+            PaymentOrder.objects.filter(
+                user=request.user,
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            )
+            .order_by('-created_at', '-id')
+        )
+        serializer = MembershipOrderSerializer(orders, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
     def post(self, request):
         serializer = MembershipOrderCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         plan = serializer.validated_data['plan']
+        payment_asset = serializer.validated_data.get('payment_asset', PaymentOrder.PAYMENT_ASSET_THB_LTT)
         service = MembershipOrderService()
         try:
-            order, reused = service.create_order(user=request.user, plan=plan)
-        except ActiveMembershipExistsError as exc:
-            membership = exc.membership
-            payload = {
-                'code': 'active_membership_exists',
-                'detail': 'You already have an active membership. Additional membership purchases are not available yet.',
-            }
-            if membership is not None and membership.plan_id:
-                payload['current_membership'] = {
-                    'plan': {
-                        'id': membership.plan_id,
-                        'code': membership.plan.code,
-                        'name': membership.plan.name,
-                    },
-                    'valid_until': membership.ends_at,
-                }
-            return Response(payload, status=status.HTTP_409_CONFLICT)
+            order, reused = service.create_order_with_payment_asset(user=request.user, plan=plan, payment_asset=payment_asset)
         except LbryDaemonConnectionError as exc:
             logger.exception('membership_order_create daemon_connection_error user_id=%s', request.user.id)
             return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except LbryDaemonInvalidParamsError as exc:
+            detail = str(exc) or 'Invalid membership payment parameters.'
+            if payment_asset in {PaymentOrder.PAYMENT_ASSET_MEOW_POINTS, PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT}:
+                return Response({'detail': detail}, status=status.HTTP_400_BAD_REQUEST)
             logger.exception('membership_order_create daemon_invalid_params user_id=%s', request.user.id)
             return Response({'detail': 'Membership payment service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except LbryDaemonRpcError as exc:
@@ -2995,6 +3305,8 @@ class MembershipOrderTxHintAPIView(APIView):
         )
         serializer = MembershipOrderTxHintSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        if order.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return Response({'detail': 'tx-hint is not supported for platform asset orders.'}, status=status.HTTP_400_BAD_REQUEST)
 
         hint_txid = serializer.validated_data['txid']
         if order.status in {PaymentOrder.STATUS_PENDING, PaymentOrder.STATUS_EXPIRED, PaymentOrder.STATUS_UNDERPAID}:
@@ -3023,6 +3335,8 @@ class MembershipOrderVerifyNowAPIView(APIView):
             order_no=order_no,
         )
         try:
+            if order.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+                return Response({'detail': 'verify-now is not supported for platform asset orders.'}, status=status.HTTP_400_BAD_REQUEST)
             verification = PaymentDetectionService().verify_order_once(order=order, txid_hint=order.txid)
         except LbryDaemonError:
             return Response({'detail': 'Verification attempt failed.'}, status=status.HTTP_502_BAD_GATEWAY)
