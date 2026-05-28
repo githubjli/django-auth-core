@@ -79,6 +79,30 @@ def get_membership_payment_asset_rate(payment_asset: str) -> Decimal:
     return rate
 
 
+def _get_wallet_balance_and_update(*, user, payment_asset: str, debit_amount: Decimal) -> tuple[int, int]:
+    debit_int = int(debit_amount)
+    if Decimal(debit_int) != debit_amount:
+        raise ValidationError('Amount must be an integer for wallet-based assets.')
+    if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS:
+        wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=user)[0]
+    else:
+        wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
+    before = int(wallet.balance)
+    if before < debit_int:
+        raise LbryDaemonInvalidParamsError(
+            f"Insufficient {'MeowPoints' if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS else 'MeowCredit'} balance."
+        )
+    after = before - debit_int
+    wallet.balance = after
+    if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS:
+        wallet.total_spent += debit_int
+        wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+    else:
+        wallet.total_spent += debit_int
+        wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
+    return before, after
+
+
 DEFAULT_THUMBNAIL_PNG = base64.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn4n/4AAAAASUVORK5CYII='
 )
@@ -1046,17 +1070,7 @@ class MembershipOrderService:
         amount_snapshot = self._membership_base_price(plan)
         paid_amount = amount_snapshot * rate
 
-        balance = UserAssetBalance.objects.select_for_update().filter(user=user, asset_type=payment_asset).first()
-        if balance is None or balance.balance < paid_amount:
-            raise LbryDaemonInvalidParamsError(
-                f"Insufficient {'MeowPoints' if payment_asset == UserAssetBalance.ASSET_MEOW_POINTS else 'MeowCredit'} balance."
-            )
-        before = balance.balance
-        after = before - paid_amount
-        if after < 0:
-            raise LbryDaemonInvalidParamsError('Insufficient balance.')
-        balance.balance = after
-        balance.save(update_fields=['balance', 'updated_at'])
+        before, after = _get_wallet_balance_and_update(user=user, payment_asset=payment_asset, debit_amount=paid_amount)
 
         order = PaymentOrder.objects.create(
             user=user,
@@ -1087,8 +1101,8 @@ class MembershipOrderService:
             asset_type=payment_asset,
             direction=UserAssetTransaction.DIRECTION_DEBIT,
             amount=paid_amount,
-            balance_before=before,
-            balance_after=after,
+            balance_before=Decimal(before),
+            balance_after=Decimal(after),
             biz_type=UserAssetTransaction.BIZ_MEMBERSHIP_ORDER,
             biz_id=order.id,
             order_no=order.order_no,
@@ -1717,22 +1731,14 @@ class ProductOrderService:
             seller_receivable_amount = (total_amount - platform_fee_amount).quantize(Decimal('0.01'))
             now = timezone.now()
             expires_at = now + timedelta(minutes=int(settings.PRODUCT_ORDER_EXPIRE_MINUTES))
-            balance = UserAssetBalance.objects.select_for_update().filter(user=buyer, asset_type=payment_asset).first()
-            if balance is None or balance.balance < total_amount:
-                raise ValueError('Insufficient MeowPoints balance.' if payment_asset == ProductOrder.ASSET_MEOW_POINTS else 'Insufficient MeowCredit balance.')
-            before = balance.balance
-            after = before - total_amount
-            if after < 0:
-                raise ValueError('Insufficient balance.')
-            balance.balance = after
-            balance.save(update_fields=['balance', 'updated_at'])
+            before, after = _get_wallet_balance_and_update(user=buyer, payment_asset=payment_asset, debit_amount=total_amount)
             UserAssetTransaction.objects.create(
                 user=buyer,
                 asset_type=payment_asset,
                 direction=UserAssetTransaction.DIRECTION_DEBIT,
                 amount=total_amount,
-                balance_before=before,
-                balance_after=after,
+                balance_before=Decimal(before),
+                balance_after=Decimal(after),
                 biz_type=UserAssetTransaction.BIZ_PRODUCT_ORDER,
                 order_no=order_no,
                 note='product_order_payment',

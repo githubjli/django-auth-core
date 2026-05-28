@@ -37,6 +37,8 @@ from apps.accounts.models import (
     GiftTransaction,
     ManualMembershipPayment,
     MembershipPlan,
+    MeowCreditWallet,
+    MeowPointWallet,
     OrderPayment,
     PaymentOrder,
     PaymentAssetRate,
@@ -13883,8 +13885,8 @@ class PlatformAssetTradeAPITestCase(APITestCase):
             status=Product.STATUS_ACTIVE,
         )
         self.addr = UserShippingAddress.objects.create(user=self.buyer, receiver_name='B', country='TH', street_address='x')
-        UserAssetBalance.objects.create(user=self.buyer, asset_type='meow_credit', balance='100.00')
-        UserAssetBalance.objects.create(user=self.buyer, asset_type='meow_points', balance='100.00')
+        MeowCreditWallet.objects.create(user=self.buyer, balance=100)
+        MeowPointWallet.objects.create(user=self.buyer, balance=100)
         self.admin = User.objects.create_user(email='asset-admin@example.com', password='pw123456', is_staff=True, is_superuser=True)
 
     def _auth(self, user):
@@ -13918,13 +13920,13 @@ class PlatformAssetTradeAPITestCase(APITestCase):
         r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': None, 'payment_asset': 'meow_points'}, format='json')
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data['status'], ProductOrder.STATUS_PAID)
-        bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
-        self.assertEqual(bal.balance, Decimal('76.00'))
+        bal = MeowCreditWallet.objects.get(user=self.buyer)
+        self.assertEqual(bal.balance, 76)
         self.assertTrue(UserAssetTransaction.objects.filter(user=self.buyer, biz_type='product_order', order_no=order.order_no).exists())
 
     def test_insufficient_balance_fail_no_stock_deduction(self):
-        bal = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit')
-        bal.balance = Decimal('1.00'); bal.save(update_fields=['balance'])
+        bal = MeowCreditWallet.objects.get(user=self.buyer)
+        bal.balance = 1; bal.save(update_fields=['balance'])
         old_stock = self.product.stock_quantity
         self._auth(self.buyer)
         r = self.client.post(reverse('product-order-list-create'), {'product_id': self.product.id, 'quantity': 1, 'shipping_address_id': self.addr.id, 'payment_asset': 'meow_credit'}, format='json')
@@ -13969,13 +13971,13 @@ class PlatformAssetTradeAPITestCase(APITestCase):
         order_no = create.data['order_no']
         req = self.client.post(reverse('product-order-refund-requests', args=[order_no]), {'reason': 'r'}, format='json')
         refund_id = req.data['id']
-        bal_before = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
+        bal_before = MeowCreditWallet.objects.get(user=self.buyer).balance
         self.client.force_authenticate(user=self.admin)
         m1 = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'admin_note': 'ok'}, format='json')
         self.assertEqual(m1.status_code, 200)
         m2 = self.client.post(reverse('admin-refund-request-mark-refunded', args=[refund_id]), {'admin_note': 'ok'}, format='json')
         self.assertEqual(m2.status_code, 200)
-        bal_after = UserAssetBalance.objects.get(user=self.buyer, asset_type='meow_credit').balance
+        bal_after = MeowCreditWallet.objects.get(user=self.buyer).balance
         self.assertEqual(bal_after - bal_before, Decimal('12.00'))
 
     def test_order_list_contains_required_product_snapshot_fields(self):
@@ -14375,10 +14377,10 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
             asset_code='meow_credit',
             defaults={'display_name': 'MeowCredit', 'exchange_rate': Decimal('10'), 'is_active': True},
         )
-        UserAssetBalance.objects.create(user=self.user, asset_type='meow_credit', balance=Decimal('120.00'))
+        MeowCreditWallet.objects.create(user=self.user, balance=120)
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_credit'}, format='json')
         self.assertEqual(r.status_code, 400)
-        UserAssetBalance.objects.filter(user=self.user, asset_type='meow_credit').update(balance=Decimal('1200.00'))
+        MeowCreditWallet.objects.filter(user=self.user).update(balance=1200)
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_credit'}, format='json')
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data['status'], 'paid')
@@ -14386,14 +14388,14 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         self.assertIsNone(r.data['pay_to_address'])
         self.assertEqual(r.data['exchange_rate_snapshot'], '10.00000000')
         self.assertEqual(r.data['paid_amount'], '1000.00000000')
-        bal = UserAssetBalance.objects.get(user=self.user, asset_type='meow_credit')
-        self.assertEqual(bal.balance, Decimal('200.00'))
+        bal = MeowCreditWallet.objects.get(user=self.user)
+        self.assertEqual(bal.balance, 200)
         tx = UserAssetTransaction.objects.get(order_no=r.data['order_no'], biz_type='membership_order')
         self.assertEqual(tx.metadata.get('payment_asset'), 'meow_credit')
         self.assertEqual(tx.metadata.get('plan_code'), self.plan.code)
 
     def test_meow_points_insufficient_balance(self):
-        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('20.00'))
+        MeowPointWallet.objects.create(user=self.user, balance=20)
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
         self.assertEqual(r.status_code, 400)
         self.assertIn('Insufficient', r.data['detail'])
@@ -14405,10 +14407,10 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         )
         self.plan.base_price_amount = Decimal('30')
         self.plan.save(update_fields=['base_price_amount'])
-        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('120.00'))
+        MeowPointWallet.objects.create(user=self.user, balance=120)
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
         self.assertEqual(r.status_code, 400)
-        UserAssetBalance.objects.filter(user=self.user, asset_type='meow_points').update(balance=Decimal('600.00'))
+        MeowPointWallet.objects.filter(user=self.user).update(balance=600)
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data['exchange_rate_snapshot'], '10.00000000')
@@ -14463,7 +14465,7 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         options = {item['asset_code']: item for item in plans.data[0]['payment_asset_options']}
         expected = options['meow_points']['estimated_payment_amount']
 
-        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('500.00'))
+        MeowPointWallet.objects.create(user=self.user, balance=500)
         created = self.client.post(
             reverse('membership-order-create'),
             {'plan_code': self.plan.code, 'payment_asset': 'meow_points'},
@@ -14474,7 +14476,7 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         self.assertEqual(created.data['display_payment_amount'], expected)
 
     def test_platform_asset_tx_hint_not_supported(self):
-        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('120.00'))
+        MeowPointWallet.objects.create(user=self.user, balance=120)
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
         self.assertEqual(r.status_code, 201)
         hint = self.client.post(reverse('membership-order-tx-hint', args=[r.data['order_no']]), {'txid': 'abc'}, format='json')
@@ -14503,7 +14505,7 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
             starts_at=now - timedelta(days=3),
             ends_at=now + timedelta(days=10),
         )
-        UserAssetBalance.objects.create(user=self.user, asset_type='meow_credit', balance=Decimal('200.00'))
+        MeowCreditWallet.objects.create(user=self.user, balance=200)
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_credit'}, format='json')
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data['status'], 'paid')
