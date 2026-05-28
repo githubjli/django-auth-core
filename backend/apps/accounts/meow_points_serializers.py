@@ -4,6 +4,12 @@ from apps.accounts.models import MeowPointLedger, MeowPointPackage, MeowPointPur
 
 
 class MeowPointWalletSerializer(serializers.ModelSerializer):
+    balance = serializers.SerializerMethodField()
+    total_earned = serializers.SerializerMethodField()
+    total_spent = serializers.SerializerMethodField()
+    total_purchased = serializers.SerializerMethodField()
+    total_bonus = serializers.SerializerMethodField()
+
     class Meta:
         model = MeowPointWallet
         fields = (
@@ -15,6 +21,27 @@ class MeowPointWalletSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         )
+
+    @staticmethod
+    def _to_legacy_int(value):
+        if value is None:
+            return 0
+        return int(value)
+
+    def get_balance(self, obj):
+        return self._to_legacy_int(obj.balance)
+
+    def get_total_earned(self, obj):
+        return self._to_legacy_int(obj.total_earned)
+
+    def get_total_spent(self, obj):
+        return self._to_legacy_int(obj.total_spent)
+
+    def get_total_purchased(self, obj):
+        return self._to_legacy_int(obj.total_purchased)
+
+    def get_total_bonus(self, obj):
+        return self._to_legacy_int(obj.total_bonus)
 
 
 class MeowPointPackageSerializer(serializers.ModelSerializer):

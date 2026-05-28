@@ -11,6 +11,12 @@ from apps.accounts.models import (
 
 
 class MeowCreditWalletSerializer(serializers.ModelSerializer):
+    balance = serializers.SerializerMethodField()
+    total_recharged = serializers.SerializerMethodField()
+    total_spent = serializers.SerializerMethodField()
+    total_redeemed = serializers.SerializerMethodField()
+    total_adjusted = serializers.SerializerMethodField()
+
     class Meta:
         model = MeowCreditWallet
         fields = (
@@ -22,6 +28,27 @@ class MeowCreditWalletSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         )
+
+    @staticmethod
+    def _to_legacy_int(value):
+        if value is None:
+            return 0
+        return int(value)
+
+    def get_balance(self, obj):
+        return self._to_legacy_int(obj.balance)
+
+    def get_total_recharged(self, obj):
+        return self._to_legacy_int(obj.total_recharged)
+
+    def get_total_spent(self, obj):
+        return self._to_legacy_int(obj.total_spent)
+
+    def get_total_redeemed(self, obj):
+        return self._to_legacy_int(obj.total_redeemed)
+
+    def get_total_adjusted(self, obj):
+        return self._to_legacy_int(obj.total_adjusted)
 
 
 class MeowCreditPackageSerializer(serializers.ModelSerializer):

@@ -4,6 +4,7 @@ from apps.accounts.views import (
     VideoCommentCreateAPIView,
     VideoDetailAPIView,
     VideoLikeAPIView,
+    VideoRecommendationsAPIView,
     VideoListCreateAPIView,
     VideoRegenerateThumbnailAPIView,
 )
@@ -18,4 +19,5 @@ urlpatterns = [
     ),
     path('<int:pk>/like/', VideoLikeAPIView.as_view(), name='video-like'),
     path('<int:pk>/comments/', VideoCommentCreateAPIView.as_view(), name='video-comment-create'),
+    path('<int:pk>/recommendations/', VideoRecommendationsAPIView.as_view(), name='video-recommendations'),
 ]
