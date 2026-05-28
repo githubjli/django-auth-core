@@ -926,14 +926,6 @@ class MembershipOrderService:
     @transaction.atomic
     def create_order(self, *, user, plan: MembershipPlan) -> tuple[PaymentOrder, bool]:
         now = timezone.now()
-        active_membership = UserMembership.objects.filter(
-            user=user,
-            status=UserMembership.STATUS_ACTIVE,
-            ends_at__gt=now,
-        ).select_related('plan').order_by('-ends_at', '-id').first()
-        if active_membership is not None:
-            raise ActiveMembershipExistsError(active_membership)
-
         existing_pending = PaymentOrder.objects.filter(
             user=user,
             order_type=PaymentOrder.TYPE_MEMBERSHIP,
@@ -1036,13 +1028,6 @@ class MembershipOrderService:
     @transaction.atomic
     def create_platform_asset_order(self, *, user, plan: MembershipPlan, payment_asset: str) -> tuple[PaymentOrder, bool]:
         now = timezone.now()
-        active_membership = UserMembership.objects.filter(
-            user=user,
-            status=UserMembership.STATUS_ACTIVE,
-            ends_at__gt=now,
-        ).select_related('plan').order_by('-ends_at', '-id').first()
-        if active_membership is not None:
-            raise ActiveMembershipExistsError(active_membership)
 
         rate_map = getattr(settings, 'MEMBERSHIP_PAYMENT_ASSET_RATES', {}) or {}
         rate = Decimal(str(rate_map.get(payment_asset, '1')))

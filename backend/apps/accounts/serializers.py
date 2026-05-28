@@ -1977,6 +1977,8 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
     payment_method = serializers.CharField(source='payment_method_code', read_only=True)
     qr_payload = serializers.SerializerMethodField()
     payment_uri = serializers.SerializerMethodField()
+    display_payment_amount = serializers.SerializerMethodField()
+    display_payment_asset = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentOrder
@@ -1990,6 +1992,8 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
             'amount_snapshot',
             'exchange_rate_snapshot',
             'paid_amount',
+            'display_payment_amount',
+            'display_payment_asset',
             'expected_amount_lbc',
             'settlement',
             'pay_to_address',
@@ -2038,6 +2042,18 @@ class MembershipOrderSerializer(serializers.ModelSerializer):
         if not obj.pay_to_address or not obj.expected_amount_lbc:
             return None
         return f"{TOKEN_SYMBOL.lower()}:{obj.pay_to_address}?amount={obj.expected_amount_lbc}"
+
+    def get_display_payment_amount(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET and obj.paid_amount is not None:
+            return obj.paid_amount
+        if obj.expected_amount_lbc is not None:
+            return obj.expected_amount_lbc
+        return obj.amount_snapshot
+
+    def get_display_payment_asset(self, obj):
+        if obj.payment_method_code == PaymentOrder.PAYMENT_METHOD_PLATFORM_ASSET:
+            return obj.payment_asset
+        return PaymentOrder.PAYMENT_ASSET_THB_LTT
 
 
 class MembershipOrderTxHintSerializer(serializers.Serializer):

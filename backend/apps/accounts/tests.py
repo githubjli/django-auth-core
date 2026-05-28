@@ -14375,3 +14375,36 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         self.assertEqual(r.status_code, 201)
         hint = self.client.post(reverse('membership-order-tx-hint', args=[r.data['order_no']]), {'txid': 'abc'}, format='json')
         self.assertEqual(hint.status_code, 400)
+
+    def test_platform_asset_allows_active_membership_renewal(self):
+        now = django_timezone.now()
+        existing_order = PaymentOrder.objects.create(
+            user=self.user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOEXIST001',
+            amount=Decimal('0'),
+            currency='thb_ltt',
+            paid_at=now,
+        )
+        current = UserMembership.objects.create(
+            user=self.user,
+            source_order=existing_order,
+            plan=self.plan,
+            status=UserMembership.STATUS_ACTIVE,
+            starts_at=now - timedelta(days=3),
+            ends_at=now + timedelta(days=10),
+        )
+        UserAssetBalance.objects.create(user=self.user, asset_type='meow_credit', balance=Decimal('200.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['status'], 'paid')
+        self.assertEqual(r.data['display_payment_asset'], 'meow_credit')
+        self.assertEqual(r.data['display_payment_amount'], '100.00000000')
+        new_membership = UserMembership.objects.exclude(id=current.id).order_by('-id').first()
+        self.assertIsNotNone(new_membership)
+        self.assertEqual(new_membership.starts_at, current.ends_at)
