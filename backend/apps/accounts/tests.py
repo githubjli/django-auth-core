@@ -14431,6 +14431,47 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         options = {item['asset_code']: item for item in plan['payment_asset_options']}
         self.assertEqual(options['thb_ltt']['estimated_payment_amount'], '30.00000000')
         self.assertEqual(options['meow_points']['estimated_payment_amount'], '300.00000000')
+        self.assertNotIn('meow_credit', options)
+
+    def test_plan_options_follow_rate_update(self):
+        self.plan.base_price_amount = Decimal('30')
+        self.plan.save(update_fields=['base_price_amount'])
+        PaymentAssetRate.objects.update_or_create(
+            asset_code='meow_points',
+            defaults={'display_name': 'MeowPoints', 'exchange_rate': Decimal('10'), 'is_active': True},
+        )
+        first = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(first.status_code, 200)
+        first_options = {item['asset_code']: item for item in first.data[0]['payment_asset_options']}
+        self.assertEqual(first_options['meow_points']['estimated_payment_amount'], '300.00000000')
+
+        PaymentAssetRate.objects.filter(asset_code='meow_points').update(exchange_rate=Decimal('12'))
+        second = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(second.status_code, 200)
+        second_options = {item['asset_code']: item for item in second.data[0]['payment_asset_options']}
+        self.assertEqual(second_options['meow_points']['estimated_payment_amount'], '360.00000000')
+
+    def test_order_display_amount_matches_plan_estimate(self):
+        self.plan.base_price_amount = Decimal('30')
+        self.plan.save(update_fields=['base_price_amount'])
+        PaymentAssetRate.objects.update_or_create(
+            asset_code='meow_points',
+            defaults={'display_name': 'MeowPoints', 'exchange_rate': Decimal('10'), 'is_active': True},
+        )
+        plans = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(plans.status_code, 200)
+        options = {item['asset_code']: item for item in plans.data[0]['payment_asset_options']}
+        expected = options['meow_points']['estimated_payment_amount']
+
+        UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('500.00'))
+        created = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': self.plan.code, 'payment_asset': 'meow_points'},
+            format='json',
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data['display_payment_asset'], 'meow_points')
+        self.assertEqual(created.data['display_payment_amount'], expected)
 
     def test_platform_asset_tx_hint_not_supported(self):
         UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('120.00'))
