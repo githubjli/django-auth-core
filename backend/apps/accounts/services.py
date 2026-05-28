@@ -55,6 +55,8 @@ from apps.accounts.models import (
     PlatformAssetLedger,
     SellerPayout,
     SellerPayoutAddress,
+    UserAssetBalance,
+    UserAssetTransaction,
     UserShippingAddress,
     WalletAddress,
     LiveChatMessage,
