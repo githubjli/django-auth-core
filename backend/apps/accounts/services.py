@@ -79,26 +79,24 @@ def get_membership_payment_asset_rate(payment_asset: str) -> Decimal:
     return rate
 
 
-def _get_wallet_balance_and_update(*, user, payment_asset: str, debit_amount: Decimal) -> tuple[int, int]:
-    debit_int = int(debit_amount)
-    if Decimal(debit_int) != debit_amount:
-        raise ValidationError('Amount must be an integer for wallet-based assets.')
+def _get_wallet_balance_and_update(*, user, payment_asset: str, debit_amount: Decimal) -> tuple[Decimal, Decimal]:
+    debit_value = Decimal(str(debit_amount)).quantize(Decimal('0.01'))
     if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS:
         wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=user)[0]
     else:
         wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=user)[0]
-    before = int(wallet.balance)
-    if before < debit_int:
+    before = Decimal(str(wallet.balance))
+    if before < debit_value:
         raise LbryDaemonInvalidParamsError(
             f"Insufficient {'MeowPoints' if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS else 'MeowCredit'} balance."
         )
-    after = before - debit_int
+    after = (before - debit_value).quantize(Decimal('0.01'))
     wallet.balance = after
     if payment_asset == PaymentOrder.PAYMENT_ASSET_MEOW_POINTS:
-        wallet.total_spent += debit_int
+        wallet.total_spent = (Decimal(str(wallet.total_spent)) + debit_value).quantize(Decimal('0.01'))
         wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
     else:
-        wallet.total_spent += debit_int
+        wallet.total_spent = (Decimal(str(wallet.total_spent)) + debit_value).quantize(Decimal('0.01'))
         wallet.save(update_fields=['balance', 'total_spent', 'updated_at'])
     return before, after
 
@@ -1101,8 +1099,8 @@ class MembershipOrderService:
             asset_type=payment_asset,
             direction=UserAssetTransaction.DIRECTION_DEBIT,
             amount=paid_amount,
-            balance_before=Decimal(before),
-            balance_after=Decimal(after),
+            balance_before=before,
+            balance_after=after,
             biz_type=UserAssetTransaction.BIZ_MEMBERSHIP_ORDER,
             biz_id=order.id,
             order_no=order.order_no,
@@ -1737,8 +1735,8 @@ class ProductOrderService:
                 asset_type=payment_asset,
                 direction=UserAssetTransaction.DIRECTION_DEBIT,
                 amount=total_amount,
-                balance_before=Decimal(before),
-                balance_after=Decimal(after),
+                balance_before=before,
+                balance_after=after,
                 biz_type=UserAssetTransaction.BIZ_PRODUCT_ORDER,
                 order_no=order_no,
                 note='product_order_payment',

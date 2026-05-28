@@ -1800,11 +1800,11 @@ class MeowCreditWallet(models.Model):
         on_delete=models.CASCADE,
         related_name='meow_credit_wallet',
     )
-    balance = models.IntegerField(default=0)
-    total_recharged = models.PositiveIntegerField(default=0)
-    total_spent = models.PositiveIntegerField(default=0)
-    total_redeemed = models.PositiveIntegerField(default=0)
-    total_adjusted = models.PositiveIntegerField(default=0)
+    balance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_recharged = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_spent = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_redeemed = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_adjusted = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
@@ -1875,9 +1875,9 @@ class MeowCreditLedger(models.Model):
     )
     entry_type = models.CharField(max_length=24, choices=ENTRY_TYPE_CHOICES)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_COMPLETED)
-    amount = models.IntegerField()
-    balance_before = models.IntegerField()
-    balance_after = models.IntegerField()
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_before = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
     target_type = models.CharField(max_length=64, blank=True, default='')
     target_id = models.PositiveBigIntegerField(null=True, blank=True)
     payment_order = models.ForeignKey(
@@ -2049,11 +2049,11 @@ class MeowPointWallet(models.Model):
         on_delete=models.CASCADE,
         related_name='meow_point_wallet',
     )
-    balance = models.IntegerField(default=0)
-    total_earned = models.PositiveIntegerField(default=0)
-    total_spent = models.PositiveIntegerField(default=0)
-    total_purchased = models.PositiveIntegerField(default=0)
-    total_bonus = models.PositiveIntegerField(default=0)
+    balance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_earned = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_spent = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_purchased = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_bonus = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
@@ -2111,9 +2111,9 @@ class MeowPointLedger(models.Model):
         related_name='meow_point_ledger_entries',
     )
     entry_type = models.CharField(max_length=24, choices=ENTRY_TYPE_CHOICES)
-    amount = models.IntegerField()
-    balance_before = models.IntegerField()
-    balance_after = models.IntegerField()
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_before = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
     target_type = models.CharField(max_length=64, blank=True, default='')
     target_id = models.PositiveBigIntegerField(null=True, blank=True)
     payment_order = models.ForeignKey(
