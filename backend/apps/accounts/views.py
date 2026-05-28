@@ -3229,6 +3229,17 @@ class MembershipOrderCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser, FormParser]
 
+    def get(self, request):
+        orders = (
+            PaymentOrder.objects.filter(
+                user=request.user,
+                order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            )
+            .order_by('-created_at', '-id')
+        )
+        serializer = MembershipOrderSerializer(orders, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
     def post(self, request):
         serializer = MembershipOrderCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

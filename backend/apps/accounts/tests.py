@@ -14514,3 +14514,41 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         new_membership = UserMembership.objects.exclude(id=current.id).order_by('-id').first()
         self.assertIsNotNone(new_membership)
         self.assertEqual(new_membership.starts_at, current.ends_at)
+
+    def test_membership_orders_get_list_includes_platform_asset(self):
+        MeowPointWallet.objects.create(user=self.user, balance=Decimal('500.00'))
+        created = self.client.post(
+            reverse('membership-order-create'),
+            {'plan_code': self.plan.code, 'payment_asset': 'meow_points'},
+            format='json',
+        )
+        self.assertEqual(created.status_code, 201)
+        listed = self.client.get(reverse('membership-order-create'))
+        self.assertEqual(listed.status_code, 200)
+        self.assertGreaterEqual(len(listed.data), 1)
+        first = listed.data[0]
+        self.assertIn('order_no', first)
+        self.assertIn('status', first)
+        self.assertIn('payment_asset', first)
+        self.assertIn('display_payment_amount', first)
+        self.assertIn('display_payment_asset', first)
+        self.assertEqual(first['payment_asset'], 'meow_points')
+
+    def test_membership_orders_get_list_only_current_user(self):
+        other = User.objects.create_user(email='member-other@example.com', password='pw123456')
+        PaymentOrder.objects.create(
+            user=other,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            status=PaymentOrder.STATUS_PAID,
+            order_no='MOOTHER001',
+            amount=Decimal('0'),
+            currency='thb_ltt',
+        )
+        listed = self.client.get(reverse('membership-order-create'))
+        self.assertEqual(listed.status_code, 200)
+        order_nos = [row['order_no'] for row in listed.data]
+        self.assertNotIn('MOOTHER001', order_nos)
