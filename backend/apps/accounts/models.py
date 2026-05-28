@@ -1517,6 +1517,35 @@ class MembershipPlan(models.Model):
         return self.name
 
 
+class PaymentAssetRate(models.Model):
+    ASSET_THB_LTT = 'thb_ltt'
+    ASSET_MEOW_POINTS = 'meow_points'
+    ASSET_MEOW_CREDIT = 'meow_credit'
+    ASSET_CHOICES = [
+        (ASSET_THB_LTT, 'THB-LTT'),
+        (ASSET_MEOW_POINTS, 'MeowPoints'),
+        (ASSET_MEOW_CREDIT, 'MeowCredit'),
+    ]
+
+    asset_code = models.CharField(max_length=32, unique=True, choices=ASSET_CHOICES)
+    display_name = models.CharField(max_length=64)
+    exchange_rate = models.DecimalField(max_digits=20, decimal_places=8, default=1)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['sort_order', 'asset_code']
+
+    def clean(self):
+        if self.exchange_rate is not None and self.exchange_rate <= 0:
+            raise ValidationError({'exchange_rate': 'exchange_rate must be greater than 0.'})
+
+    def __str__(self) -> str:
+        return f'{self.asset_code}:{self.exchange_rate}'
+
+
 class WalletAddress(models.Model):
     USAGE_MEMBERSHIP = 'membership'
     USAGE_PRODUCT = 'product'

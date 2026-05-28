@@ -49,6 +49,7 @@ from apps.accounts.models import (
     PaymentOrder,
     Product,
     ProductOrder,
+    PaymentAssetRate,
     ProductShipment,
     ProductRefundRequest,
     PlatformAssetLedger,
@@ -64,6 +65,18 @@ from apps.accounts.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_membership_payment_asset_rate(payment_asset: str) -> Decimal:
+    configured = PaymentAssetRate.objects.filter(asset_code=payment_asset, is_active=True).order_by('sort_order', 'asset_code').first()
+    if configured is not None:
+        rate = Decimal(str(configured.exchange_rate))
+    else:
+        rate_map = getattr(settings, 'MEMBERSHIP_PAYMENT_ASSET_RATES', {}) or {}
+        rate = Decimal(str(rate_map.get(payment_asset, '1')))
+    if rate <= 0:
+        raise LbryDaemonInvalidParamsError(f'Invalid membership payment rate for asset: {payment_asset}')
+    return rate
 
 
 DEFAULT_THUMBNAIL_PNG = base64.b64decode(
@@ -916,7 +929,7 @@ class MembershipOrderService:
                 order.payment_method_code = PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN
                 order.payment_asset = PaymentOrder.PAYMENT_ASSET_THB_LTT
                 order.amount_snapshot = self._membership_base_price(plan)
-                order.exchange_rate_snapshot = Decimal('1')
+                order.exchange_rate_snapshot = get_membership_payment_asset_rate(PaymentOrder.PAYMENT_ASSET_THB_LTT)
                 order.save(update_fields=['payment_method_code', 'payment_asset', 'amount_snapshot', 'exchange_rate_snapshot', 'updated_at'])
             return order, reused
         if payment_asset in {PaymentOrder.PAYMENT_ASSET_MEOW_POINTS, PaymentOrder.PAYMENT_ASSET_MEOW_CREDIT}:
@@ -955,7 +968,7 @@ class MembershipOrderService:
                 payment_method_code=PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN,
                 payment_asset=PaymentOrder.PAYMENT_ASSET_THB_LTT,
                 amount_snapshot=self._membership_base_price(plan),
-                exchange_rate_snapshot=Decimal('1'),
+                exchange_rate_snapshot=get_membership_payment_asset_rate(PaymentOrder.PAYMENT_ASSET_THB_LTT),
             )
 
             platform_receive_address = (settings.LBRY_PLATFORM_RECEIVE_ADDRESS or '').strip()
@@ -1029,8 +1042,7 @@ class MembershipOrderService:
     def create_platform_asset_order(self, *, user, plan: MembershipPlan, payment_asset: str) -> tuple[PaymentOrder, bool]:
         now = timezone.now()
 
-        rate_map = getattr(settings, 'MEMBERSHIP_PAYMENT_ASSET_RATES', {}) or {}
-        rate = Decimal(str(rate_map.get(payment_asset, '1')))
+        rate = get_membership_payment_asset_rate(payment_asset)
         amount_snapshot = self._membership_base_price(plan)
         paid_amount = amount_snapshot * rate
 

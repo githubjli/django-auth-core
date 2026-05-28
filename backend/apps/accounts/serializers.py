@@ -13,6 +13,7 @@ from apps.accounts.models import (
     BillingSubscription,
     ManualMembershipPayment,
     MembershipPlan,
+    PaymentAssetRate,
     Category,
     ChannelSubscription,
     GiftTransaction,
@@ -41,7 +42,7 @@ from apps.accounts.models import (
     VideoLike,
     UserMembership,
 )
-from apps.accounts.services import AntMediaLiveAdapter, ProductOrderService
+from apps.accounts.services import AntMediaLiveAdapter, ProductOrderService, get_membership_payment_asset_rate
 
 User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
@@ -1867,6 +1868,7 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
     settlement = serializers.SerializerMethodField()
     supported_payment_assets = serializers.SerializerMethodField()
     base_price_amount = serializers.SerializerMethodField()
+    payment_asset_options = serializers.SerializerMethodField()
 
     class Meta:
         model = MembershipPlan
@@ -1879,6 +1881,7 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
             'base_price_amount',
             'base_price_asset',
             'supported_payment_assets',
+            'payment_asset_options',
             'settlement',
             'duration_days',
             'is_active',
@@ -1906,6 +1909,25 @@ class MembershipPlanSerializer(serializers.ModelSerializer):
 
     def get_base_price_amount(self, obj):
         return obj.base_price_amount if obj.base_price_amount is not None else obj.price_lbc
+
+    def get_payment_asset_options(self, obj):
+        base_amount = self.get_base_price_amount(obj)
+        options = []
+        for asset_code in self.get_supported_payment_assets(obj):
+            rate = get_membership_payment_asset_rate(asset_code)
+            display_name = dict(PaymentAssetRate.ASSET_CHOICES).get(asset_code, asset_code)
+            configured = PaymentAssetRate.objects.filter(asset_code=asset_code, is_active=True).order_by('sort_order', 'asset_code').first()
+            if configured and configured.display_name:
+                display_name = configured.display_name
+            options.append(
+                {
+                    'asset_code': asset_code,
+                    'display_name': display_name,
+                    'exchange_rate': f'{rate:.8f}',
+                    'estimated_payment_amount': f'{(base_amount * rate):.8f}',
+                }
+            )
+        return options
 
 
 class ManualMembershipTxHintSubmitSerializer(serializers.Serializer):

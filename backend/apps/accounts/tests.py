@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.contrib import admin
 from django.core import management
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
@@ -38,6 +39,7 @@ from apps.accounts.models import (
     MembershipPlan,
     OrderPayment,
     PaymentOrder,
+    PaymentAssetRate,
     ProductOrder,
     ProductRefundRequest,
     ProductShipment,
@@ -65,6 +67,7 @@ from apps.accounts.services import (
     LbryDaemonError,
     ManualMembershipChainVerifier,
     MembershipActivationService,
+    get_membership_payment_asset_rate,
     PaymentDetectionService,
     ProductOrderService,
     ProductPaymentDetectionService,
@@ -14317,6 +14320,33 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         self.assertIn('price_lbc', r.data[0])
         self.assertIn('base_price_amount', r.data[0])
         self.assertIn('base_price_asset', r.data[0])
+        self.assertIn('payment_asset_options', r.data[0])
+
+    def test_payment_asset_rate_seed_exists(self):
+        self.assertTrue(PaymentAssetRate.objects.filter(asset_code='thb_ltt').exists())
+        self.assertTrue(PaymentAssetRate.objects.filter(asset_code='meow_points').exists())
+        self.assertTrue(PaymentAssetRate.objects.filter(asset_code='meow_credit').exists())
+
+    def test_payment_asset_rate_admin_registered(self):
+        self.assertIn(PaymentAssetRate, admin.site._registry)
+
+    def test_get_membership_rate_prefers_db_then_fallback_settings(self):
+        PaymentAssetRate.objects.update_or_create(
+            asset_code='meow_points',
+            defaults={'display_name': 'MeowPoints', 'exchange_rate': Decimal('12'), 'is_active': True},
+        )
+        self.assertEqual(get_membership_payment_asset_rate('meow_points'), Decimal('12'))
+        PaymentAssetRate.objects.filter(asset_code='meow_points').update(is_active=False)
+        with override_settings(MEMBERSHIP_PAYMENT_ASSET_RATES={'meow_points': '7'}):
+            self.assertEqual(get_membership_payment_asset_rate('meow_points'), Decimal('7'))
+
+    def test_get_membership_rate_non_positive_raises(self):
+        PaymentAssetRate.objects.update_or_create(
+            asset_code='meow_credit',
+            defaults={'display_name': 'MeowCredit', 'exchange_rate': Decimal('0'), 'is_active': True},
+        )
+        with self.assertRaises(Exception):
+            get_membership_payment_asset_rate('meow_credit')
 
     def test_supported_assets_follow_plan_flags(self):
         self.plan.allow_meow_points_payment = False
@@ -14341,15 +14371,23 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         self.assertEqual(r.data['payment_method'], 'blockchain')
 
     def test_meow_credit_success_and_balance_debit(self):
+        PaymentAssetRate.objects.update_or_create(
+            asset_code='meow_credit',
+            defaults={'display_name': 'MeowCredit', 'exchange_rate': Decimal('10'), 'is_active': True},
+        )
         UserAssetBalance.objects.create(user=self.user, asset_type='meow_credit', balance=Decimal('120.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_credit'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        UserAssetBalance.objects.filter(user=self.user, asset_type='meow_credit').update(balance=Decimal('1200.00'))
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_credit'}, format='json')
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data['status'], 'paid')
         self.assertEqual(r.data['payment_method'], 'platform_asset')
         self.assertIsNone(r.data['pay_to_address'])
-        self.assertEqual(r.data['exchange_rate_snapshot'], '1.00000000')
+        self.assertEqual(r.data['exchange_rate_snapshot'], '10.00000000')
+        self.assertEqual(r.data['paid_amount'], '1000.00000000')
         bal = UserAssetBalance.objects.get(user=self.user, asset_type='meow_credit')
-        self.assertEqual(bal.balance, Decimal('20.00'))
+        self.assertEqual(bal.balance, Decimal('200.00'))
         tx = UserAssetTransaction.objects.get(order_no=r.data['order_no'], biz_type='membership_order')
         self.assertEqual(tx.metadata.get('payment_asset'), 'meow_credit')
         self.assertEqual(tx.metadata.get('plan_code'), self.plan.code)
@@ -14361,13 +14399,38 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         self.assertIn('Insufficient', r.data['detail'])
 
     def test_membership_me_active_after_platform_asset_paid(self):
+        PaymentAssetRate.objects.update_or_create(
+            asset_code='meow_points',
+            defaults={'display_name': 'MeowPoints', 'exchange_rate': Decimal('10'), 'is_active': True},
+        )
+        self.plan.base_price_amount = Decimal('30')
+        self.plan.save(update_fields=['base_price_amount'])
         UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('120.00'))
         r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        UserAssetBalance.objects.filter(user=self.user, asset_type='meow_points').update(balance=Decimal('600.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
         self.assertEqual(r.status_code, 201)
-        self.assertEqual(r.data['exchange_rate_snapshot'], '1.00000000')
+        self.assertEqual(r.data['exchange_rate_snapshot'], '10.00000000')
+        self.assertEqual(r.data['amount_snapshot'], '30.00000000')
+        self.assertEqual(r.data['paid_amount'], '300.00000000')
         me = self.client.get(reverse('membership-me'))
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.data['status'], 'active')
+
+    def test_plan_payment_asset_options_and_allow_flags(self):
+        self.plan.base_price_amount = Decimal('30')
+        self.plan.allow_meow_credit_payment = False
+        self.plan.save(update_fields=['base_price_amount', 'allow_meow_credit_payment'])
+        PaymentAssetRate.objects.update_or_create(asset_code='thb_ltt', defaults={'display_name': 'THB-LTT', 'exchange_rate': Decimal('1'), 'is_active': True})
+        PaymentAssetRate.objects.update_or_create(asset_code='meow_points', defaults={'display_name': 'MeowPoints', 'exchange_rate': Decimal('10'), 'is_active': True})
+        r = self.client.get(reverse('membership-plan-list'))
+        self.assertEqual(r.status_code, 200)
+        plan = r.data[0]
+        self.assertEqual(plan['supported_payment_assets'], ['thb_ltt', 'meow_points'])
+        options = {item['asset_code']: item for item in plan['payment_asset_options']}
+        self.assertEqual(options['thb_ltt']['estimated_payment_amount'], '30.00000000')
+        self.assertEqual(options['meow_points']['estimated_payment_amount'], '300.00000000')
 
     def test_platform_asset_tx_hint_not_supported(self):
         UserAssetBalance.objects.create(user=self.user, asset_type='meow_points', balance=Decimal('120.00'))

@@ -32,6 +32,7 @@ from apps.accounts.models import (
     MeowCreditRedeemRequest,
     MeowCreditWallet,
     MembershipPlan,
+    PaymentAssetRate,
     MeowPointLedger,
     MeowPointPackage,
     MeowPointPurchase,
@@ -741,6 +742,21 @@ class MembershipPlanAdmin(admin.ModelAdmin):
     search_fields = ('code', 'name', 'description')
     ordering = ('sort_order', 'id')
     readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(PaymentAssetRate)
+class PaymentAssetRateAdmin(admin.ModelAdmin):
+    list_display = ('asset_code', 'display_name', 'exchange_rate', 'is_active', 'sort_order', 'updated_at')
+    search_fields = ('asset_code', 'display_name')
+    list_filter = ('is_active',)
+    ordering = ('sort_order', 'asset_code')
+    readonly_fields = ('created_at', 'updated_at')
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = list(self.readonly_fields)
+        if obj is not None:
+            fields.append('asset_code')
+        return tuple(fields)
 
 
 @admin.register(ManualMembershipPayment)
