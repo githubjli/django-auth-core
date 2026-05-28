@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+import logging
 from rest_framework import generics
 from rest_framework import status
 from rest_framework import serializers
@@ -18,12 +19,18 @@ from apps.accounts.models import MeowPointLedger, MeowPointPackage, MeowPointPur
 from apps.accounts.services import MeowPointPurchaseService, MeowPointService
 
 
+logger = logging.getLogger(__name__)
+
+
 class MeowPointWalletAPIView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = MeowPointWalletSerializer
 
     def get_object(self):
-        return MeowPointService.get_or_create_wallet(self.request.user)
+        wallet, created = MeowPointService.get_or_create_wallet_with_flag(self.request.user)
+        if created:
+            logger.warning('unexpected meow point wallet auto-created user_id=%s', self.request.user.id)
+        return wallet
 
 
 class MeowPointPackageListAPIView(generics.ListAPIView):

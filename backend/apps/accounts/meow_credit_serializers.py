@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from decimal import Decimal
 
 from apps.accounts.constants import TOKEN_SYMBOL
 from apps.accounts.models import (
@@ -11,10 +12,18 @@ from apps.accounts.models import (
 
 
 class MeowCreditWalletSerializer(serializers.ModelSerializer):
+    balance = serializers.SerializerMethodField()
+    balance_display = serializers.SerializerMethodField()
+    total_recharged = serializers.SerializerMethodField()
+    total_spent = serializers.SerializerMethodField()
+    total_redeemed = serializers.SerializerMethodField()
+    total_adjusted = serializers.SerializerMethodField()
+
     class Meta:
         model = MeowCreditWallet
         fields = (
             'balance',
+            'balance_display',
             'total_recharged',
             'total_spent',
             'total_redeemed',
@@ -22,6 +31,30 @@ class MeowCreditWalletSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         )
+
+    @staticmethod
+    def _format_decimal(value):
+        if value is None:
+            return '0.00'
+        return f"{Decimal(str(value)):.2f}"
+
+    def get_balance(self, obj):
+        return self._format_decimal(obj.balance)
+
+    def get_balance_display(self, obj):
+        return self._format_decimal(obj.balance)
+
+    def get_total_recharged(self, obj):
+        return self._format_decimal(obj.total_recharged)
+
+    def get_total_spent(self, obj):
+        return self._format_decimal(obj.total_spent)
+
+    def get_total_redeemed(self, obj):
+        return self._format_decimal(obj.total_redeemed)
+
+    def get_total_adjusted(self, obj):
+        return self._format_decimal(obj.total_adjusted)
 
 
 class MeowCreditPackageSerializer(serializers.ModelSerializer):
