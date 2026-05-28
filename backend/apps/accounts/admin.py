@@ -40,7 +40,15 @@ from apps.accounts.models import (
     PaymentOrder,
     StreamPaymentMethod,
     Product,
+    ProductCategory,
+    ProductOrder,
+    SavedProduct,
+    SellerPayout,
+    PlatformAssetLedger,
     SellerStore,
+    ShopBanner,
+    UserAssetBalance,
+    UserAssetTransaction,
     User,
     UserMembership,
     Video,
@@ -534,16 +542,90 @@ class ProductAdmin(admin.ModelAdmin):
         'store',
         'price_amount',
         'price_currency',
+        'meow_points_price',
+        'meow_credit_price',
         'stock_quantity',
         'status',
         'created_at',
         'updated_at',
     )
-    list_filter = ('status', 'price_currency', 'created_at')
+    list_filter = ('status', 'price_currency', 'category', 'created_at')
     search_fields = ('title', 'slug', 'store__name', 'store__slug', 'store__owner__email')
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
-    autocomplete_fields = ('store',)
+    autocomplete_fields = ('store', 'category')
+
+
+@admin.register(ProductCategory)
+class ProductCategoryAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'slug', 'is_active', 'sort_order', 'created_at', 'updated_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('name', 'slug')
+    ordering = ('sort_order', 'id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ShopBanner)
+class ShopBannerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'title', 'is_active', 'sort_order', 'target_url', 'created_at', 'updated_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('title', 'subtitle', 'target_url')
+    ordering = ('sort_order', '-id')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ProductOrder)
+class ProductOrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'order_no', 'buyer', 'seller_store', 'status', 'payment_method', 'payment_asset',
+        'total_amount_snapshot', 'platform_fee_amount', 'seller_receivable_amount', 'created_at',
+    )
+    list_filter = ('status', 'payment_method', 'payment_asset', 'created_at')
+    search_fields = ('order_no', 'buyer__email', 'seller_store__name')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(SellerPayout)
+class SellerPayoutAdmin(admin.ModelAdmin):
+    list_display = (
+        'id', 'product_order', 'seller_store', 'asset_type', 'gross_amount', 'platform_fee_amount', 'net_amount', 'status', 'paid_at'
+    )
+    list_filter = ('status', 'asset_type', 'created_at')
+    search_fields = ('product_order__order_no', 'seller_store__name')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(UserAssetBalance)
+class UserAssetBalanceAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'asset_type', 'balance', 'updated_at')
+    list_filter = ('asset_type',)
+    search_fields = ('user__email',)
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(UserAssetTransaction)
+class UserAssetTransactionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'asset_type', 'direction', 'amount', 'biz_type', 'order_no', 'created_at')
+    list_filter = ('asset_type', 'direction', 'biz_type')
+    search_fields = ('user__email', 'order_no')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(PlatformAssetLedger)
+class PlatformAssetLedgerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'asset_type', 'direction', 'amount', 'biz_type', 'order_no', 'created_at')
+    list_filter = ('asset_type', 'direction', 'biz_type')
+    search_fields = ('order_no',)
+    readonly_fields = ('created_at',)
+
+
+@admin.register(SavedProduct)
+class SavedProductAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'product', 'created_at')
+    list_filter = ('created_at', 'product__status')
+    search_fields = ('user__email', 'product__title')
+    ordering = ('-created_at', '-id')
+    readonly_fields = ('created_at',)
 
 
 @admin.register(LiveStreamProduct)
@@ -641,7 +723,20 @@ class PaymentOrderAdmin(admin.ModelAdmin):
 
 @admin.register(MembershipPlan)
 class MembershipPlanAdmin(admin.ModelAdmin):
-    list_display = ('id', 'code', 'name', 'price_lbc', 'duration_days', 'is_active', 'sort_order')
+    list_display = (
+        'id',
+        'code',
+        'name',
+        'price_lbc',
+        'base_price_amount',
+        'base_price_asset',
+        'allow_blockchain_payment',
+        'allow_meow_points_payment',
+        'allow_meow_credit_payment',
+        'duration_days',
+        'is_active',
+        'sort_order',
+    )
     list_filter = ('is_active', 'code')
     search_fields = ('code', 'name', 'description')
     ordering = ('sort_order', 'id')
