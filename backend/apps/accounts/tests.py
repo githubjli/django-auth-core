@@ -5097,7 +5097,7 @@ class MembershipAPITestCase(APITestCase):
         self.assertEqual(active_response.data['plan']['code'], self.plan.code)
 
     @patch('apps.accounts.services.LbryDaemonClient.address_unused')
-    def test_active_member_cannot_create_order_for_same_plan(self, mock_address_unused):
+    def test_active_member_can_create_order_for_same_plan(self, mock_address_unused):
         mock_address_unused.return_value = {'address': 'bNotUsedAddress001'}
         user = self.create_user('active-same@example.com')
         self.client.force_authenticate(user=user)
@@ -5119,13 +5119,12 @@ class MembershipAPITestCase(APITestCase):
         )
 
         response = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code}, format='json')
-        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data['code'], 'active_membership_exists')
-        self.assertEqual(response.data['current_membership']['plan']['code'], self.plan.code)
-        mock_address_unused.assert_not_called()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['plan_code'], self.plan.code)
+        mock_address_unused.assert_called_once()
 
     @patch('apps.accounts.services.LbryDaemonClient.address_unused')
-    def test_active_member_cannot_create_order_for_different_plan(self, mock_address_unused):
+    def test_active_member_can_create_order_for_different_plan(self, mock_address_unused):
         mock_address_unused.return_value = {'address': 'bNotUsedAddress002'}
         quarterly_plan = MembershipPlan.objects.create(
             code=MembershipPlan.CODE_QUARTERLY,
@@ -5156,10 +5155,9 @@ class MembershipAPITestCase(APITestCase):
         )
 
         response = self.client.post(reverse('membership-order-create'), {'plan_code': quarterly_plan.code}, format='json')
-        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data['code'], 'active_membership_exists')
-        self.assertEqual(response.data['current_membership']['plan']['code'], self.plan.code)
-        mock_address_unused.assert_not_called()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['plan_code'], quarterly_plan.code)
+        mock_address_unused.assert_called_once()
 
     @patch('apps.accounts.services.LbryDaemonClient.address_unused')
     def test_pending_membership_order_is_reused(self, mock_address_unused):
@@ -5187,6 +5185,41 @@ class MembershipAPITestCase(APITestCase):
         self.assertTrue(response.data['reused'])
         self.assertEqual(PaymentOrder.objects.filter(user=user, order_type=PaymentOrder.TYPE_MEMBERSHIP).count(), 1)
         mock_address_unused.assert_not_called()
+
+    @patch('apps.accounts.services.LbryDaemonClient.address_unused')
+    def test_pending_monthly_order_not_reused_for_yearly(self, mock_address_unused):
+        mock_address_unused.return_value = {'address': 'bNewYearlyAddress001'}
+        yearly_plan = MembershipPlan.objects.create(
+            code=MembershipPlan.CODE_YEARLY,
+            name='Yearly',
+            description='Yearly plan',
+            price_lbc='100.00000000',
+            duration_days=365,
+            is_active=True,
+            sort_order=3,
+        )
+        user = self.create_user('reuse-yearly@example.com')
+        self.client.force_authenticate(user=user)
+        PaymentOrder.objects.create(
+            user=user,
+            order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=self.plan.id,
+            plan_code_snapshot=self.plan.code,
+            plan_name_snapshot=self.plan.name,
+            expected_amount_lbc=self.plan.price_lbc,
+            amount='0.00',
+            currency='LBC',
+            status=PaymentOrder.STATUS_PENDING,
+            order_no='MOREUSEM001',
+            pay_to_address='bReuseMonthly001',
+            expires_at=django_timezone.now() + timedelta(minutes=30),
+            payment_method_code=PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN,
+            payment_asset=PaymentOrder.PAYMENT_ASSET_THB_LTT,
+        )
+        response = self.client.post(reverse('membership-order-create'), {'plan_code': yearly_plan.code}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(response.data['order_no'], 'MOREUSEM001')
 
     @patch('apps.accounts.services.LbryDaemonClient.address_unused')
     def test_expired_pending_order_does_not_block_new_order(self, mock_address_unused):
@@ -14419,6 +14452,17 @@ class MembershipPaymentAssetAPITestCase(APITestCase):
         me = self.client.get(reverse('membership-me'))
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.data['status'], 'active')
+
+    def test_platform_asset_activate_for_order_idempotent(self):
+        MeowPointWallet.objects.create(user=self.user, balance=Decimal('500.00'))
+        r = self.client.post(reverse('membership-order-create'), {'plan_code': self.plan.code, 'payment_asset': 'meow_points'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        order = PaymentOrder.objects.get(order_no=r.data['order_no'])
+        activation = MembershipActivationService()
+        first = activation.activate_for_order(order=order)
+        second = activation.activate_for_order(order=order)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(UserMembership.objects.filter(source_order=order).count(), 1)
 
     def test_plan_payment_asset_options_and_allow_flags(self):
         self.plan.base_price_amount = Decimal('30')

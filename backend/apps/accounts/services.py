@@ -714,12 +714,6 @@ class MembershipOrderPersistenceError(LbryDaemonError):
     pass
 
 
-class ActiveMembershipExistsError(LbryDaemonError):
-    def __init__(self, membership: UserMembership):
-        self.membership = membership
-        super().__init__('Active membership already exists.')
-
-
 class WalletPrototypeError(LbryDaemonError):
     pass
 
@@ -964,6 +958,10 @@ class MembershipOrderService:
         existing_pending = PaymentOrder.objects.filter(
             user=user,
             order_type=PaymentOrder.TYPE_MEMBERSHIP,
+            target_type='membership_plan',
+            target_id=plan.id,
+            payment_method_code=PaymentOrder.PAYMENT_METHOD_BLOCKCHAIN,
+            payment_asset=PaymentOrder.PAYMENT_ASSET_THB_LTT,
             status=PaymentOrder.STATUS_PENDING,
             expires_at__gt=now,
         ).order_by('-created_at', '-id').first()
@@ -1247,7 +1245,7 @@ class MembershipActivationService:
 
         existing = UserMembership.objects.filter(source_order=order).select_related('plan').first()
         if existing is not None:
-            return existing, False
+            return existing
 
         plan = MembershipPlan.objects.filter(pk=order.target_id).first()
         if plan is None:
