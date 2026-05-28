@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
+import logging
 from rest_framework import generics, serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -23,12 +24,18 @@ from apps.accounts.meow_credit_serializers import (
 from apps.accounts.services import LbryDaemonError, MeowCreditPaymentDetectionService, MeowCreditRechargeService, MeowCreditService
 
 
+logger = logging.getLogger(__name__)
+
+
 class MeowCreditWalletAPIView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = MeowCreditWalletSerializer
 
     def get_object(self):
-        return MeowCreditService.get_or_create_wallet(self.request.user)
+        wallet, created = MeowCreditService.get_or_create_wallet_with_flag(self.request.user)
+        if created:
+            logger.warning('unexpected meow credit wallet auto-created user_id=%s', self.request.user.id)
+        return wallet
 
 
 class MeowCreditPackageListAPIView(generics.ListAPIView):

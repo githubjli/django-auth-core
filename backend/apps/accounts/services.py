@@ -2623,6 +2623,10 @@ class MeowPointService:
         return wallet
 
     @staticmethod
+    def get_or_create_wallet_with_flag(user):
+        return MeowPointWallet.objects.get_or_create(user=user)
+
+    @staticmethod
     def add_points(
         *,
         user,
@@ -2849,6 +2853,10 @@ class MeowCreditService:
     def get_or_create_wallet(user):
         wallet, _created = MeowCreditWallet.objects.get_or_create(user=user)
         return wallet
+
+    @staticmethod
+    def get_or_create_wallet_with_flag(user):
+        return MeowCreditWallet.objects.get_or_create(user=user)
 
     @staticmethod
     def credit_recharge(*, user, amount: int, payment_order: PaymentOrder, target):
