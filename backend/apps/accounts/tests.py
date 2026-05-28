@@ -14603,44 +14603,47 @@ class WalletAPICompatibilityAPITestCase(APITestCase):
         self.user = User.objects.create_user(email='wallet-api@example.com', password='pw123456')
         self.client.force_authenticate(self.user)
 
-    def test_meow_point_wallet_api_returns_legacy_field_names_and_numeric_balance(self):
+    def test_meow_point_wallet_api_returns_decimal_string_balance(self):
         MeowPointWallet.objects.create(
             user=self.user,
-            balance=Decimal('300.00'),
-            total_earned=Decimal('500.00'),
-            total_spent=Decimal('200.00'),
+            balance=Decimal('300.50'),
+            total_earned=Decimal('500.75'),
+            total_spent=Decimal('200.25'),
             total_purchased=Decimal('0.00'),
             total_bonus=Decimal('0.00'),
         )
         response = self.client.get(reverse('meow-point-wallet'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['balance'], 300)
-        self.assertEqual(response.data['total_earned'], 500)
-        self.assertEqual(response.data['total_spent'], 200)
-        self.assertEqual(response.data['total_purchased'], 0)
-        self.assertEqual(response.data['total_bonus'], 0)
+        self.assertEqual(response.data['balance'], '300.50')
+        self.assertEqual(response.data['balance_display'], '300.50')
+        self.assertEqual(response.data['total_earned'], '500.75')
+        self.assertEqual(response.data['total_spent'], '200.25')
+        self.assertEqual(response.data['total_purchased'], '0.00')
+        self.assertEqual(response.data['total_bonus'], '0.00')
 
-    def test_meow_credit_wallet_api_returns_legacy_field_names_and_numeric_balance(self):
+    def test_meow_credit_wallet_api_returns_decimal_string_balance(self):
         MeowCreditWallet.objects.create(
             user=self.user,
-            balance=Decimal('150.00'),
-            total_recharged=Decimal('200.00'),
-            total_spent=Decimal('50.00'),
+            balance=Decimal('150.25'),
+            total_recharged=Decimal('200.75'),
+            total_spent=Decimal('50.25'),
             total_redeemed=Decimal('0.00'),
             total_adjusted=Decimal('0.00'),
         )
         response = self.client.get(reverse('meow-credit-wallet'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['balance'], 150)
-        self.assertEqual(response.data['total_recharged'], 200)
-        self.assertEqual(response.data['total_spent'], 50)
-        self.assertEqual(response.data['total_redeemed'], 0)
-        self.assertEqual(response.data['total_adjusted'], 0)
+        self.assertEqual(response.data['balance'], '150.25')
+        self.assertEqual(response.data['balance_display'], '150.25')
+        self.assertEqual(response.data['total_recharged'], '200.75')
+        self.assertEqual(response.data['total_spent'], '50.25')
+        self.assertEqual(response.data['total_redeemed'], '0.00')
+        self.assertEqual(response.data['total_adjusted'], '0.00')
 
     def test_wallet_api_auto_creates_zero_wallet_when_missing(self):
         response = self.client.get(reverse('meow-point-wallet'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['balance'], 0)
+        self.assertEqual(response.data['balance'], '0.00')
+        self.assertEqual(response.data['balance_display'], '0.00')
         self.assertTrue(MeowPointWallet.objects.filter(user=self.user).exists())
 
     def test_membership_meow_points_payment_reduces_wallet_balance(self):
@@ -14660,7 +14663,9 @@ class WalletAPICompatibilityAPITestCase(APITestCase):
             asset_code='meow_points',
             defaults={'display_name': 'MeowPoints', 'exchange_rate': Decimal('1'), 'is_active': True},
         )
-        MeowPointWallet.objects.create(user=self.user, balance=Decimal('100.00'))
+        MeowPointWallet.objects.create(user=self.user, balance=Decimal('500.50'))
+        plan.base_price_amount = Decimal('99.99')
+        plan.save(update_fields=['base_price_amount'])
 
         created = self.client.post(
             reverse('membership-order-create'),
@@ -14669,7 +14674,7 @@ class WalletAPICompatibilityAPITestCase(APITestCase):
         )
         self.assertEqual(created.status_code, status.HTTP_201_CREATED)
         wallet = MeowPointWallet.objects.get(user=self.user)
-        self.assertEqual(wallet.balance, Decimal('70.00'))
+        self.assertEqual(wallet.balance, Decimal('400.51'))
 
     def test_wallet_serializer_never_returns_null_balance(self):
         wallet = MeowPointWallet.objects.create(user=self.user)
@@ -14679,5 +14684,5 @@ class WalletAPICompatibilityAPITestCase(APITestCase):
         wallet.total_purchased = None
         wallet.total_bonus = None
         serializer = MeowPointWalletSerializer(wallet)
-        self.assertEqual(serializer.data['balance'], 0)
-        self.assertEqual(serializer.data['total_earned'], 0)
+        self.assertEqual(serializer.data['balance'], '0.00')
+        self.assertEqual(serializer.data['total_earned'], '0.00')

@@ -1,10 +1,12 @@
 from rest_framework import serializers
+from decimal import Decimal
 
 from apps.accounts.models import MeowPointLedger, MeowPointPackage, MeowPointPurchase, MeowPointWallet
 
 
 class MeowPointWalletSerializer(serializers.ModelSerializer):
     balance = serializers.SerializerMethodField()
+    balance_display = serializers.SerializerMethodField()
     total_earned = serializers.SerializerMethodField()
     total_spent = serializers.SerializerMethodField()
     total_purchased = serializers.SerializerMethodField()
@@ -14,6 +16,7 @@ class MeowPointWalletSerializer(serializers.ModelSerializer):
         model = MeowPointWallet
         fields = (
             'balance',
+            'balance_display',
             'total_earned',
             'total_spent',
             'total_purchased',
@@ -23,25 +26,28 @@ class MeowPointWalletSerializer(serializers.ModelSerializer):
         )
 
     @staticmethod
-    def _to_legacy_int(value):
+    def _format_decimal(value):
         if value is None:
-            return 0
-        return int(value)
+            return '0.00'
+        return f"{Decimal(str(value)):.2f}"
 
     def get_balance(self, obj):
-        return self._to_legacy_int(obj.balance)
+        return self._format_decimal(obj.balance)
+
+    def get_balance_display(self, obj):
+        return self._format_decimal(obj.balance)
 
     def get_total_earned(self, obj):
-        return self._to_legacy_int(obj.total_earned)
+        return self._format_decimal(obj.total_earned)
 
     def get_total_spent(self, obj):
-        return self._to_legacy_int(obj.total_spent)
+        return self._format_decimal(obj.total_spent)
 
     def get_total_purchased(self, obj):
-        return self._to_legacy_int(obj.total_purchased)
+        return self._format_decimal(obj.total_purchased)
 
     def get_total_bonus(self, obj):
-        return self._to_legacy_int(obj.total_bonus)
+        return self._format_decimal(obj.total_bonus)
 
 
 class MeowPointPackageSerializer(serializers.ModelSerializer):
