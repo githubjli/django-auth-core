@@ -7,6 +7,7 @@ from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
 from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
 from datetime import timedelta
+from decimal import Decimal
 import json
 import hmac
 import logging
@@ -36,6 +37,10 @@ from apps.accounts.models import (
     LiveStreamProduct,
     ManualMembershipPayment,
     MembershipPlan,
+    MeowCreditLedger,
+    MeowCreditWallet,
+    MeowPointLedger,
+    MeowPointWallet,
     PaymentOrder,
     Product,
     ProductCategory,
@@ -46,8 +51,6 @@ from apps.accounts.models import (
     SellerStore,
     ShopBanner,
     SavedProduct,
-    UserAssetBalance,
-    UserAssetTransaction,
     StreamPaymentMethod,
     UserShippingAddress,
     UserMembership,
@@ -871,26 +874,42 @@ class AdminRefundRequestMarkRefundedAPIView(APIView):
         if order.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET and order.payment_asset:
             refund_amount = refund.requested_amount
             with transaction.atomic():
-                balance, _ = UserAssetBalance.objects.select_for_update().get_or_create(
-                    user=order.buyer, asset_type=order.payment_asset, defaults={'balance': 0}
-                )
-                before = balance.balance
-                after = before + refund_amount
-                balance.balance = after
-                balance.save(update_fields=['balance', 'updated_at'])
-                tx = UserAssetTransaction.objects.create(
-                    user=order.buyer,
-                    asset_type=order.payment_asset,
-                    direction=UserAssetTransaction.DIRECTION_CREDIT,
-                    amount=refund_amount,
-                    balance_before=before,
-                    balance_after=after,
-                    biz_type=UserAssetTransaction.BIZ_PRODUCT_REFUND,
-                    biz_id=refund.id,
-                    order_no=order.order_no,
-                    note='product_refund',
-                )
-                refund.refunded_asset_transaction = tx
+                amount = Decimal(str(refund_amount)).quantize(Decimal('0.01'))
+                if order.payment_asset == ProductOrder.ASSET_MEOW_POINTS:
+                    wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=order.buyer)[0]
+                    before = Decimal(str(wallet.balance))
+                    after = (before + amount).quantize(Decimal('0.01'))
+                    wallet.balance = after
+                    wallet.total_earned = (Decimal(str(wallet.total_earned)) + amount).quantize(Decimal('0.01'))
+                    wallet.save(update_fields=['balance', 'total_earned', 'updated_at'])
+                    MeowPointLedger.objects.create(
+                        user=order.buyer,
+                        entry_type=MeowPointLedger.TYPE_REFUND,
+                        amount=amount,
+                        balance_before=before,
+                        balance_after=after,
+                        target_type='product_refund',
+                        target_id=refund.id,
+                        note='product_refund',
+                    )
+                else:
+                    wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=order.buyer)[0]
+                    before = Decimal(str(wallet.balance))
+                    after = (before + amount).quantize(Decimal('0.01'))
+                    wallet.balance = after
+                    wallet.save(update_fields=['balance', 'updated_at'])
+                    MeowCreditLedger.objects.create(
+                        user=order.buyer,
+                        entry_type=MeowCreditLedger.TYPE_REFUND,
+                        status=MeowCreditLedger.STATUS_COMPLETED,
+                        amount=amount,
+                        balance_before=before,
+                        balance_after=after,
+                        target_type='product_refund',
+                        target_id=refund.id,
+                        note='product_refund',
+                    )
+                refund.refunded_asset_transaction = None
         refund.status = ProductRefundRequest.STATUS_REFUNDED
         refund.admin_note = serializer.validated_data.get('admin_note') or ''
         refund.refund_txid = serializer.validated_data.get('refund_txid') or ''

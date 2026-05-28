@@ -13961,7 +13961,7 @@ class PlatformAssetTradeAPITestCase(APITestCase):
         order.refresh_from_db(); payout.refresh_from_db()
         self.assertEqual(order.status, ProductOrder.STATUS_SETTLED)
         self.assertEqual(payout.status, SellerPayout.STATUS_PAID)
-        seller_bal = UserAssetBalance.objects.get(user=self.seller, asset_type='meow_points')
+        seller_bal = MeowPointWallet.objects.get(user=self.seller)
         self.assertGreater(seller_bal.balance, Decimal('0'))
         self.assertTrue(PlatformAssetLedger.objects.filter(order_no=order_no).exists())
 

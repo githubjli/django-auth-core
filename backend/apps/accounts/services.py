@@ -1888,25 +1888,37 @@ class ProductOrderService:
             payout.save(update_fields=['status', 'txid', 'payout_address', 'note', 'paid_at', 'failure_note', 'updated_at'])
             if order.payment_method == ProductOrder.PAYMENT_METHOD_PLATFORM_ASSET and order.payment_asset:
                 seller = order.seller_store.owner
-                seller_balance, _ = UserAssetBalance.objects.select_for_update().get_or_create(
-                    user=seller, asset_type=order.payment_asset, defaults={'balance': Decimal('0.00')}
-                )
-                seller_before = seller_balance.balance
-                seller_after = seller_before + (order.seller_receivable_amount or Decimal('0'))
-                seller_balance.balance = seller_after
-                seller_balance.save(update_fields=['balance', 'updated_at'])
-                UserAssetTransaction.objects.create(
-                    user=seller,
-                    asset_type=order.payment_asset,
-                    direction=UserAssetTransaction.DIRECTION_CREDIT,
-                    amount=order.seller_receivable_amount or Decimal('0'),
-                    balance_before=seller_before,
-                    balance_after=seller_after,
-                    biz_type=UserAssetTransaction.BIZ_SELLER_PAYOUT,
-                    biz_id=payout.id,
-                    order_no=order.order_no,
-                    note='seller_payout_settlement',
-                )
+                amount = Decimal(str(order.seller_receivable_amount or Decimal('0'))).quantize(Decimal('0.01'))
+                if order.payment_asset == ProductOrder.ASSET_MEOW_POINTS:
+                    seller_wallet = MeowPointWallet.objects.select_for_update().get_or_create(user=seller)[0]
+                    seller_wallet.balance = (Decimal(str(seller_wallet.balance)) + amount).quantize(Decimal('0.01'))
+                    seller_wallet.total_earned = (Decimal(str(seller_wallet.total_earned)) + amount).quantize(Decimal('0.01'))
+                    seller_wallet.save(update_fields=['balance', 'total_earned', 'updated_at'])
+                    MeowPointLedger.objects.create(
+                        user=seller,
+                        entry_type=MeowPointLedger.TYPE_REFUND,
+                        amount=amount,
+                        balance_before=(seller_wallet.balance - amount),
+                        balance_after=seller_wallet.balance,
+                        target_type='seller_payout',
+                        target_id=payout.id,
+                        note='seller_payout_settlement',
+                    )
+                else:
+                    seller_wallet = MeowCreditWallet.objects.select_for_update().get_or_create(user=seller)[0]
+                    seller_wallet.balance = (Decimal(str(seller_wallet.balance)) + amount).quantize(Decimal('0.01'))
+                    seller_wallet.save(update_fields=['balance', 'updated_at'])
+                    MeowCreditLedger.objects.create(
+                        user=seller,
+                        entry_type=MeowCreditLedger.TYPE_REFUND,
+                        status=MeowCreditLedger.STATUS_COMPLETED,
+                        amount=amount,
+                        balance_before=(seller_wallet.balance - amount),
+                        balance_after=seller_wallet.balance,
+                        target_type='seller_payout',
+                        target_id=payout.id,
+                        note='seller_payout_settlement',
+                    )
                 PlatformAssetLedger.objects.create(
                     asset_type=order.payment_asset,
                     amount=order.platform_fee_amount or Decimal('0'),
