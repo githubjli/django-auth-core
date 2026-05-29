@@ -106,6 +106,7 @@ from apps.accounts.serializers import (
     PaymentOrderCreateSerializer,
     PaymentOrderSerializer,
     PublicCreatorSerializer,
+    PublicUserProfileSerializer,
     RegisterSerializer,
     SavedProductSerializer,
     AddSavedProductSerializer,
@@ -2730,6 +2731,15 @@ class PublicCreatorDetailAPIView(APIView):
     def get(self, request, creator_id):
         creator = generics.get_object_or_404(User.objects.filter(is_creator=True), pk=creator_id)
         serializer = PublicCreatorSerializer(creator, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PublicUserDetailAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, user_id):
+        user = generics.get_object_or_404(User, pk=user_id)
+        serializer = PublicUserProfileSerializer(user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
