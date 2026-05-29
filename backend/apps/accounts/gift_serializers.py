@@ -47,6 +47,14 @@ class GiftSerializer(serializers.ModelSerializer):
             'diamond': '💎',
         }.get(obj.code, '🎁')
 
+    def get_emoji(self, obj):
+        return {
+            'rose': '🌹',
+            'star': '⭐',
+            'crown': '👑',
+            'diamond': '💎',
+        }.get(obj.code, '🎁')
+
     def get_icon_url(self, obj):
         return self._build_file_url(obj.icon)
 
