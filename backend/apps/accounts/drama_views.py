@@ -359,7 +359,7 @@ class DramaGiftSendAPIView(APIView):
             error_text = str(exc)
             if 'Insufficient Meow Points balance.' in error_text or 'Insufficient Meow Credit balance.' in error_text:
                 return Response(
-                    {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'},
+                    {'code': 'insufficient_balance', 'detail': 'Insufficient balance.', 'payment_method': payment_method},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if 'Drama series has no owner.' in error_text:

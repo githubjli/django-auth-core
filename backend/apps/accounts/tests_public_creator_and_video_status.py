@@ -59,7 +59,8 @@ class PublicCreatorAPITestCase(APITestCase):
         self.creator = User.objects.create_user(
             email='creator@example.com',
             password='pass1234',
-            display_name='Creator Name',
+            first_name='Creator',
+            last_name='Name',
             is_creator=True,
         )
         self.viewer = User.objects.create_user(email='viewer@example.com', password='pass1234')
@@ -77,6 +78,52 @@ class PublicCreatorAPITestCase(APITestCase):
         response = self.client.get(reverse('public-creator-detail', kwargs={'creator_id': self.non_creator.id}))
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_user_detail_returns_creator_profile(self):
+        response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.creator.id)
+        self.assertTrue(response.data['is_creator'])
+        self.assertIn('display_name', response.data)
+        self.assertIn('nickname', response.data)
+        self.assertIn('followers_count', response.data)
+        self.assertIn('contents', response.data)
+
+    def test_public_user_detail_returns_non_creator_profile(self):
+        response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.non_creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.non_creator.id)
+        self.assertFalse(response.data['is_creator'])
+        self.assertEqual(response.data['contents'], [])
+        self.assertEqual(response.data['posts'], [])
+        self.assertEqual(response.data['works'], [])
+
+    def test_public_user_detail_returns_404_for_missing_user(self):
+        response = self.client.get(reverse('public-user-detail', kwargs={'user_id': 999999}))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_user_detail_excludes_sensitive_fields(self):
+        response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.non_creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sensitive_fields = {
+            'email',
+            'phone',
+            'first_name',
+            'last_name',
+            'is_staff',
+            'is_superuser',
+            'is_active',
+            'password',
+            'linked_wallet_id',
+            'primary_user_address',
+            'wallet_link_status',
+        }
+        self.assertTrue(sensitive_fields.isdisjoint(response.data.keys()))
+        self.assertNotIn(self.non_creator.email, str(response.data))
 
     def test_creator_detail_video_count_counts_public_active_only(self):
         self._create_video(owner=self.creator, title='active-1')

@@ -23,7 +23,7 @@ from apps.accounts.views import (
     LiveStreamStatusAPIView,
     LiveStreamUpdateAPIView,
 )
-from apps.accounts.gift_views import LiveGiftSendAPIView
+from apps.accounts.gift_views import LiveGiftListAPIView, LiveGiftSendAPIView
 
 urlpatterns = [
     path('', LiveStreamListAPIView.as_view(), name='live-stream-list'),
@@ -38,6 +38,7 @@ urlpatterns = [
     path('<int:pk>/chat/messages/<int:message_id>/pin/', LiveChatMessageModerationAPIView.as_view(), name='live-chat-message-pin'),
     path('<int:pk>/chat/messages/<int:message_id>/', LiveChatMessageModerationAPIView.as_view(), name='live-chat-message-delete'),
     path('<int:pk>/payment-methods/', LivePaymentMethodPublicListAPIView.as_view(), name='live-payment-methods-public'),
+    path('<int:pk>/gifts/', LiveGiftListAPIView.as_view(), name='live-gift-list'),
     path('<int:pk>/gifts/send/', LiveGiftSendAPIView.as_view(), name='live-gift-send'),
     path('<int:pk>/payments/orders/', LivePaymentOrderCreateAPIView.as_view(), name='live-payment-order-create'),
     path('<int:pk>/payments/orders/<int:order_id>/', LivePaymentOrderDetailAPIView.as_view(), name='live-payment-order-detail'),
