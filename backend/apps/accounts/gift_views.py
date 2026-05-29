@@ -15,7 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.gift_serializers import ContentGiftSendSerializer, GiftSendSerializer, GiftSerializer, GiftTransactionSerializer
-from apps.accounts.models import Gift, GiftTransaction, LiveStream, LiveChatMessage, LiveChatRoom, MeowCreditWallet, MeowPointWallet
+from apps.accounts.models import Gift, GiftTransaction, LiveStream, LiveChatMessage, LiveChatRoom
 from apps.accounts.serializers import LiveChatMessageSerializer
 from apps.accounts.services import GiftService
 

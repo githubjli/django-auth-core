@@ -174,15 +174,15 @@ class LiveGiftMobileAPITestCase(APITestCase):
         self.assertEqual(event['message']['message_type'], LiveChatMessage.TYPE_GIFT)
         self.assertEqual(event['message']['type'], LiveChatMessage.EVENT_GIFT)
 
-    def test_user_balance_returns_points_credit_and_coin_alias(self):
+    def test_mobile_can_use_existing_wallet_balance_endpoints(self):
         MeowPointWallet.objects.create(user=self.sender, balance=150)
         MeowCreditWallet.objects.create(user=self.sender, balance=20)
         self.authenticate()
 
-        response = self.client.get(reverse('user-balance'))
+        points_response = self.client.get(reverse('meow-point-wallet'))
+        credit_response = self.client.get(reverse('meow-credit-wallet'))
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['meow_points'], {'balance': 150, 'currency': 'MP'})
-        self.assertEqual(response.data['meow_credit'], {'balance': 20, 'currency': 'MC'})
-        self.assertEqual(response.data['coins'], 150)
-        self.assertEqual(response.data['currency'], 'MP')
+        self.assertEqual(points_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(credit_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(points_response.data['balance'], '150.00')
+        self.assertEqual(credit_response.data['balance'], '20.00')
