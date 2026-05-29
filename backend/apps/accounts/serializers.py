@@ -396,6 +396,63 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
         return ChannelSubscription.objects.filter(channel=obj, subscriber=request.user).exists()
 
 
+class PublicUserListItemSerializer(serializers.ModelSerializer):
+    username = serializers.SerializerMethodField()
+    nickname = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
+    avatar = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
+    description = serializers.CharField(source='bio', read_only=True)
+    followers_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'username',
+            'nickname',
+            'display_name',
+            'avatar',
+            'avatar_url',
+            'bio',
+            'description',
+            'is_creator',
+            'followers_count',
+        )
+
+    def _public_display_name(self, obj):
+        full_name = f'{obj.first_name} {obj.last_name}'.strip()
+        if full_name:
+            return full_name
+        return f'User {obj.id}'
+
+    def _build_file_url(self, file_field):
+        if not file_field:
+            return None
+        request = self.context.get('request')
+        if request is None:
+            return file_field.url
+        return request.build_absolute_uri(file_field.url)
+
+    def get_username(self, obj):
+        return self._public_display_name(obj)
+
+    def get_nickname(self, obj):
+        return self._public_display_name(obj)
+
+    def get_display_name(self, obj):
+        return self._public_display_name(obj)
+
+    def get_avatar(self, obj):
+        return self._build_file_url(obj.avatar)
+
+    def get_avatar_url(self, obj):
+        return self.get_avatar(obj)
+
+    def get_followers_count(self, obj):
+        return ChannelSubscription.objects.filter(channel=obj).count()
+
+
 class PublicUserProfileSerializer(serializers.ModelSerializer):
     username = serializers.SerializerMethodField()
     nickname = serializers.SerializerMethodField()

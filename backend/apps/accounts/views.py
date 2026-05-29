@@ -106,6 +106,7 @@ from apps.accounts.serializers import (
     PaymentOrderCreateSerializer,
     PaymentOrderSerializer,
     PublicCreatorSerializer,
+    PublicUserListItemSerializer,
     PublicUserProfileSerializer,
     RegisterSerializer,
     SavedProductSerializer,
@@ -2741,6 +2742,30 @@ class PublicUserDetailAPIView(APIView):
         user = generics.get_object_or_404(User, pk=user_id)
         serializer = PublicUserProfileSerializer(user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PublicUserFollowersListAPIView(generics.ListAPIView):
+    serializer_class = PublicUserListItemSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        user = generics.get_object_or_404(User, pk=self.kwargs['user_id'])
+        return User.objects.filter(
+            channel_subscriptions__channel=user,
+        ).order_by('-channel_subscriptions__created_at', '-channel_subscriptions__id')
+
+
+class PublicUserFollowingListAPIView(generics.ListAPIView):
+    serializer_class = PublicUserListItemSerializer
+    permission_classes = [permissions.AllowAny]
+    pagination_class = VideoPagination
+
+    def get_queryset(self):
+        user = generics.get_object_or_404(User, pk=self.kwargs['user_id'])
+        return User.objects.filter(
+            subscriptions_received__subscriber=user,
+        ).order_by('-subscriptions_received__created_at', '-subscriptions_received__id')
 
 
 class PublicCreatorVideoListAPIView(generics.ListAPIView):
