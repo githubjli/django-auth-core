@@ -1,3 +1,6 @@
+from urllib.parse import urljoin
+
+from django.conf import settings
 from rest_framework import serializers
 
 from apps.accounts.models import Gift, GiftTransaction
@@ -27,10 +30,22 @@ class GiftSerializer(serializers.ModelSerializer):
     def _build_file_url(self, file_field):
         if not file_field:
             return None
+        file_url = file_field.url
+        public_media_base_url = getattr(settings, 'PUBLIC_MEDIA_BASE_URL', '').rstrip('/')
+        if public_media_base_url:
+            return urljoin(f'{public_media_base_url}/', file_url.lstrip('/'))
         request = self.context.get('request')
         if request is None:
-            return file_field.url
-        return request.build_absolute_uri(file_field.url)
+            return file_url
+        return request.build_absolute_uri(file_url)
+
+    def get_emoji(self, obj):
+        return {
+            'rose': '🌹',
+            'star': '⭐',
+            'crown': '👑',
+            'diamond': '💎',
+        }.get(obj.code, '🎁')
 
     def get_emoji(self, obj):
         return {

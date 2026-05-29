@@ -1,5 +1,7 @@
+import mimetypes
 from unittest.mock import patch
 
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -33,12 +35,21 @@ class LiveGiftMobileAPITestCase(APITestCase):
             visibility=LiveStream.VISIBILITY_PUBLIC,
             status=LiveStream.STATUS_LIVE,
         )
-        self.gift = Gift.objects.create(code='rose', name='Rose', points_price=10, is_active=True, sort_order=1)
+        self.gift = Gift.objects.create(
+            code='rose',
+            name='Rose',
+            points_price=10,
+            is_active=True,
+            sort_order=1,
+            icon='gifts/icons/wired-flat-1845-rose-in-reveal.png',
+            animation='gifts/animations/wired-flat-1845-rose-in-reveal.json',
+        )
         self.star = Gift.objects.create(code='star', name='Star', points_price=20, is_active=True, sort_order=2)
 
     def authenticate(self):
         self.client.force_authenticate(user=self.sender)
 
+    @override_settings(PUBLIC_MEDIA_BASE_URL='https://stream.meownews.online')
     def test_gift_list_returns_mobile_fields(self):
         response = self.client.get(reverse('gift-list'))
 
@@ -47,6 +58,16 @@ class LiveGiftMobileAPITestCase(APITestCase):
         self.assertEqual(rose['id'], self.gift.id)
         self.assertEqual(rose['emoji'], '🌹')
         self.assertEqual(rose['coin_cost'], self.gift.points_price)
+        self.assertEqual(
+            rose['icon_url'],
+            'https://stream.meownews.online/media/gifts/icons/wired-flat-1845-rose-in-reveal.png',
+        )
+        self.assertEqual(
+            rose['animation_url'],
+            'https://stream.meownews.online/media/gifts/animations/wired-flat-1845-rose-in-reveal.json',
+        )
+        self.assertEqual(mimetypes.guess_type(rose['icon_url'])[0], 'image/png')
+        self.assertEqual(mimetypes.guess_type(rose['animation_url'])[0], 'application/json')
 
     def test_live_amount_gift_with_meow_points_succeeds(self):
         MeowPointWallet.objects.create(user=self.sender, balance=100)
