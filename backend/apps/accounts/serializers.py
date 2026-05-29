@@ -396,6 +396,176 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
         return ChannelSubscription.objects.filter(channel=obj, subscriber=request.user).exists()
 
 
+class PublicUserListItemSerializer(serializers.ModelSerializer):
+    username = serializers.SerializerMethodField()
+    nickname = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
+    avatar = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
+    description = serializers.CharField(source='bio', read_only=True)
+    followers_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'username',
+            'nickname',
+            'display_name',
+            'avatar',
+            'avatar_url',
+            'bio',
+            'description',
+            'is_creator',
+            'followers_count',
+        )
+
+    def _public_display_name(self, obj):
+        full_name = f'{obj.first_name} {obj.last_name}'.strip()
+        if full_name:
+            return full_name
+        return f'User {obj.id}'
+
+    def _build_file_url(self, file_field):
+        if not file_field:
+            return None
+        request = self.context.get('request')
+        if request is None:
+            return file_field.url
+        return request.build_absolute_uri(file_field.url)
+
+    def get_username(self, obj):
+        return self._public_display_name(obj)
+
+    def get_nickname(self, obj):
+        return self._public_display_name(obj)
+
+    def get_display_name(self, obj):
+        return self._public_display_name(obj)
+
+    def get_avatar(self, obj):
+        return self._build_file_url(obj.avatar)
+
+    def get_avatar_url(self, obj):
+        return self.get_avatar(obj)
+
+    def get_followers_count(self, obj):
+        return ChannelSubscription.objects.filter(channel=obj).count()
+
+
+class PublicUserProfileSerializer(serializers.ModelSerializer):
+    username = serializers.SerializerMethodField()
+    nickname = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
+    avatar = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
+    description = serializers.CharField(source='bio', read_only=True)
+    followers_count = serializers.SerializerMethodField()
+    following_count = serializers.SerializerMethodField()
+    contents = serializers.SerializerMethodField()
+    posts = serializers.SerializerMethodField()
+    works = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'username',
+            'nickname',
+            'display_name',
+            'avatar',
+            'avatar_url',
+            'bio',
+            'description',
+            'is_creator',
+            'followers_count',
+            'following_count',
+            'contents',
+            'posts',
+            'works',
+        )
+
+    def _public_display_name(self, obj):
+        full_name = f'{obj.first_name} {obj.last_name}'.strip()
+        if full_name:
+            return full_name
+        return f'User {obj.id}'
+
+    def _build_file_url(self, file_field):
+        if not file_field:
+            return None
+        request = self.context.get('request')
+        if request is None:
+            return file_field.url
+        return request.build_absolute_uri(file_field.url)
+
+    def get_username(self, obj):
+        return self._public_display_name(obj)
+
+    def get_nickname(self, obj):
+        return self._public_display_name(obj)
+
+    def get_display_name(self, obj):
+        return self._public_display_name(obj)
+
+    def get_avatar(self, obj):
+        return self._build_file_url(obj.avatar)
+
+    def get_avatar_url(self, obj):
+        return self.get_avatar(obj)
+
+    def get_followers_count(self, obj):
+        return ChannelSubscription.objects.filter(channel=obj).count()
+
+    def get_following_count(self, obj):
+        return ChannelSubscription.objects.filter(subscriber=obj).count()
+
+    def _serialize_public_works(self, obj):
+        if hasattr(self, '_public_works_cache') and obj.pk in self._public_works_cache:
+            return self._public_works_cache[obj.pk]
+        if not hasattr(self, '_public_works_cache'):
+            self._public_works_cache = {}
+        if not obj.is_creator:
+            self._public_works_cache[obj.pk] = []
+            return []
+        request = self.context.get('request')
+        works = []
+        videos = Video.objects.filter(
+            owner=obj,
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+        ).order_by('-created_at', '-id')[:20]
+        for video in videos:
+            thumbnail_url = None
+            if video.thumbnail:
+                thumbnail_url = (
+                    video.thumbnail.url
+                    if request is None
+                    else request.build_absolute_uri(video.thumbnail.url)
+                )
+            works.append(
+                {
+                    'id': video.id,
+                    'type': 'video',
+                    'title': video.title,
+                    'description': video.description,
+                    'thumbnail_url': thumbnail_url,
+                    'created_at': video.created_at,
+                }
+            )
+        self._public_works_cache[obj.pk] = works
+        return works
+
+    def get_contents(self, obj):
+        return self._serialize_public_works(obj)
+
+    def get_posts(self, obj):
+        return self.get_contents(obj)
+
+    def get_works(self, obj):
+        return self.get_contents(obj)
+
+
 class AccountPasswordChangeSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(write_only=True)

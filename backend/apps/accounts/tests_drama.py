@@ -821,7 +821,14 @@ class DramaGiftAPITestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertEqual(
+            response.data,
+            {
+                'code': 'insufficient_balance',
+                'detail': 'Insufficient balance.',
+                'payment_method': 'meow_points',
+            },
+        )
         self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
         self.assertFalse(self._gift_ledgers_exist())
         self.series.refresh_from_db()
@@ -842,7 +849,14 @@ class DramaGiftAPITestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertEqual(
+            response.data,
+            {
+                'code': 'insufficient_balance',
+                'detail': 'Insufficient balance.',
+                'payment_method': 'meow_credit',
+            },
+        )
         self.assertFalse(GiftTransaction.objects.filter(drama_series=self.series).exists())
         self.assertFalse(self._gift_ledgers_exist())
         self.series.refresh_from_db()

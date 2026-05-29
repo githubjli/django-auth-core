@@ -224,7 +224,14 @@ class PublicVideoShareAndGiftTestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertEqual(
+            response.data,
+            {
+                'code': 'insufficient_balance',
+                'detail': 'Insufficient balance.',
+                'payment_method': 'meow_points',
+            },
+        )
         self.assertFalse(GiftTransaction.objects.filter(video=self.video).exists())
         self.assertFalse(MeowPointLedger.objects.filter(entry_type__in=[MeowPointLedger.TYPE_GIFT_SPEND, MeowPointLedger.TYPE_GIFT_RECEIVED]).exists())
         self.video.refresh_from_db()
@@ -243,7 +250,14 @@ class PublicVideoShareAndGiftTestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data, {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'})
+        self.assertEqual(
+            response.data,
+            {
+                'code': 'insufficient_balance',
+                'detail': 'Insufficient balance.',
+                'payment_method': 'meow_credit',
+            },
+        )
         self.assertFalse(GiftTransaction.objects.filter(video=self.video).exists())
         self.assertFalse(MeowCreditLedger.objects.filter(entry_type__in=[MeowCreditLedger.TYPE_GIFT_SPEND, MeowCreditLedger.TYPE_GIFT_RECEIVED]).exists())
         self.video.refresh_from_db()
@@ -303,7 +317,8 @@ class PublicVideoShareAndGiftTestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data['code'], 'insufficient_balance')
-        self.assertEqual(response.data['detail'], 'Insufficient Meow Points balance.')
+        self.assertEqual(response.data['detail'], 'Insufficient balance.')
+        self.assertEqual(response.data['payment_method'], 'meow_points')
 
     def test_inactive_gift_cannot_be_sent_to_video(self):
         MeowPointService.add_points(user=self.sender, amount=100, entry_type=MeowPointLedger.TYPE_PURCHASE)
