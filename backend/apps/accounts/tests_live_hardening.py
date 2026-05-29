@@ -5,7 +5,7 @@ from datetime import timedelta
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import Gift, GiftTransaction, LiveChatMessage, LiveStream
+from apps.accounts.models import Gift, GiftTransaction, LiveChatMessage, LiveStream, MeowPointWallet
 
 User = get_user_model()
 
@@ -72,6 +72,7 @@ class LiveHardeningAPITestCase(APITestCase):
     def test_live_gift_send_creates_tx_and_gift_message(self):
         stream = LiveStream.objects.create(owner=self.creator, title='Gift stream', status=LiveStream.STATUS_LIVE)
         gift = Gift.objects.create(code='rose', name='Rose', points_price=1, is_active=True)
+        MeowPointWallet.objects.create(user=self.viewer, balance=10)
         self.client.force_authenticate(user=self.viewer)
         response = self.client.post(reverse('live-gift-send', args=[stream.id]), {'gift_code': gift.code, 'quantity': 1}, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -82,6 +83,7 @@ class LiveHardeningAPITestCase(APITestCase):
     def test_live_gift_send_blocked_when_ended(self):
         stream = LiveStream.objects.create(owner=self.creator, title='Ended', status=LiveStream.STATUS_ENDED)
         gift = Gift.objects.create(code='rose2', name='Rose2', points_price=1, is_active=True)
+        MeowPointWallet.objects.create(user=self.viewer, balance=10)
         self.client.force_authenticate(user=self.viewer)
         response = self.client.post(reverse('live-gift-send', args=[stream.id]), {'gift_code': gift.code, 'quantity': 1}, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

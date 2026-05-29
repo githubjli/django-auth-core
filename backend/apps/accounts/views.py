@@ -2537,7 +2537,11 @@ class PublicVideoGiftSendAPIView(APIView):
                 error_text = str(exc)
                 if 'Insufficient Meow Points balance.' in error_text or 'Insufficient Meow Credit balance.' in error_text:
                     return Response(
-                        {'code': 'insufficient_balance', 'detail': 'Insufficient balance.'},
+                        {
+                            'code': 'insufficient_balance',
+                            'detail': 'Insufficient balance.',
+                            'payment_method': payment_method,
+                        },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 return Response({'detail': error_text}, status=status.HTTP_400_BAD_REQUEST)
@@ -2560,7 +2564,10 @@ class PublicVideoGiftSendAPIView(APIView):
         serializer = GiftSendSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        gift = generics.get_object_or_404(Gift, code=serializer.validated_data['gift_code'])
+        if serializer.validated_data.get('gift_id'):
+            gift = generics.get_object_or_404(Gift, pk=serializer.validated_data['gift_id'])
+        else:
+            gift = generics.get_object_or_404(Gift, code=serializer.validated_data['gift_code'])
         cutoff = timezone.now() - timedelta(seconds=2)
         existing_tx = (
             GiftTransaction.objects.filter(
@@ -2589,7 +2596,11 @@ class PublicVideoGiftSendAPIView(APIView):
             error_text = str(exc)
             if 'Insufficient Meow Points balance.' in error_text:
                 return Response(
-                    {'code': 'insufficient_balance', 'detail': 'Insufficient Meow Points balance.'},
+                    {
+                        'code': 'insufficient_balance',
+                        'detail': 'Insufficient balance.',
+                        'payment_method': GiftTransaction.PAYMENT_MEOW_POINTS,
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if 'Gift is not active.' in error_text:
