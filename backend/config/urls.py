@@ -33,6 +33,7 @@ urlpatterns = [
     path('api/public/categories/', include('apps.accounts.public_category_urls')),
     path('api/public/videos/', include('apps.accounts.public_video_urls')),
     path('api/public/creators/', include('apps.accounts.public_creator_urls')),
+    path('api/public/users/', include('apps.accounts.public_user_urls')),
 ]
 
 if settings.DEBUG:
