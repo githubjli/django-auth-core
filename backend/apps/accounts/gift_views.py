@@ -211,3 +211,28 @@ class LiveGiftSendAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class UserBalanceAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        points_wallet, _ = MeowPointWallet.objects.get_or_create(user=request.user)
+        credit_wallet, _ = MeowCreditWallet.objects.get_or_create(user=request.user)
+        points_balance = int(points_wallet.balance)
+        credit_balance = int(credit_wallet.balance)
+        return Response(
+            {
+                'meow_points': {
+                    'balance': points_balance,
+                    'currency': 'MP',
+                },
+                'meow_credit': {
+                    'balance': credit_balance,
+                    'currency': 'MC',
+                },
+                'coins': points_balance,
+                'currency': 'MP',
+            },
+            status=status.HTTP_200_OK,
+        )
