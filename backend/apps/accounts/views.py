@@ -1433,11 +1433,25 @@ class LiveChatMessageListCreateAPIView(APIView):
         serializer = LiveChatMessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            message = create_live_chat_message(stream=stream, user=user, validated_data=serializer.validated_data)
+            message = create_live_chat_message(stream=stream, user=user, validated_data=serializer.validated_data, request=request)
         except ValidationError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         response_serializer = LiveChatMessageSerializer(message, context={'request': request})
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        response_data = response_serializer.data
+        try:
+            channel_layer = get_channel_layer()
+            if channel_layer is not None:
+                async_to_sync(channel_layer.group_send)(
+                    f'live_chat_{pk}',
+                    {
+                        'type': 'chat.message',
+                        'event': 'message_created',
+                        'message': response_data,
+                    },
+                )
+        except Exception:
+            logger.exception('live_chat_rest_broadcast_failed stream_id=%s message_id=%s', pk, message.id)
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 
 class LiveChatMessageModerationAPIView(APIView):

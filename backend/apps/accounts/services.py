@@ -223,7 +223,32 @@ def _try_save_preview_thumbnail(*, stream: LiveStream, preview_url: str | None) 
     return True
 
 
-def create_live_chat_message(*, stream, user, validated_data: dict):
+def _build_live_chat_product_payload(product, *, request=None):
+    from apps.accounts.serializers import ShopProductListSerializer
+
+    payload = dict(ShopProductListSerializer(product, context={'request': request}).data)
+    thumbnail_url = payload.get('thumbnail_url')
+    payload.update({
+        'id': product.id,
+        'name': product.title,
+        'title': product.title,
+        'description': product.description or None,
+        'thumbnail_url': thumbnail_url,
+        'cover_image_url': thumbnail_url,
+        'price': payload.get('price', str(product.price_amount)),
+        'price_amount': str(product.price_amount),
+        'price_currency': product.price_currency,
+        'stock': product.stock_quantity,
+        'store': {
+            'id': product.store.id,
+            'name': product.store.name,
+            'slug': product.store.slug,
+        },
+    })
+    return payload
+
+
+def create_live_chat_message(*, stream, user, validated_data: dict, request=None):
     if stream.status in {LiveStream.STATUS_ENDED, LiveStream.STATUS_FAILED}:
         raise ValidationError('Live stream has ended.')
     if stream.visibility != LiveStream.VISIBILITY_PUBLIC and user.id != stream.owner_id:
@@ -246,12 +271,26 @@ def create_live_chat_message(*, stream, user, validated_data: dict):
         reply_to = LiveChatMessage.objects.filter(pk=reply_to_id, room=room).first()
 
     product = None
+    product_payload = None
     message_type = validated_data.get('message_type', LiveChatMessage.TYPE_TEXT)
     if message_type == LiveChatMessage.TYPE_PRODUCT:
+        if user.id != stream.owner_id:
+            raise ValidationError('Only the live owner can send product messages.')
         product_id = validated_data.get('product_id')
-        product = Product.objects.filter(pk=product_id, status=Product.STATUS_ACTIVE).first()
-        if product is None or not LiveStreamProduct.objects.filter(stream=stream, product=product, is_active=True).exists():
+        if not product_id:
+            raise ValidationError('Product is required for product messages.')
+        product = Product.objects.select_related('store', 'category').filter(pk=product_id).first()
+        if product is None:
+            raise ValidationError('Product not found.')
+        if product.store.owner_id != user.id:
+            raise ValidationError('Product does not belong to the live owner store.')
+        if product.status != Product.STATUS_ACTIVE:
+            raise ValidationError('Product is not active.')
+        if not product.store.is_active:
+            raise ValidationError('Seller store is inactive.')
+        if not LiveStreamProduct.objects.filter(stream=stream, product=product, is_active=True).exists():
             raise ValidationError('Product is not active for this live stream.')
+        product_payload = _build_live_chat_product_payload(product, request=request)
 
     mapped_type = LiveChatMessage.EVENT_CHAT
     if message_type == LiveChatMessage.TYPE_SYSTEM:
@@ -268,8 +307,8 @@ def create_live_chat_message(*, stream, user, validated_data: dict):
         user=user,
         message_type=message_type,
         type=mapped_type,
-        content=validated_data.get('content', ''),
-        payload=validated_data.get('payload', {}),
+        content=validated_data.get('content', '') or (product.title if product is not None else ''),
+        payload=product_payload if product_payload is not None else validated_data.get('payload', {}),
         reply_to=reply_to,
         product=product,
     )
