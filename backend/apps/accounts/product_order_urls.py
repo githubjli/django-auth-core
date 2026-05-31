@@ -6,11 +6,13 @@ from apps.accounts.views import (
     AdminRefundRequestMarkRefundedAPIView,
     AdminRefundRequestRejectAPIView,
     AdminProductOrderMarkSettledAPIView,
+    ProductOrderCancelAPIView,
     ProductOrderConfirmReceivedAPIView,
     ProductOrderDetailAPIView,
     ProductOrderListCreateAPIView,
     ProductOrderMarkPaidAPIView,
     PaymentQRResolveAPIView,
+    ProductOrderTrackingAPIView,
     ProductOrderTxHintAPIView,
     ProductRefundRequestListCreateAPIView,
     SellerPayoutAddressDetailAPIView,
@@ -23,6 +25,8 @@ from apps.accounts.views import (
 
 urlpatterns = [
     path('product-orders/', ProductOrderListCreateAPIView.as_view(), name='product-order-list-create'),
+    path('product-orders/<str:order_no>/cancel/', ProductOrderCancelAPIView.as_view(), name='product-order-cancel'),
+    path('product-orders/<str:order_no>/tracking/', ProductOrderTrackingAPIView.as_view(), name='product-order-tracking'),
     path('product-orders/<str:order_no>/', ProductOrderDetailAPIView.as_view(), name='product-order-detail'),
     path('product-orders/<str:order_no>/tx-hint/', ProductOrderTxHintAPIView.as_view(), name='product-order-tx-hint'),
     path('product-orders/<str:order_no>/mark-paid/', ProductOrderMarkPaidAPIView.as_view(), name='product-order-mark-paid'),

@@ -3110,6 +3110,7 @@ class SellerStoreProductAPITestCase(APITestCase):
     def test_owner_can_create_update_and_delete_product(self):
         owner = self.authenticate(email='product-owner@example.com')
         store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-store')
+        category = ProductCategory.objects.create(name='Clothing', slug='clothing', is_active=True)
 
         create_response = self.client.post(
             reverse('store-me-products'),
@@ -3117,6 +3118,7 @@ class SellerStoreProductAPITestCase(APITestCase):
                 'title': 'Shirt',
                 'slug': 'shirt',
                 'description': 'Cotton shirt',
+                'category': category.id,
                 'price_amount': '19.99',
                 'price_currency': 'USD',
                 'stock_quantity': 10,
@@ -3127,6 +3129,17 @@ class SellerStoreProductAPITestCase(APITestCase):
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         product_id = create_response.data['id']
         self.assertEqual(create_response.data['store_id'], store.id)
+        self.assertEqual(create_response.data['name'], 'Shirt')
+        self.assertEqual(create_response.data['thumbnail_url'], create_response.data['cover_image_url'])
+        self.assertEqual(create_response.data['stock'], 10)
+        self.assertEqual(create_response.data['sold_count'], 0)
+        self.assertTrue(create_response.data['is_active'])
+        self.assertEqual(create_response.data['price'], '19.99')
+        self.assertIsNone(create_response.data['original_price'])
+        self.assertIsNone(create_response.data['badge'])
+        self.assertEqual(create_response.data['category']['id'], category.id)
+        self.assertEqual(create_response.data['category']['name'], 'Clothing')
+        self.assertEqual(create_response.data['category']['slug'], 'clothing')
 
         patch_response = self.client.patch(
             reverse('store-me-product-detail', args=[product_id]),
@@ -3135,7 +3148,9 @@ class SellerStoreProductAPITestCase(APITestCase):
         )
         self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
         self.assertEqual(patch_response.data['stock_quantity'], 5)
+        self.assertEqual(patch_response.data['stock'], 5)
         self.assertEqual(patch_response.data['status'], Product.STATUS_INACTIVE)
+        self.assertFalse(patch_response.data['is_active'])
 
         delete_response = self.client.delete(reverse('store-me-product-detail', args=[product_id]))
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
@@ -3306,6 +3321,16 @@ class LiveStreamProductBindingAPITestCase(APITestCase):
         self.assertEqual(response.data[1]['binding_id'], first.id)
 
 
+
+
+class FakeChannelLayer:
+    def __init__(self):
+        self.calls = []
+
+    async def group_send(self, group_name, message):
+        self.calls.append((group_name, message))
+
+
 class LiveChatAPITestCase(APITestCase):
     def create_user(self, email, is_creator=True, is_staff=False):
         return User.objects.create_user(
@@ -3316,6 +3341,26 @@ class LiveChatAPITestCase(APITestCase):
             is_creator=is_creator,
             is_staff=is_staff,
         )
+
+
+    def create_store_product(self, owner, *, title='Live Product', slug='live-product', status_value=Product.STATUS_ACTIVE, store_active=True):
+        store = SellerStore.objects.create(
+            owner=owner,
+            name=f'{slug} Store',
+            slug=f'{slug}-store',
+            is_active=store_active,
+        )
+        product = Product.objects.create(
+            store=store,
+            title=title,
+            slug=slug,
+            description='Featured during the livestream',
+            price_amount='19.99',
+            price_currency='USD',
+            stock_quantity=7,
+            status=status_value,
+        )
+        return store, product
 
     def test_create_and_fetch_messages(self):
         owner = self.create_user('chat-owner@example.com')
@@ -3338,6 +3383,136 @@ class LiveChatAPITestCase(APITestCase):
         self.assertEqual(len(get_response.data['results']), 1)
         self.assertEqual(get_response.data['results'][0]['content'], 'Hello chat')
         self.assertEqual(get_response.data['next_after_id'], get_response.data['results'][0]['id'])
+
+
+    def test_owner_can_create_product_message(self):
+        owner = self.create_user('chat-product-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Product stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        store, product = self.create_store_product(owner)
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+
+        self.client.force_authenticate(user=owner)
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['message_type'], LiveChatMessage.TYPE_PRODUCT)
+        self.assertEqual(response.data['type'], LiveChatMessage.EVENT_PRODUCT)
+        self.assertEqual(response.data['content'], product.title)
+        self.assertEqual(response.data['product']['id'], product.id)
+        self.assertEqual(response.data['payload']['id'], product.id)
+        self.assertEqual(response.data['payload']['name'], product.title)
+        self.assertEqual(response.data['payload']['title'], product.title)
+        self.assertEqual(response.data['payload']['price'], '19.99')
+        self.assertEqual(response.data['payload']['price_amount'], '19.99')
+        self.assertEqual(response.data['payload']['price_currency'], 'USD')
+        self.assertEqual(response.data['payload']['stock'], 7)
+        self.assertEqual(response.data['payload']['store']['id'], store.id)
+
+        get_response = self.client.get(reverse('live-chat-messages', args=[stream.id]))
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data['results'][0]['message_type'], LiveChatMessage.TYPE_PRODUCT)
+        self.assertEqual(get_response.data['results'][0]['payload']['id'], product.id)
+
+    def test_non_owner_cannot_create_product_message(self):
+        owner = self.create_user('chat-product-owner-denied@example.com')
+        viewer = self.create_user('chat-product-viewer-denied@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Product denied stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, product = self.create_store_product(owner, slug='denied-product')
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+
+        self.client.force_authenticate(user=viewer)
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(LiveChatMessage.objects.filter(room__stream=stream, message_type=LiveChatMessage.TYPE_PRODUCT).exists())
+
+    def test_unbound_product_message_fails(self):
+        owner = self.create_user('chat-product-unbound@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Unbound product stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, product = self.create_store_product(owner, slug='unbound-product')
+
+        self.client.force_authenticate(user=owner)
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(LiveChatMessage.objects.filter(room__stream=stream, message_type=LiveChatMessage.TYPE_PRODUCT).exists())
+
+    def test_inactive_product_or_store_product_message_fails(self):
+        owner = self.create_user('chat-product-inactive@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Inactive product stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, inactive_product = self.create_store_product(
+            owner,
+            title='Inactive Product',
+            slug='inactive-live-chat-product',
+            status_value=Product.STATUS_INACTIVE,
+        )
+        inactive_store_owner = self.create_user('chat-product-inactive-store@example.com')
+        inactive_store_stream = LiveStream.objects.create(
+            owner=inactive_store_owner,
+            title='Inactive store product stream',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+        )
+        _, inactive_store_product = self.create_store_product(
+            inactive_store_owner,
+            title='Inactive Store Product',
+            slug='inactive-store-live-chat-product',
+            store_active=False,
+        )
+        LiveStreamProduct.objects.create(stream=stream, product=inactive_product, is_active=True)
+        LiveStreamProduct.objects.create(stream=inactive_store_stream, product=inactive_store_product, is_active=True)
+
+        self.client.force_authenticate(user=owner)
+        inactive_product_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': inactive_product.id},
+            format='json',
+        )
+        self.assertEqual(inactive_product_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.client.force_authenticate(user=inactive_store_owner)
+        inactive_store_response = self.client.post(
+            reverse('live-chat-messages', args=[inactive_store_stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': inactive_store_product.id},
+            format='json',
+        )
+        self.assertEqual(inactive_store_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(LiveChatMessage.objects.filter(message_type=LiveChatMessage.TYPE_PRODUCT).exists())
+
+    def test_rest_product_message_broadcasts_message_created(self):
+        owner = self.create_user('chat-product-broadcast@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Product broadcast stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, product = self.create_store_product(owner, slug='broadcast-product')
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+        channel_layer = FakeChannelLayer()
+
+        self.client.force_authenticate(user=owner)
+        with patch('apps.accounts.views.get_channel_layer', return_value=channel_layer):
+            response = self.client.post(
+                reverse('live-chat-messages', args=[stream.id]),
+                {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(channel_layer.calls), 1)
+        group_name, event = channel_layer.calls[0]
+        self.assertEqual(group_name, f'live_chat_{stream.id}')
+        self.assertEqual(event['type'], 'chat.message')
+        self.assertEqual(event['event'], 'message_created')
+        self.assertEqual(event['message']['message_type'], LiveChatMessage.TYPE_PRODUCT)
+        self.assertEqual(event['message']['payload']['id'], product.id)
 
     def test_after_id_pagination(self):
         owner = self.create_user('chat-after-owner@example.com')
@@ -12679,6 +12854,209 @@ class ProductOrderFlowAPITestCase(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         return ProductOrder.objects.get(order_no=response.data['order_no']), response
+
+
+    def create_manual_product_order(self, buyer, product, *, status_value=ProductOrder.STATUS_PENDING_PAYMENT, quantity=1):
+        order_no = f'POTEST{ProductOrder.objects.count() + 1:06d}'
+        total_amount = Decimal('12.00') * Decimal(quantity)
+        now = django_timezone.now()
+        product.stock_quantity -= quantity
+        product.save(update_fields=['stock_quantity'])
+        payment_status = PaymentOrder.STATUS_PAID if status_value != ProductOrder.STATUS_PENDING_PAYMENT else PaymentOrder.STATUS_PENDING
+        paid_at = now if status_value in {
+            ProductOrder.STATUS_PAID,
+            ProductOrder.STATUS_SHIPPING,
+            ProductOrder.STATUS_COMPLETED,
+            ProductOrder.STATUS_SETTLED,
+        } else None
+        payment_order = PaymentOrder.objects.create(
+            user=buyer,
+            product=product,
+            order_type=PaymentOrder.TYPE_PRODUCT,
+            target_type='product_order',
+            amount=total_amount,
+            expected_amount_lbc=total_amount,
+            currency=TOKEN_SYMBOL,
+            status=payment_status,
+            order_no=order_no,
+            pay_to_address='bProductTestAddress',
+            paid_at=paid_at,
+        )
+        order = ProductOrder.objects.create(
+            order_no=order_no,
+            buyer=buyer,
+            seller_store=product.store,
+            product=product,
+            product_title_snapshot=product.title,
+            product_price_snapshot=product.price_amount,
+            quantity=quantity,
+            total_amount=total_amount,
+            currency=TOKEN_SYMBOL,
+            status=status_value,
+            shipping_address_snapshot={},
+            payment_order=payment_order,
+            payment_method=ProductOrder.PAYMENT_METHOD_BLOCKCHAIN,
+            payment_asset='',
+            stock_locked_at=now,
+            paid_at=paid_at,
+            shipped_at=now if status_value in {ProductOrder.STATUS_SHIPPING, ProductOrder.STATUS_COMPLETED} else None,
+            completed_at=now if status_value == ProductOrder.STATUS_COMPLETED else None,
+        )
+        payment_order.target_id = order.id
+        payment_order.save(update_fields=['target_id', 'updated_at'])
+        return order
+
+
+    def test_buyer_can_cancel_pending_payment_order(self):
+        buyer = self.create_user('cancel-buyer@example.com')
+        _, _, product = self.create_store_product('cancel-seller@example.com', slug='store-cancel')
+        initial_stock = product.stock_quantity
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PENDING_PAYMENT)
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('product-order-cancel', args=[order.order_no]),
+            {'reason': 'changed mind'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        product.refresh_from_db()
+        order.payment_order.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_CANCELLED)
+        self.assertEqual(order.cancel_reason, 'changed mind')
+        self.assertIsNotNone(order.cancelled_at)
+        self.assertIsNotNone(order.stock_released_at)
+        self.assertEqual(product.stock_quantity, initial_stock)
+        self.assertEqual(order.payment_order.status, PaymentOrder.STATUS_CANCELLED)
+        self.assertEqual(response.data['status'], ProductOrder.STATUS_CANCELLED)
+
+    def test_buyer_cannot_cancel_paid_shipping_or_completed_orders(self):
+        buyer = self.create_user('cancel-state-buyer@example.com')
+        _, _, product = self.create_store_product('cancel-state-seller@example.com', slug='store-cancel-state')
+        for blocked_status in [ProductOrder.STATUS_PAID, ProductOrder.STATUS_SHIPPING, ProductOrder.STATUS_COMPLETED]:
+            order = self.create_manual_product_order(buyer, product, status_value=blocked_status)
+            self.client.force_authenticate(user=buyer)
+            response = self.client.post(reverse('product-order-cancel', args=[order.order_no]), format='json')
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            order.refresh_from_db()
+            self.assertEqual(order.status, blocked_status)
+
+    def test_non_buyer_cannot_cancel_order(self):
+        buyer = self.create_user('cancel-owner@example.com')
+        other = self.create_user('cancel-other@example.com')
+        _, _, product = self.create_store_product('cancel-nonbuyer-seller@example.com', slug='store-cancel-nonbuyer')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PENDING_PAYMENT)
+
+        self.client.force_authenticate(user=other)
+        response = self.client.post(reverse('product-order-cancel', args=[order.order_no]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_PENDING_PAYMENT)
+
+    def test_buyer_order_list_can_filter_by_status(self):
+        buyer = self.create_user('filter-buyer@example.com')
+        other = self.create_user('filter-other@example.com')
+        _, _, product = self.create_store_product('filter-seller@example.com', slug='store-filter')
+        paid_order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+        self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_SHIPPING)
+        self.create_manual_product_order(other, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(reverse('product-order-list-create'), {'status': ProductOrder.STATUS_PAID})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['order_no'] for item in response.data], [paid_order.order_no])
+
+    def test_tracking_without_shipment_returns_empty_snapshot(self):
+        buyer = self.create_user('tracking-empty-buyer@example.com')
+        _, _, product = self.create_store_product('tracking-empty-seller@example.com', slug='store-tracking-empty')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(reverse('product-order-tracking', args=[order.order_no]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['order_no'], order.order_no)
+        self.assertIsNone(response.data['shipment'])
+        self.assertEqual(response.data['timeline'], [])
+
+    def test_tracking_with_shipment_returns_snapshot_and_timeline(self):
+        buyer = self.create_user('tracking-buyer@example.com')
+        seller, _, product = self.create_store_product('tracking-seller@example.com', slug='store-tracking')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_SHIPPING)
+        ProductShipment.objects.create(
+            product_order=order,
+            carrier='DHL',
+            tracking_number='DHL123',
+            tracking_url='https://track.example.com/DHL123',
+            shipped_note='Packed well',
+            created_by=seller,
+        )
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(reverse('product-order-tracking', args=[order.order_no]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['shipment']['carrier'], 'DHL')
+        self.assertEqual(response.data['shipment']['tracking_number'], 'DHL123')
+        self.assertEqual([item['status'] for item in response.data['timeline']], ['paid', 'shipped'])
+
+    def test_creator_shop_products_alias_can_list_and_create(self):
+        seller = self.create_user('creator-shop-product-seller@example.com')
+        SellerStore.objects.create(owner=seller, name='Creator Shop', slug='creator-shop-products', is_active=True)
+
+        self.client.force_authenticate(user=seller)
+        list_response = self.client.get(reverse('creator-shop-products'))
+        create_response = self.client.post(
+            reverse('creator-shop-products'),
+            {
+                'title': 'Alias Product',
+                'slug': 'alias-product',
+                'description': 'Created through alias',
+                'price_amount': '21.00',
+                'price_currency': 'USD',
+                'meow_points_price': '21.00',
+                'meow_credit_price': '21.00',
+                'stock_quantity': 5,
+                'status': Product.STATUS_ACTIVE,
+            },
+            format='json',
+        )
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['title'], 'Alias Product')
+
+    def test_creator_shop_orders_alias_can_list(self):
+        buyer = self.create_user('creator-shop-order-buyer@example.com')
+        seller, _, product = self.create_store_product('creator-shop-order-seller@example.com', slug='store-creator-shop-orders')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=seller)
+        response = self.client.get(reverse('creator-shop-orders'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['order_no'] for item in response.data], [order.order_no])
+
+    def test_creator_shop_order_ship_alias_can_ship(self):
+        buyer = self.create_user('creator-shop-ship-buyer@example.com')
+        seller, _, product = self.create_store_product('creator-shop-ship-seller@example.com', slug='store-creator-shop-ship')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=seller)
+        response = self.client.post(
+            reverse('creator-shop-order-ship', args=[order.order_no]),
+            {'carrier': 'UPS', 'tracking_number': 'UPS123', 'tracking_url': 'https://track.example.com/UPS123'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_SHIPPING)
+        self.assertEqual(order.shipment.carrier, 'UPS')
 
     def test_shipping_address_crud(self):
         buyer = self.create_user('shipping@example.com')
