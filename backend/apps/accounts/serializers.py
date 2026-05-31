@@ -29,6 +29,7 @@ from apps.accounts.models import (
     ProductShipment,
     PlatformAssetLedger,
     SavedProduct,
+    SellerApplication,
     SellerPayoutAddress,
     SellerStore,
     SellerPayout,
@@ -1065,6 +1066,51 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         normalized = adapter.normalize_stream_fields(obj)
         obj._normalized_live_fields = normalized
         return normalized
+
+
+class SellerApplicationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SellerApplication
+        fields = (
+            'id',
+            'store_name',
+            'business_type',
+            'business_description',
+            'contact_phone',
+            'contact_email',
+            'business_license_url',
+            'status',
+            'rejection_reason',
+            'submitted_at',
+            'reviewed_at',
+        )
+        read_only_fields = ('id', 'status', 'rejection_reason', 'submitted_at', 'reviewed_at')
+
+    def validate(self, attrs):
+        business_type = attrs.get('business_type')
+        business_license_url = attrs.get('business_license_url')
+        if business_type == SellerApplication.BUSINESS_TYPE_COMPANY and not business_license_url:
+            raise serializers.ValidationError({
+                'business_license_url': 'Business license URL is required for company applications.'
+            })
+        return attrs
+
+
+class AdminSellerApplicationSerializer(SellerApplicationSerializer):
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    reviewed_by_id = serializers.IntegerField(source='reviewed_by.id', read_only=True, allow_null=True)
+
+    class Meta(SellerApplicationSerializer.Meta):
+        fields = SellerApplicationSerializer.Meta.fields + (
+            'user_id',
+            'user_email',
+            'reviewed_by_id',
+        )
+
+
+class SellerApplicationRejectSerializer(serializers.Serializer):
+    rejection_reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
 
 
 class SellerStoreSerializer(serializers.ModelSerializer):
