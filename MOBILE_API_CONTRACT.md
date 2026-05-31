@@ -326,7 +326,94 @@ Based on current short-drama contract:
 
 - **Status**: Current but needs mobile review
 - Profile currently exposes seller/capability fields (`is_seller`, `can_manage_store`, `can_accept_payments`, `seller_store`).
+- `SellerStore` remains the source of truth for seller capability; approved applications create a `SellerStore` automatically.
 - Related store/product/order surfaces are present in backend route inventory but mobile contract shape needs consolidation.
+
+### Seller application endpoints
+
+#### POST `/api/seller-applications/`
+- **Status**: Current
+- **Auth**: Bearer access token required
+- **Purpose**: submit an application to become a seller without directly creating a store.
+- **Request body**:
+  ```json
+  {
+    "store_name": "Alice Handmade",
+    "business_type": "individual",
+    "business_description": "Handmade goods and accessories.",
+    "contact_phone": "+15551234567",
+    "contact_email": "alice@example.com",
+    "business_license_url": ""
+  }
+  ```
+- **Validation**:
+  - `business_type` must be `individual` or `company`.
+  - `business_license_url` is required when `business_type=company`.
+  - A user with an existing pending application receives `409`.
+  - A user who already has a `SellerStore` receives `409` (`already seller`).
+- **Success response**: `201`
+  ```json
+  {
+    "id": 12,
+    "store_name": "Alice Handmade",
+    "business_type": "individual",
+    "business_description": "Handmade goods and accessories.",
+    "contact_phone": "+15551234567",
+    "contact_email": "alice@example.com",
+    "business_license_url": "",
+    "status": "pending",
+    "rejection_reason": "",
+    "submitted_at": "2026-05-31T12:00:00Z",
+    "reviewed_at": null
+  }
+  ```
+
+#### GET `/api/seller-applications/me/`
+- **Status**: Current
+- **Auth**: Bearer access token required
+- **Purpose**: return the current user's latest seller application.
+- **Success response**: `200`, same fields as `POST /api/seller-applications/`.
+- **No application response**: `404` with `{ "detail": "Seller application not found." }`.
+
+#### GET `/api/admin/seller-applications/`
+- **Status**: Current
+- **Auth**: staff/superuser only
+- **Purpose**: list seller applications for review. Optional query param: `status=pending|approved|rejected`.
+
+#### POST `/api/admin/seller-applications/{id}/approve/`
+- **Status**: Current
+- **Auth**: staff/superuser only
+- **Purpose**: approve an application and create the user's `SellerStore` if one does not already exist.
+- **Success response**: `200`
+  ```json
+  {
+    "application": { "id": 12, "status": "approved", "reviewed_at": "2026-05-31T12:05:00Z" },
+    "store": { "id": 7, "name": "Alice Handmade", "slug": "alice-handmade" }
+  }
+  ```
+
+#### POST `/api/admin/seller-applications/{id}/reject/`
+- **Status**: Current
+- **Auth**: staff/superuser only
+- **Request body**: `{ "rejection_reason": "Please provide a valid business license." }`
+- **Success response**: `200`, application fields with `status=rejected` and `rejection_reason`.
+
+### Store endpoint protection
+
+#### POST `/api/store/me/`
+- **Status**: Current with seller-application gate
+- **Auth**: Bearer access token required
+- **Behavior**:
+  - Users with an existing `SellerStore` still receive `409`.
+  - Users without an approved seller application receive `403`.
+  - Approved applications normally create the store during staff approval, so mobile should treat `/api/store/me/` primarily as read/edit for the current store.
+
+### Mobile ACCOUNT block logic
+- `is_seller=true`: show Seller Studio.
+- `is_seller=false` and `GET /api/seller-applications/me/` returns `404`: show "Apply to open a store".
+- Latest application `status=pending`: show "Under review".
+- Latest application `status=rejected`: show "Application rejected, apply again" and display `rejection_reason`.
+- Latest application `status=approved` but profile still has no `seller_store`: refresh profile, then retry/show a transient retry prompt.
 
 ### Mobile notes
 - First mobile phase can keep seller management hidden/read-only.
