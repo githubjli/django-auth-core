@@ -12,7 +12,7 @@ from django.contrib import admin
 from django.core import management
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
-from django.test import override_settings
+from django.test import RequestFactory, override_settings
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone as django_timezone
 from rest_framework import status
@@ -64,6 +64,7 @@ from apps.accounts.models import (
     WalletAddress,
 )
 from apps.accounts.meow_points_serializers import MeowPointWalletSerializer
+from apps.accounts.admin import SellerApplicationAdmin
 from apps.accounts.serializers import LiveStreamSerializer
 from apps.accounts.services import (
     AntMediaLiveAdapter,
@@ -76,6 +77,7 @@ from apps.accounts.services import (
     ProductOrderService,
     ProductPaymentDetectionService,
     ProductPayoutService,
+    approve_seller_application,
     get_product_wallet_send_amount,
     sign_product_qr_payload,
 )
@@ -3129,6 +3131,74 @@ class SellerApplicationAPITestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+    def test_service_approve_creates_seller_store(self):
+        user = self.create_user(email='service-approve@example.com')
+        staff = self.create_user(email='service-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Service Store', contact_email='service-approve@example.com'),
+        )
+
+        approved_application, store = approve_seller_application(application, reviewer=staff)
+
+        self.assertEqual(approved_application.status, SellerApplication.STATUS_APPROVED)
+        self.assertEqual(approved_application.reviewed_by, staff)
+        self.assertEqual(approved_application.rejection_reason, '')
+        self.assertEqual(store.owner, user)
+        self.assertEqual(store.name, 'Service Store')
+        self.assertTrue(SellerStore.objects.filter(owner=user).exists())
+
+    def test_approved_application_reapprove_does_not_duplicate_store(self):
+        user = self.create_user(email='reapprove@example.com')
+        staff = self.create_user(email='reapprove-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Reapprove Store', contact_email='reapprove@example.com'),
+        )
+
+        _, first_store = approve_seller_application(application, reviewer=staff)
+        application.refresh_from_db()
+        _, second_store = approve_seller_application(application, reviewer=staff)
+
+        self.assertEqual(first_store.id, second_store.id)
+        self.assertEqual(SellerStore.objects.filter(owner=user).count(), 1)
+
+    def test_admin_action_approve_creates_seller_store(self):
+        user = self.create_user(email='admin-action@example.com')
+        staff = self.create_user(email='admin-action-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Admin Action Store', contact_email='admin-action@example.com'),
+        )
+        request = RequestFactory().post('/admin/accounts/sellerapplication/')
+        request.user = staff
+        model_admin = SellerApplicationAdmin(SellerApplication, admin.site)
+        model_admin.message_user = lambda *args, **kwargs: None
+
+        model_admin.approve_applications(request, SellerApplication.objects.filter(pk=application.pk))
+
+        application.refresh_from_db()
+        self.assertEqual(application.status, SellerApplication.STATUS_APPROVED)
+        self.assertTrue(SellerStore.objects.filter(owner=user, name='Admin Action Store').exists())
+
+    def test_admin_manual_status_approval_creates_seller_store(self):
+        user = self.create_user(email='manual-admin@example.com')
+        staff = self.create_user(email='manual-admin-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Manual Admin Store', contact_email='manual-admin@example.com'),
+        )
+        request = RequestFactory().post('/admin/accounts/sellerapplication/')
+        request.user = staff
+        model_admin = SellerApplicationAdmin(SellerApplication, admin.site)
+        application.status = SellerApplication.STATUS_APPROVED
+
+        model_admin.save_model(request, application, form=None, change=True)
+
+        application.refresh_from_db()
+        self.assertEqual(application.status, SellerApplication.STATUS_APPROVED)
+        self.assertTrue(SellerStore.objects.filter(owner=user, name='Manual Admin Store').exists())
 
     def test_staff_approve_creates_store_and_profile_is_seller(self):
         user = self.create_user(email='approve@example.com')

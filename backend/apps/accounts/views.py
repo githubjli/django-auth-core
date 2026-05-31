@@ -133,6 +133,7 @@ from apps.accounts.serializers import (
 )
 from apps.accounts.drama_serializers import DramaSeriesSerializer
 from apps.accounts.services import (
+    approve_seller_application,
     AntMediaLiveAdapter,
     LbryDaemonConnectionError,
     LbryDaemonError,
@@ -1004,16 +1005,6 @@ class AdminProductOrderMarkSettledAPIView(APIView):
         return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
 
 
-def generate_unique_store_slug(store_name):
-    base_slug = slugify(store_name)[:100].strip('-') or 'store'
-    slug = base_slug
-    suffix = 2
-    while SellerStore.objects.filter(slug=slug).exists():
-        suffix_text = f'-{suffix}'
-        slug = f'{base_slug[:120 - len(suffix_text)]}{suffix_text}'
-        suffix += 1
-    return slug
-
 
 class AdminUserListAPIView(generics.ListAPIView):
     queryset = User.objects.order_by('id')
@@ -1138,27 +1129,12 @@ class AdminSellerApplicationListAPIView(generics.ListAPIView):
 class AdminSellerApplicationApproveAPIView(APIView):
     permission_classes = [IsStaffOrSuperuser]
 
-    @transaction.atomic
     def post(self, request, pk):
-        application = generics.get_object_or_404(
-            SellerApplication.objects.select_for_update().select_related('user', 'reviewed_by'),
-            pk=pk,
-        )
-        if application.status == SellerApplication.STATUS_REJECTED:
-            return Response({'detail': 'Rejected seller application cannot be approved.'}, status=status.HTTP_400_BAD_REQUEST)
-        store = SellerStore.objects.filter(owner=application.user).select_related('owner').first()
-        if store is None:
-            store = SellerStore.objects.create(
-                owner=application.user,
-                name=application.store_name,
-                slug=generate_unique_store_slug(application.store_name),
-            )
-        if application.status != SellerApplication.STATUS_APPROVED:
-            application.status = SellerApplication.STATUS_APPROVED
-            application.rejection_reason = ''
-            application.reviewed_by = request.user
-            application.reviewed_at = timezone.now()
-            application.save(update_fields=['status', 'rejection_reason', 'reviewed_by', 'reviewed_at', 'updated_at'])
+        application = generics.get_object_or_404(SellerApplication, pk=pk)
+        try:
+            application, store = approve_seller_application(application, reviewer=request.user)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         response_data = {
             'application': AdminSellerApplicationSerializer(application, context={'request': request}).data,
             'store': SellerStoreSerializer(store, context={'request': request}).data,
