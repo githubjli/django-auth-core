@@ -3110,6 +3110,7 @@ class SellerStoreProductAPITestCase(APITestCase):
     def test_owner_can_create_update_and_delete_product(self):
         owner = self.authenticate(email='product-owner@example.com')
         store = SellerStore.objects.create(owner=owner, name='Owner Store', slug='owner-store')
+        category = ProductCategory.objects.create(name='Clothing', slug='clothing', is_active=True)
 
         create_response = self.client.post(
             reverse('store-me-products'),
@@ -3117,6 +3118,7 @@ class SellerStoreProductAPITestCase(APITestCase):
                 'title': 'Shirt',
                 'slug': 'shirt',
                 'description': 'Cotton shirt',
+                'category': category.id,
                 'price_amount': '19.99',
                 'price_currency': 'USD',
                 'stock_quantity': 10,
@@ -3127,6 +3129,17 @@ class SellerStoreProductAPITestCase(APITestCase):
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         product_id = create_response.data['id']
         self.assertEqual(create_response.data['store_id'], store.id)
+        self.assertEqual(create_response.data['name'], 'Shirt')
+        self.assertEqual(create_response.data['thumbnail_url'], create_response.data['cover_image_url'])
+        self.assertEqual(create_response.data['stock'], 10)
+        self.assertEqual(create_response.data['sold_count'], 0)
+        self.assertTrue(create_response.data['is_active'])
+        self.assertEqual(create_response.data['price'], '19.99')
+        self.assertIsNone(create_response.data['original_price'])
+        self.assertIsNone(create_response.data['badge'])
+        self.assertEqual(create_response.data['category']['id'], category.id)
+        self.assertEqual(create_response.data['category']['name'], 'Clothing')
+        self.assertEqual(create_response.data['category']['slug'], 'clothing')
 
         patch_response = self.client.patch(
             reverse('store-me-product-detail', args=[product_id]),
@@ -3135,7 +3148,9 @@ class SellerStoreProductAPITestCase(APITestCase):
         )
         self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
         self.assertEqual(patch_response.data['stock_quantity'], 5)
+        self.assertEqual(patch_response.data['stock'], 5)
         self.assertEqual(patch_response.data['status'], Product.STATUS_INACTIVE)
+        self.assertFalse(patch_response.data['is_active'])
 
         delete_response = self.client.delete(reverse('store-me-product-detail', args=[product_id]))
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)

@@ -1115,8 +1115,22 @@ class SellerStoreSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     store_id = serializers.IntegerField(source='store.id', read_only=True)
-    category_id = serializers.IntegerField(source='category.id', read_only=True, allow_null=True)
+    name = serializers.CharField(source='title', read_only=True)
+    category = serializers.SerializerMethodField()
+    category_id = serializers.PrimaryKeyRelatedField(
+        source='category',
+        queryset=ProductCategory.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
     cover_image_url = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    price = serializers.DecimalField(source='price_amount', max_digits=12, decimal_places=2, read_only=True)
+    original_price = serializers.SerializerMethodField()
+    badge = serializers.SerializerMethodField()
+    stock = serializers.IntegerField(source='stock_quantity', read_only=True)
+    sold_count = serializers.SerializerMethodField()
+    is_active = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -1124,17 +1138,25 @@ class ProductSerializer(serializers.ModelSerializer):
             'id',
             'store_id',
             'title',
+            'name',
             'slug',
             'category',
             'category_id',
             'description',
             'cover_image',
             'cover_image_url',
+            'thumbnail_url',
             'price_amount',
+            'price',
+            'original_price',
             'price_currency',
             'meow_points_price',
             'meow_credit_price',
             'stock_quantity',
+            'stock',
+            'sold_count',
+            'badge',
+            'is_active',
             'status',
             'created_at',
             'updated_at',
@@ -1142,10 +1164,34 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'id',
             'store_id',
-            'category_id',
+            'name',
+            'category',
+            'cover_image_url',
+            'thumbnail_url',
+            'price',
+            'original_price',
+            'stock',
+            'sold_count',
+            'badge',
+            'is_active',
             'created_at',
             'updated_at',
         )
+
+    def to_internal_value(self, data):
+        if 'category' in data and 'category_id' not in data and not isinstance(data.get('category'), dict):
+            data = data.copy()
+            data['category_id'] = data.get('category')
+        return super().to_internal_value(data)
+
+    def get_category(self, obj):
+        if obj.category is None:
+            return None
+        return {
+            'id': obj.category.id,
+            'name': obj.category.name,
+            'slug': obj.category.slug,
+        }
 
     def get_cover_image_url(self, obj):
         request = self.context.get('request')
@@ -1154,6 +1200,21 @@ class ProductSerializer(serializers.ModelSerializer):
         if request is None:
             return obj.cover_image.url
         return request.build_absolute_uri(obj.cover_image.url)
+
+    def get_thumbnail_url(self, obj):
+        return self.get_cover_image_url(obj)
+
+    def get_original_price(self, obj):
+        return None
+
+    def get_badge(self, obj):
+        return None
+
+    def get_sold_count(self, obj):
+        return 0
+
+    def get_is_active(self, obj):
+        return obj.status == Product.STATUS_ACTIVE
 
 
 class ShopBannerSerializer(serializers.ModelSerializer):
