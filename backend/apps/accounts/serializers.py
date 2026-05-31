@@ -1021,7 +1021,8 @@ class LiveStreamSerializer(serializers.ModelSerializer):
         return self._normalized(obj).get('status')
 
     def get_viewer_count(self, obj):
-        return self._normalized(obj).get('viewer_count')
+        normalized_count = self._normalized(obj).get('viewer_count') or 0
+        return max(normalized_count, obj.viewer_count or 0)
 
     def get_django_status(self, obj):
         return self._normalized(obj).get('django_status')
