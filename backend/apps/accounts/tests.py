@@ -3306,6 +3306,16 @@ class LiveStreamProductBindingAPITestCase(APITestCase):
         self.assertEqual(response.data[1]['binding_id'], first.id)
 
 
+
+
+class FakeChannelLayer:
+    def __init__(self):
+        self.calls = []
+
+    async def group_send(self, group_name, message):
+        self.calls.append((group_name, message))
+
+
 class LiveChatAPITestCase(APITestCase):
     def create_user(self, email, is_creator=True, is_staff=False):
         return User.objects.create_user(
@@ -3316,6 +3326,26 @@ class LiveChatAPITestCase(APITestCase):
             is_creator=is_creator,
             is_staff=is_staff,
         )
+
+
+    def create_store_product(self, owner, *, title='Live Product', slug='live-product', status_value=Product.STATUS_ACTIVE, store_active=True):
+        store = SellerStore.objects.create(
+            owner=owner,
+            name=f'{slug} Store',
+            slug=f'{slug}-store',
+            is_active=store_active,
+        )
+        product = Product.objects.create(
+            store=store,
+            title=title,
+            slug=slug,
+            description='Featured during the livestream',
+            price_amount='19.99',
+            price_currency='USD',
+            stock_quantity=7,
+            status=status_value,
+        )
+        return store, product
 
     def test_create_and_fetch_messages(self):
         owner = self.create_user('chat-owner@example.com')
@@ -3338,6 +3368,136 @@ class LiveChatAPITestCase(APITestCase):
         self.assertEqual(len(get_response.data['results']), 1)
         self.assertEqual(get_response.data['results'][0]['content'], 'Hello chat')
         self.assertEqual(get_response.data['next_after_id'], get_response.data['results'][0]['id'])
+
+
+    def test_owner_can_create_product_message(self):
+        owner = self.create_user('chat-product-owner@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Product stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        store, product = self.create_store_product(owner)
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+
+        self.client.force_authenticate(user=owner)
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['message_type'], LiveChatMessage.TYPE_PRODUCT)
+        self.assertEqual(response.data['type'], LiveChatMessage.EVENT_PRODUCT)
+        self.assertEqual(response.data['content'], product.title)
+        self.assertEqual(response.data['product']['id'], product.id)
+        self.assertEqual(response.data['payload']['id'], product.id)
+        self.assertEqual(response.data['payload']['name'], product.title)
+        self.assertEqual(response.data['payload']['title'], product.title)
+        self.assertEqual(response.data['payload']['price'], '19.99')
+        self.assertEqual(response.data['payload']['price_amount'], '19.99')
+        self.assertEqual(response.data['payload']['price_currency'], 'USD')
+        self.assertEqual(response.data['payload']['stock'], 7)
+        self.assertEqual(response.data['payload']['store']['id'], store.id)
+
+        get_response = self.client.get(reverse('live-chat-messages', args=[stream.id]))
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data['results'][0]['message_type'], LiveChatMessage.TYPE_PRODUCT)
+        self.assertEqual(get_response.data['results'][0]['payload']['id'], product.id)
+
+    def test_non_owner_cannot_create_product_message(self):
+        owner = self.create_user('chat-product-owner-denied@example.com')
+        viewer = self.create_user('chat-product-viewer-denied@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Product denied stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, product = self.create_store_product(owner, slug='denied-product')
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+
+        self.client.force_authenticate(user=viewer)
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(LiveChatMessage.objects.filter(room__stream=stream, message_type=LiveChatMessage.TYPE_PRODUCT).exists())
+
+    def test_unbound_product_message_fails(self):
+        owner = self.create_user('chat-product-unbound@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Unbound product stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, product = self.create_store_product(owner, slug='unbound-product')
+
+        self.client.force_authenticate(user=owner)
+        response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(LiveChatMessage.objects.filter(room__stream=stream, message_type=LiveChatMessage.TYPE_PRODUCT).exists())
+
+    def test_inactive_product_or_store_product_message_fails(self):
+        owner = self.create_user('chat-product-inactive@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Inactive product stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, inactive_product = self.create_store_product(
+            owner,
+            title='Inactive Product',
+            slug='inactive-live-chat-product',
+            status_value=Product.STATUS_INACTIVE,
+        )
+        inactive_store_owner = self.create_user('chat-product-inactive-store@example.com')
+        inactive_store_stream = LiveStream.objects.create(
+            owner=inactive_store_owner,
+            title='Inactive store product stream',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+        )
+        _, inactive_store_product = self.create_store_product(
+            inactive_store_owner,
+            title='Inactive Store Product',
+            slug='inactive-store-live-chat-product',
+            store_active=False,
+        )
+        LiveStreamProduct.objects.create(stream=stream, product=inactive_product, is_active=True)
+        LiveStreamProduct.objects.create(stream=inactive_store_stream, product=inactive_store_product, is_active=True)
+
+        self.client.force_authenticate(user=owner)
+        inactive_product_response = self.client.post(
+            reverse('live-chat-messages', args=[stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': inactive_product.id},
+            format='json',
+        )
+        self.assertEqual(inactive_product_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.client.force_authenticate(user=inactive_store_owner)
+        inactive_store_response = self.client.post(
+            reverse('live-chat-messages', args=[inactive_store_stream.id]),
+            {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': inactive_store_product.id},
+            format='json',
+        )
+        self.assertEqual(inactive_store_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(LiveChatMessage.objects.filter(message_type=LiveChatMessage.TYPE_PRODUCT).exists())
+
+    def test_rest_product_message_broadcasts_message_created(self):
+        owner = self.create_user('chat-product-broadcast@example.com')
+        stream = LiveStream.objects.create(owner=owner, title='Product broadcast stream', visibility=LiveStream.VISIBILITY_PUBLIC)
+        _, product = self.create_store_product(owner, slug='broadcast-product')
+        LiveStreamProduct.objects.create(stream=stream, product=product, is_active=True)
+        channel_layer = FakeChannelLayer()
+
+        self.client.force_authenticate(user=owner)
+        with patch('apps.accounts.views.get_channel_layer', return_value=channel_layer):
+            response = self.client.post(
+                reverse('live-chat-messages', args=[stream.id]),
+                {'message_type': LiveChatMessage.TYPE_PRODUCT, 'product_id': product.id},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(channel_layer.calls), 1)
+        group_name, event = channel_layer.calls[0]
+        self.assertEqual(group_name, f'live_chat_{stream.id}')
+        self.assertEqual(event['type'], 'chat.message')
+        self.assertEqual(event['event'], 'message_created')
+        self.assertEqual(event['message']['message_type'], LiveChatMessage.TYPE_PRODUCT)
+        self.assertEqual(event['message']['payload']['id'], product.id)
 
     def test_after_id_pagination(self):
         owner = self.create_user('chat-after-owner@example.com')

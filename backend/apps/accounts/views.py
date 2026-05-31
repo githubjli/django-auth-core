@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth import authenticate
 from django.conf import settings
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -9,6 +10,7 @@ from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, 
 from datetime import timedelta
 from decimal import Decimal
 import json
+import hashlib
 import hmac
 import logging
 import secrets
@@ -1433,11 +1435,25 @@ class LiveChatMessageListCreateAPIView(APIView):
         serializer = LiveChatMessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            message = create_live_chat_message(stream=stream, user=user, validated_data=serializer.validated_data)
+            message = create_live_chat_message(stream=stream, user=user, validated_data=serializer.validated_data, request=request)
         except ValidationError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         response_serializer = LiveChatMessageSerializer(message, context={'request': request})
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        response_data = response_serializer.data
+        try:
+            channel_layer = get_channel_layer()
+            if channel_layer is not None:
+                async_to_sync(channel_layer.group_send)(
+                    f'live_chat_{pk}',
+                    {
+                        'type': 'chat.message',
+                        'event': 'message_created',
+                        'message': response_data,
+                    },
+                )
+        except Exception:
+            logger.exception('live_chat_rest_broadcast_failed stream_id=%s message_id=%s', pk, message.id)
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 
 class LiveChatMessageModerationAPIView(APIView):
@@ -1941,7 +1957,7 @@ class LiveStreamStatusDetailAPIView(generics.RetrieveAPIView):
             'effective_status': normalized.get('effective_status'),
             'can_start': bool(normalized.get('can_start')),
             'can_end': bool(normalized.get('can_end')),
-            'viewer_count': normalized.get('viewer_count') or 0,
+            'viewer_count': max(normalized.get('viewer_count') or 0, stream.viewer_count or 0),
             'publish': {
                 'connected': normalized.get('effective_status') in {'publishing', 'live', LiveStream.STATUS_LIVE},
                 'source': 'ant_media' if normalized.get('sync_ok') else 'fallback',
@@ -1990,14 +2006,17 @@ class LiveStreamWatchConfigAPIView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        self._increment_viewer_count_once(request, stream)
         serializer_data = LiveStreamSerializer(stream, context={'request': request}).data
+        normalized_viewer_count = normalized.get('viewer_count') or 0
+        viewer_count = max(normalized_viewer_count, stream.viewer_count or 0)
         connected = bool(stream.status == LiveStream.STATUS_LIVE and normalized.get('effective_status') in {'live', 'publishing'})
         playback_mode = 'webrtc' if websocket_url else 'hls'
         payload = {
             'live_id': stream.id,
             'status': stream.status,
             'effective_status': normalized.get('effective_status'),
-            'viewer_count': normalized.get('viewer_count') or 0,
+            'viewer_count': viewer_count,
             'playback': {
                 'mode': playback_mode,
                 'stream_id': stream.stream_key,
@@ -2014,6 +2033,31 @@ class LiveStreamWatchConfigAPIView(APIView):
             'snapshot_url': serializer_data.get('snapshot_url'),
         }
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _increment_viewer_count_once(self, request, stream):
+        user = getattr(request, 'user', None)
+        if stream.status in {LiveStream.STATUS_ENDED, LiveStream.STATUS_FAILED}:
+            return
+        if user and user.is_authenticated and user.id == stream.owner_id:
+            return
+
+        cache_key = self._viewer_count_cache_key(request, stream)
+        if not cache.add(cache_key, True, timeout=60):
+            return
+        LiveStream.objects.filter(pk=stream.pk).update(viewer_count=F('viewer_count') + 1)
+        stream.refresh_from_db(fields=['viewer_count'])
+
+    def _viewer_count_cache_key(self, request, stream):
+        user = getattr(request, 'user', None)
+        if user and user.is_authenticated:
+            viewer_id = f'user:{user.id}'
+        else:
+            forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '')
+            ip_address = forwarded_for.split(',')[0].strip() or request.META.get('REMOTE_ADDR', '')
+            user_agent = request.META.get('HTTP_USER_AGENT', '')
+            fingerprint = hashlib.sha256(f'{ip_address}|{user_agent}'.encode('utf-8')).hexdigest()
+            viewer_id = f'anon:{fingerprint}'
+        return f'live:{stream.pk}:watch-config-viewer:{viewer_id}'
 
 
 class LiveStreamUpdateAPIView(generics.UpdateAPIView):
