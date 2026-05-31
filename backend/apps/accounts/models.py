@@ -598,6 +598,62 @@ class SellerStore(models.Model):
         return self.name
 
 
+class SellerApplication(models.Model):
+    BUSINESS_TYPE_INDIVIDUAL = 'individual'
+    BUSINESS_TYPE_COMPANY = 'company'
+    BUSINESS_TYPE_CHOICES = [
+        (BUSINESS_TYPE_INDIVIDUAL, 'Individual'),
+        (BUSINESS_TYPE_COMPANY, 'Company'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_APPROVED, 'Approved'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='seller_applications',
+    )
+    store_name = models.CharField(max_length=255)
+    business_type = models.CharField(max_length=20, choices=BUSINESS_TYPE_CHOICES)
+    business_description = models.TextField()
+    contact_phone = models.CharField(max_length=50)
+    contact_email = models.EmailField()
+    business_license_url = models.URLField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    rejection_reason = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_seller_applications',
+    )
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-submitted_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user'],
+                condition=models.Q(status='pending'),
+                name='unique_pending_seller_application_per_user',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.store_name} ({self.status})'
+
+
 class Product(models.Model):
     STATUS_DRAFT = 'draft'
     STATUS_ACTIVE = 'active'

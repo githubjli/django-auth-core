@@ -4,6 +4,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from django.utils.text import slugify
 from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
 from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
@@ -48,6 +49,7 @@ from apps.accounts.models import (
     ProductCategory,
     ProductOrder,
     ProductRefundRequest,
+    SellerApplication,
     SellerPayout,
     SellerPayoutAddress,
     SellerStore,
@@ -104,6 +106,9 @@ from apps.accounts.serializers import (
     ProductRefundAdminActionSerializer,
     ProductRefundRequestCreateSerializer,
     ProductRefundRequestSerializer,
+    AdminSellerApplicationSerializer,
+    SellerApplicationRejectSerializer,
+    SellerApplicationSerializer,
     SellerPayoutAddressSerializer,
     SellerProductOrderListSerializer,
     PaymentOrderCreateSerializer,
@@ -999,6 +1004,17 @@ class AdminProductOrderMarkSettledAPIView(APIView):
         return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
 
 
+def generate_unique_store_slug(store_name):
+    base_slug = slugify(store_name)[:100].strip('-') or 'store'
+    slug = base_slug
+    suffix = 2
+    while SellerStore.objects.filter(slug=slug).exists():
+        suffix_text = f'-{suffix}'
+        slug = f'{base_slug[:120 - len(suffix_text)]}{suffix_text}'
+        suffix += 1
+    return slug
+
+
 class AdminUserListAPIView(generics.ListAPIView):
     queryset = User.objects.order_by('id')
     serializer_class = AdminUserSerializer
@@ -1081,6 +1097,97 @@ class AdminVideoDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         return annotate_videos_for_request(Video.objects.all(), self.request)
 
 
+class SellerApplicationCreateAPIView(generics.CreateAPIView):
+    serializer_class = SellerApplicationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def create(self, request, *args, **kwargs):
+        if SellerStore.objects.filter(owner=request.user).exists():
+            return Response({'detail': 'User is already a seller.'}, status=status.HTTP_409_CONFLICT)
+        if SellerApplication.objects.filter(user=request.user, status=SellerApplication.STATUS_PENDING).exists():
+            return Response({'detail': 'Pending seller application already exists.'}, status=status.HTTP_409_CONFLICT)
+        return super().create(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+class SellerApplicationMeAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        application = SellerApplication.objects.filter(user=request.user).order_by('-submitted_at', '-id').first()
+        if application is None:
+            return Response({'detail': 'Seller application not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SellerApplicationSerializer(application, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AdminSellerApplicationListAPIView(generics.ListAPIView):
+    serializer_class = AdminSellerApplicationSerializer
+    permission_classes = [IsStaffOrSuperuser]
+
+    def get_queryset(self):
+        queryset = SellerApplication.objects.select_related('user', 'reviewed_by').order_by('-submitted_at', '-id')
+        status_filter = self.request.query_params.get('status')
+        if status_filter in {choice for choice, _ in SellerApplication.STATUS_CHOICES}:
+            queryset = queryset.filter(status=status_filter)
+        return queryset
+
+
+class AdminSellerApplicationApproveAPIView(APIView):
+    permission_classes = [IsStaffOrSuperuser]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        application = generics.get_object_or_404(
+            SellerApplication.objects.select_for_update().select_related('user', 'reviewed_by'),
+            pk=pk,
+        )
+        if application.status == SellerApplication.STATUS_REJECTED:
+            return Response({'detail': 'Rejected seller application cannot be approved.'}, status=status.HTTP_400_BAD_REQUEST)
+        store = SellerStore.objects.filter(owner=application.user).select_related('owner').first()
+        if store is None:
+            store = SellerStore.objects.create(
+                owner=application.user,
+                name=application.store_name,
+                slug=generate_unique_store_slug(application.store_name),
+            )
+        if application.status != SellerApplication.STATUS_APPROVED:
+            application.status = SellerApplication.STATUS_APPROVED
+            application.rejection_reason = ''
+            application.reviewed_by = request.user
+            application.reviewed_at = timezone.now()
+            application.save(update_fields=['status', 'rejection_reason', 'reviewed_by', 'reviewed_at', 'updated_at'])
+        response_data = {
+            'application': AdminSellerApplicationSerializer(application, context={'request': request}).data,
+            'store': SellerStoreSerializer(store, context={'request': request}).data,
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+class AdminSellerApplicationRejectAPIView(APIView):
+    permission_classes = [IsStaffOrSuperuser]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        application = generics.get_object_or_404(
+            SellerApplication.objects.select_for_update().select_related('user', 'reviewed_by'),
+            pk=pk,
+        )
+        if application.status == SellerApplication.STATUS_APPROVED:
+            return Response({'detail': 'Approved seller application cannot be rejected.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = SellerApplicationRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        application.status = SellerApplication.STATUS_REJECTED
+        application.rejection_reason = serializer.validated_data['rejection_reason']
+        application.reviewed_by = request.user
+        application.reviewed_at = timezone.now()
+        application.save(update_fields=['status', 'rejection_reason', 'reviewed_by', 'reviewed_at', 'updated_at'])
+        response_serializer = AdminSellerApplicationSerializer(application, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+
 class SellerStoreMeAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser, FormParser, MultiPartParser]
@@ -1095,6 +1202,15 @@ class SellerStoreMeAPIView(APIView):
     def post(self, request):
         if SellerStore.objects.filter(owner=request.user).exists():
             return Response({'detail': 'Store already exists.'}, status=status.HTTP_409_CONFLICT)
+        approved_application = SellerApplication.objects.filter(
+            user=request.user,
+            status=SellerApplication.STATUS_APPROVED,
+        ).order_by('-reviewed_at', '-submitted_at', '-id').first()
+        if approved_application is None:
+            return Response(
+                {'detail': 'Seller application approval is required before creating a store.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         serializer = SellerStoreSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         store = serializer.save(owner=request.user)
