@@ -12840,6 +12840,209 @@ class ProductOrderFlowAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         return ProductOrder.objects.get(order_no=response.data['order_no']), response
 
+
+    def create_manual_product_order(self, buyer, product, *, status_value=ProductOrder.STATUS_PENDING_PAYMENT, quantity=1):
+        order_no = f'POTEST{ProductOrder.objects.count() + 1:06d}'
+        total_amount = Decimal('12.00') * Decimal(quantity)
+        now = django_timezone.now()
+        product.stock_quantity -= quantity
+        product.save(update_fields=['stock_quantity'])
+        payment_status = PaymentOrder.STATUS_PAID if status_value != ProductOrder.STATUS_PENDING_PAYMENT else PaymentOrder.STATUS_PENDING
+        paid_at = now if status_value in {
+            ProductOrder.STATUS_PAID,
+            ProductOrder.STATUS_SHIPPING,
+            ProductOrder.STATUS_COMPLETED,
+            ProductOrder.STATUS_SETTLED,
+        } else None
+        payment_order = PaymentOrder.objects.create(
+            user=buyer,
+            product=product,
+            order_type=PaymentOrder.TYPE_PRODUCT,
+            target_type='product_order',
+            amount=total_amount,
+            expected_amount_lbc=total_amount,
+            currency=TOKEN_SYMBOL,
+            status=payment_status,
+            order_no=order_no,
+            pay_to_address='bProductTestAddress',
+            paid_at=paid_at,
+        )
+        order = ProductOrder.objects.create(
+            order_no=order_no,
+            buyer=buyer,
+            seller_store=product.store,
+            product=product,
+            product_title_snapshot=product.title,
+            product_price_snapshot=product.price_amount,
+            quantity=quantity,
+            total_amount=total_amount,
+            currency=TOKEN_SYMBOL,
+            status=status_value,
+            shipping_address_snapshot={},
+            payment_order=payment_order,
+            payment_method=ProductOrder.PAYMENT_METHOD_BLOCKCHAIN,
+            payment_asset='',
+            stock_locked_at=now,
+            paid_at=paid_at,
+            shipped_at=now if status_value in {ProductOrder.STATUS_SHIPPING, ProductOrder.STATUS_COMPLETED} else None,
+            completed_at=now if status_value == ProductOrder.STATUS_COMPLETED else None,
+        )
+        payment_order.target_id = order.id
+        payment_order.save(update_fields=['target_id', 'updated_at'])
+        return order
+
+
+    def test_buyer_can_cancel_pending_payment_order(self):
+        buyer = self.create_user('cancel-buyer@example.com')
+        _, _, product = self.create_store_product('cancel-seller@example.com', slug='store-cancel')
+        initial_stock = product.stock_quantity
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PENDING_PAYMENT)
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.post(
+            reverse('product-order-cancel', args=[order.order_no]),
+            {'reason': 'changed mind'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        product.refresh_from_db()
+        order.payment_order.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_CANCELLED)
+        self.assertEqual(order.cancel_reason, 'changed mind')
+        self.assertIsNotNone(order.cancelled_at)
+        self.assertIsNotNone(order.stock_released_at)
+        self.assertEqual(product.stock_quantity, initial_stock)
+        self.assertEqual(order.payment_order.status, PaymentOrder.STATUS_CANCELLED)
+        self.assertEqual(response.data['status'], ProductOrder.STATUS_CANCELLED)
+
+    def test_buyer_cannot_cancel_paid_shipping_or_completed_orders(self):
+        buyer = self.create_user('cancel-state-buyer@example.com')
+        _, _, product = self.create_store_product('cancel-state-seller@example.com', slug='store-cancel-state')
+        for blocked_status in [ProductOrder.STATUS_PAID, ProductOrder.STATUS_SHIPPING, ProductOrder.STATUS_COMPLETED]:
+            order = self.create_manual_product_order(buyer, product, status_value=blocked_status)
+            self.client.force_authenticate(user=buyer)
+            response = self.client.post(reverse('product-order-cancel', args=[order.order_no]), format='json')
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            order.refresh_from_db()
+            self.assertEqual(order.status, blocked_status)
+
+    def test_non_buyer_cannot_cancel_order(self):
+        buyer = self.create_user('cancel-owner@example.com')
+        other = self.create_user('cancel-other@example.com')
+        _, _, product = self.create_store_product('cancel-nonbuyer-seller@example.com', slug='store-cancel-nonbuyer')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PENDING_PAYMENT)
+
+        self.client.force_authenticate(user=other)
+        response = self.client.post(reverse('product-order-cancel', args=[order.order_no]), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_PENDING_PAYMENT)
+
+    def test_buyer_order_list_can_filter_by_status(self):
+        buyer = self.create_user('filter-buyer@example.com')
+        other = self.create_user('filter-other@example.com')
+        _, _, product = self.create_store_product('filter-seller@example.com', slug='store-filter')
+        paid_order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+        self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_SHIPPING)
+        self.create_manual_product_order(other, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(reverse('product-order-list-create'), {'status': ProductOrder.STATUS_PAID})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['order_no'] for item in response.data], [paid_order.order_no])
+
+    def test_tracking_without_shipment_returns_empty_snapshot(self):
+        buyer = self.create_user('tracking-empty-buyer@example.com')
+        _, _, product = self.create_store_product('tracking-empty-seller@example.com', slug='store-tracking-empty')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(reverse('product-order-tracking', args=[order.order_no]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['order_no'], order.order_no)
+        self.assertIsNone(response.data['shipment'])
+        self.assertEqual(response.data['timeline'], [])
+
+    def test_tracking_with_shipment_returns_snapshot_and_timeline(self):
+        buyer = self.create_user('tracking-buyer@example.com')
+        seller, _, product = self.create_store_product('tracking-seller@example.com', slug='store-tracking')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_SHIPPING)
+        ProductShipment.objects.create(
+            product_order=order,
+            carrier='DHL',
+            tracking_number='DHL123',
+            tracking_url='https://track.example.com/DHL123',
+            shipped_note='Packed well',
+            created_by=seller,
+        )
+
+        self.client.force_authenticate(user=buyer)
+        response = self.client.get(reverse('product-order-tracking', args=[order.order_no]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['shipment']['carrier'], 'DHL')
+        self.assertEqual(response.data['shipment']['tracking_number'], 'DHL123')
+        self.assertEqual([item['status'] for item in response.data['timeline']], ['paid', 'shipped'])
+
+    def test_creator_shop_products_alias_can_list_and_create(self):
+        seller = self.create_user('creator-shop-product-seller@example.com')
+        SellerStore.objects.create(owner=seller, name='Creator Shop', slug='creator-shop-products', is_active=True)
+
+        self.client.force_authenticate(user=seller)
+        list_response = self.client.get(reverse('creator-shop-products'))
+        create_response = self.client.post(
+            reverse('creator-shop-products'),
+            {
+                'title': 'Alias Product',
+                'slug': 'alias-product',
+                'description': 'Created through alias',
+                'price_amount': '21.00',
+                'price_currency': 'USD',
+                'meow_points_price': '21.00',
+                'meow_credit_price': '21.00',
+                'stock_quantity': 5,
+                'status': Product.STATUS_ACTIVE,
+            },
+            format='json',
+        )
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['title'], 'Alias Product')
+
+    def test_creator_shop_orders_alias_can_list(self):
+        buyer = self.create_user('creator-shop-order-buyer@example.com')
+        seller, _, product = self.create_store_product('creator-shop-order-seller@example.com', slug='store-creator-shop-orders')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=seller)
+        response = self.client.get(reverse('creator-shop-orders'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['order_no'] for item in response.data], [order.order_no])
+
+    def test_creator_shop_order_ship_alias_can_ship(self):
+        buyer = self.create_user('creator-shop-ship-buyer@example.com')
+        seller, _, product = self.create_store_product('creator-shop-ship-seller@example.com', slug='store-creator-shop-ship')
+        order = self.create_manual_product_order(buyer, product, status_value=ProductOrder.STATUS_PAID)
+
+        self.client.force_authenticate(user=seller)
+        response = self.client.post(
+            reverse('creator-shop-order-ship', args=[order.order_no]),
+            {'carrier': 'UPS', 'tracking_number': 'UPS123', 'tracking_url': 'https://track.example.com/UPS123'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProductOrder.STATUS_SHIPPING)
+        self.assertEqual(order.shipment.carrier, 'UPS')
+
     def test_shipping_address_crud(self):
         buyer = self.create_user('shipping@example.com')
         self.client.force_authenticate(user=buyer)

@@ -98,6 +98,7 @@ from apps.accounts.serializers import (
     PaymentQRResolveSerializer,
     ProductOrderMarkSettledSerializer,
     ProductOrderShipSerializer,
+    ProductShipmentSerializer,
     ProductOrderTxHintSerializer,
     ProductCategorySerializer,
     ProductRefundAdminActionSerializer,
@@ -498,6 +499,10 @@ class ProductOrderListCreateAPIView(APIView):
             'shipment',
             'seller_payout',
         )
+        status_filter = request.query_params.get('status')
+        valid_statuses = {choice for choice, _ in ProductOrder.STATUS_CHOICES}
+        if status_filter in valid_statuses:
+            queryset = queryset.filter(status=status_filter)
         serializer = ProductOrderDetailSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -532,6 +537,58 @@ class ProductOrderDetailAPIView(APIView):
         )
         serializer = ProductOrderDetailSerializer(order)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ProductOrderCancelAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, order_no):
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('payment_order', 'product', 'seller_store', 'shipment', 'seller_payout'),
+            order_no=order_no,
+            buyer=request.user,
+        )
+        try:
+            order = ProductOrderService().cancel_order(order=order, reason=request.data.get('reason', '') or '')
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        order = ProductOrder.objects.select_related(
+            'payment_order',
+            'product',
+            'seller_store',
+            'shipment',
+            'seller_payout',
+        ).prefetch_related('refund_requests').get(pk=order.pk)
+        return Response(ProductOrderDetailSerializer(order).data, status=status.HTTP_200_OK)
+
+
+class ProductOrderTrackingAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, order_no):
+        order = generics.get_object_or_404(
+            ProductOrder.objects.select_related('shipment'),
+            order_no=order_no,
+            buyer=request.user,
+        )
+        shipment = getattr(order, 'shipment', None)
+        timeline = []
+        if order.paid_at:
+            timeline.append({'status': 'paid', 'time': order.paid_at})
+        if order.shipped_at:
+            timeline.append({'status': 'shipped', 'time': order.shipped_at})
+        if order.completed_at:
+            timeline.append({'status': 'completed', 'time': order.completed_at})
+        return Response(
+            {
+                'order_no': order.order_no,
+                'status': order.status,
+                'shipment': ProductShipmentSerializer(shipment).data if shipment else None,
+                'timeline': timeline if shipment else [],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class SellerProductOrderListAPIView(generics.ListAPIView):

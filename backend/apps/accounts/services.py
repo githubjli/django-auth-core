@@ -1840,6 +1840,35 @@ class ProductOrderService:
             's': signature,
         }
 
+    @transaction.atomic
+    def cancel_order(self, *, order: ProductOrder, reason: str = '') -> ProductOrder:
+        cancellable_statuses = {ProductOrder.STATUS_PENDING_PAYMENT}
+        for status_name in ('STATUS_PENDING', 'STATUS_UNPAID'):
+            status_value = getattr(ProductOrder, status_name, None)
+            if status_value:
+                cancellable_statuses.add(status_value)
+        order = ProductOrder.objects.select_for_update().select_related('payment_order', 'product').get(pk=order.pk)
+        if order.status not in cancellable_statuses:
+            raise ValueError('Only unpaid orders can be cancelled.')
+
+        now = timezone.now()
+        released_stock = False
+        if order.stock_locked_at is not None and order.stock_released_at is None:
+            Product.objects.filter(id=order.product_id).update(stock_quantity=F('stock_quantity') + order.quantity)
+            order.stock_released_at = now
+            released_stock = True
+        order.status = ProductOrder.STATUS_CANCELLED
+        order.cancelled_at = now
+        order.cancel_reason = (reason or '')[:64]
+        update_fields = ['status', 'cancelled_at', 'cancel_reason', 'updated_at']
+        if released_stock:
+            update_fields.append('stock_released_at')
+        order.save(update_fields=update_fields)
+        if order.payment_order:
+            order.payment_order.status = PaymentOrder.STATUS_CANCELLED
+            order.payment_order.save(update_fields=['status', 'updated_at'])
+        return order
+
     def mark_paid(self, *, order: ProductOrder):
         now = timezone.now()
         with transaction.atomic():
