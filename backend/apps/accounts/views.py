@@ -2987,28 +2987,41 @@ class PublicUserFollowAPIView(APIView):
         }
 
 
-class PublicUserFollowersListAPIView(generics.ListAPIView):
+class PublicUserRelationshipListMixin:
     serializer_class = PublicUserListItemSerializer
     permission_classes = [permissions.AllowAny]
     pagination_class = VideoPagination
 
+    def _annotate_public_user_summary(self, queryset):
+        queryset = queryset.annotate(
+            follower_count_value=Count('subscriptions_received', distinct=True),
+        )
+        viewer = getattr(self.request, 'user', None)
+        if viewer is not None and viewer.is_authenticated:
+            queryset = queryset.annotate(
+                viewer_is_following_value=Exists(
+                    ChannelSubscription.objects.filter(channel_id=OuterRef('pk'), subscriber=viewer)
+                )
+            )
+        return queryset
+
+
+class PublicUserFollowersListAPIView(PublicUserRelationshipListMixin, generics.ListAPIView):
     def get_queryset(self):
         user = generics.get_object_or_404(User, pk=self.kwargs['user_id'])
-        return User.objects.filter(
+        queryset = User.objects.filter(
             channel_subscriptions__channel=user,
         ).order_by('-channel_subscriptions__created_at', '-channel_subscriptions__id')
+        return self._annotate_public_user_summary(queryset)
 
 
-class PublicUserFollowingListAPIView(generics.ListAPIView):
-    serializer_class = PublicUserListItemSerializer
-    permission_classes = [permissions.AllowAny]
-    pagination_class = VideoPagination
-
+class PublicUserFollowingListAPIView(PublicUserRelationshipListMixin, generics.ListAPIView):
     def get_queryset(self):
         user = generics.get_object_or_404(User, pk=self.kwargs['user_id'])
-        return User.objects.filter(
+        queryset = User.objects.filter(
             subscriptions_received__subscriber=user,
         ).order_by('-subscriptions_received__created_at', '-subscriptions_received__id')
+        return self._annotate_public_user_summary(queryset)
 
 
 class PublicCreatorVideoListAPIView(generics.ListAPIView):

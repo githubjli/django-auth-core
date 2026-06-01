@@ -135,6 +135,15 @@ def build_absolute_avatar_url(user, request=None):
     return request.build_absolute_uri(user.avatar.url)
 
 
+def public_profile_display_name(user):
+    if user is None:
+        return ''
+    full_name = f'{user.first_name} {user.last_name}'.strip()
+    if full_name:
+        return full_name
+    return f'User {user.id}'
+
+
 def build_public_creator_summary(user, viewer=None, request=None):
     if user is None:
         return None
@@ -678,7 +687,9 @@ class PublicUserListItemSerializer(serializers.ModelSerializer):
     avatar = serializers.SerializerMethodField()
     avatar_url = serializers.SerializerMethodField()
     description = serializers.CharField(source='bio', read_only=True)
+    follower_count = serializers.SerializerMethodField()
     followers_count = serializers.SerializerMethodField()
+    viewer_is_following = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -692,14 +703,13 @@ class PublicUserListItemSerializer(serializers.ModelSerializer):
             'bio',
             'description',
             'is_creator',
+            'follower_count',
             'followers_count',
+            'viewer_is_following',
         )
 
     def _public_display_name(self, obj):
-        full_name = f'{obj.first_name} {obj.last_name}'.strip()
-        if full_name:
-            return full_name
-        return f'User {obj.id}'
+        return public_profile_display_name(obj)
 
     def _build_file_url(self, file_field):
         if not file_field:
@@ -724,8 +734,22 @@ class PublicUserListItemSerializer(serializers.ModelSerializer):
     def get_avatar_url(self, obj):
         return self.get_avatar(obj)
 
-    def get_followers_count(self, obj):
+    def get_follower_count(self, obj):
+        annotated = getattr(obj, 'follower_count_value', None)
+        if annotated is not None:
+            return annotated
         return follower_count_for_user(obj)
+
+    def get_followers_count(self, obj):
+        return self.get_follower_count(obj)
+
+    def get_viewer_is_following(self, obj):
+        annotated = getattr(obj, 'viewer_is_following_value', None)
+        if annotated is not None:
+            return bool(annotated)
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None) if request is not None else None
+        return is_following(viewer, obj)
 
 
 class PublicUserProfileSerializer(serializers.ModelSerializer):
@@ -797,10 +821,7 @@ class PublicUserProfileSerializer(serializers.ModelSerializer):
         )
 
     def _public_display_name(self, obj):
-        full_name = f'{obj.first_name} {obj.last_name}'.strip()
-        if full_name:
-            return full_name
-        return f'User {obj.id}'
+        return public_profile_display_name(obj)
 
     def _build_file_url(self, file_field):
         if not file_field:
@@ -2905,15 +2926,6 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
         if prefetched is not None:
             return prefetched
         return follower_count_for_user(obj.owner)
-
-    def get_subscriber_count(self, obj):
-        return self.get_follower_count(obj)
-
-    def get_follower_count(self, obj):
-        prefetched = getattr(obj.owner, 'follower_count_value', None)
-        if prefetched is not None:
-            return prefetched
-        return ChannelSubscription.objects.filter(channel=obj.owner).count()
 
     def get_subscriber_count(self, obj):
         return self.get_follower_count(obj)

@@ -238,6 +238,10 @@ Status legend used throughout:
 - **Follow routes**:
   - Legacy creator follow route remains `POST/DELETE /api/creators/{id}/follow/`.
   - Public user follow route is available as `POST/DELETE /api/public/users/{id}/follow/`; both routes write to the same follow table, so `follower_count` updates are reflected in public user and video creator payloads.
+- **Relationship lists**:
+  - `GET /api/public/users/{id}/followers/` and `GET /api/public/users/{id}/following/` are DRF-paginated lists.
+  - Each `results[]` item uses the public user summary fields: `id`, `display_name`, `nickname`, `username`, `avatar_url`, `avatar`, `bio`, `description`, `is_creator`, `follower_count`, `followers_count`, `viewer_is_following`.
+  - New Flutter code should prefer `display_name`, `avatar_url`, `bio`, and `follower_count`; `nickname`, `avatar`, `description`, and `followers_count` are compatibility aliases.
 
 ### GET `/api/public/creators/{id}/`
 - **Status**: Current but compatibility-oriented; new public profile UI should prefer `GET /api/public/users/{id}/`.
