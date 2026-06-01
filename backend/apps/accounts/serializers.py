@@ -44,7 +44,13 @@ from apps.accounts.models import (
     VideoLike,
     UserMembership,
 )
-from apps.accounts.services import AntMediaLiveAdapter, ProductOrderService, get_membership_payment_asset_rate
+from apps.accounts.services import (
+    AntMediaLiveAdapter,
+    ProductOrderService,
+    follower_count_for_user,
+    get_membership_payment_asset_rate,
+    is_following,
+)
 
 User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
@@ -134,10 +140,8 @@ def build_public_creator_summary(user, viewer=None, request=None):
         return None
     follower_count = getattr(user, 'follower_count_value', None)
     if follower_count is None:
-        follower_count = ChannelSubscription.objects.filter(channel=user).count()
-    is_following = False
-    if viewer is not None and getattr(viewer, 'is_authenticated', False) and viewer.pk != user.pk:
-        is_following = ChannelSubscription.objects.filter(channel=user, subscriber=viewer).exists()
+        follower_count = follower_count_for_user(user)
+    viewer_is_following = is_following(viewer, user)
     return {
         'id': user.id,
         'name': public_display_name(user),
@@ -145,7 +149,7 @@ def build_public_creator_summary(user, viewer=None, request=None):
         'is_creator': getattr(user, 'is_creator', False),
         'follower_count': follower_count,
         'subscriber_count': follower_count,
-        'is_following': is_following,
+        'is_following': viewer_is_following,
     }
 
 
@@ -178,10 +182,8 @@ def gift_summary_for_user(user):
 def public_user_profile_stats(user, viewer=None):
     content_summary = content_aggregate_summary(user) if user.is_creator else empty_content_aggregate_summary()
     gift_summary = gift_summary_for_user(user) if user.is_creator else {'gift_count': 0, 'total_gifts': 0}
-    viewer_is_following = False
-    if viewer is not None and getattr(viewer, 'is_authenticated', False):
-        viewer_is_following = ChannelSubscription.objects.filter(channel=user, subscriber=viewer).exists()
-    follower_count = ChannelSubscription.objects.filter(channel=user).count()
+    viewer_is_following = is_following(viewer, user)
+    follower_count = follower_count_for_user(user)
     return {
         'follower_count': follower_count,
         'followers_count': follower_count,
@@ -444,7 +446,7 @@ class AccountProfileSerializer(serializers.ModelSerializer):
         seller_store = SellerStore.objects.filter(owner=obj).only('id', 'name', 'slug', 'is_active').first()
         content_summary = content_aggregate_summary(obj)
         video_count = content_summary['video_count']
-        follower_count = ChannelSubscription.objects.filter(channel=obj).count()
+        follower_count = follower_count_for_user(obj)
         gift_summary = gift_summary_for_user(obj)
         gift_count = gift_summary['gift_count']
         product_count = Product.objects.filter(store__owner=obj).count()
@@ -590,7 +592,7 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(obj.avatar.url)
 
     def get_subscriber_count(self, obj):
-        return ChannelSubscription.objects.filter(channel=obj).count()
+        return follower_count_for_user(obj)
 
     def get_follower_count(self, obj):
         return self.get_subscriber_count(obj)
@@ -666,7 +668,7 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request is None or not request.user.is_authenticated:
             return False
-        return ChannelSubscription.objects.filter(channel=obj, subscriber=request.user).exists()
+        return is_following(request.user, obj)
 
 
 class PublicUserListItemSerializer(serializers.ModelSerializer):
@@ -723,7 +725,7 @@ class PublicUserListItemSerializer(serializers.ModelSerializer):
         return self.get_avatar(obj)
 
     def get_followers_count(self, obj):
-        return ChannelSubscription.objects.filter(channel=obj).count()
+        return follower_count_for_user(obj)
 
 
 class PublicUserProfileSerializer(serializers.ModelSerializer):
@@ -2896,7 +2898,16 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
         prefetched = getattr(obj, 'is_subscribed_value', None)
         if prefetched is not None:
             return bool(prefetched)
-        return ChannelSubscription.objects.filter(channel=obj.owner, subscriber=request.user).exists()
+        return is_following(request.user, obj.owner)
+
+    def get_follower_count(self, obj):
+        prefetched = getattr(obj.owner, 'follower_count_value', None)
+        if prefetched is not None:
+            return prefetched
+        return follower_count_for_user(obj.owner)
+
+    def get_subscriber_count(self, obj):
+        return self.get_follower_count(obj)
 
     def get_follower_count(self, obj):
         prefetched = getattr(obj.owner, 'follower_count_value', None)

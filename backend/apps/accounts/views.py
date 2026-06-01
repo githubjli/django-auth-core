@@ -156,6 +156,8 @@ from apps.accounts.services import (
     generate_video_thumbnail,
     MeowPointService,
     GiftService,
+    follow_user,
+    unfollow_user,
     create_live_chat_message,
     capture_live_snapshot,
 )
@@ -2853,11 +2855,15 @@ class ChannelSubscriptionAPIView(APIView):
         if channel.pk == request.user.pk:
             return Response({'detail': 'You cannot subscribe to your own channel.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        subscriber_count = set_user_following(channel, request.user, True)
+        subscriber_count = follow_user(request.user, channel)
         return Response(
             {
                 'channel_id': channel.pk,
                 'subscriber_count': subscriber_count,
+                'follower_count': subscriber_count,
+                'is_following': True,
+                'viewer_is_following': True,
+                'is_subscribed': True,
                 'viewer_is_subscribed': True,
             },
             status=status.HTTP_200_OK,
@@ -2865,11 +2871,15 @@ class ChannelSubscriptionAPIView(APIView):
 
     def delete(self, request, pk):
         channel = generics.get_object_or_404(User, pk=pk)
-        subscriber_count = set_user_following(channel, request.user, False)
+        subscriber_count = unfollow_user(request.user, channel)
         return Response(
             {
                 'channel_id': channel.pk,
                 'subscriber_count': subscriber_count,
+                'follower_count': subscriber_count,
+                'is_following': False,
+                'viewer_is_following': False,
+                'is_subscribed': False,
                 'viewer_is_subscribed': False,
             },
             status=status.HTTP_200_OK,
@@ -2885,7 +2895,7 @@ class CreatorFollowAPIView(APIView):
         if validation_response is not None:
             return validation_response
 
-        subscriber_count = set_user_following(creator, request.user, True)
+        subscriber_count = follow_user(request.user, creator)
         return Response(
             self._response_payload(creator=creator, is_following=True, subscriber_count=subscriber_count),
             status=status.HTTP_200_OK,
@@ -2897,7 +2907,7 @@ class CreatorFollowAPIView(APIView):
         if validation_response is not None:
             return validation_response
 
-        subscriber_count = set_user_following(creator, request.user, False)
+        subscriber_count = unfollow_user(request.user, creator)
         return Response(
             self._response_payload(creator=creator, is_following=False, subscriber_count=subscriber_count),
             status=status.HTTP_200_OK,
@@ -2918,6 +2928,8 @@ class CreatorFollowAPIView(APIView):
             # Backward-compatible aliases for existing clients.
             'viewer_is_following': is_following,
             'follower_count': subscriber_count,
+            'is_subscribed': is_following,
+            'viewer_is_subscribed': is_following,
         }
 
 
@@ -2947,7 +2959,7 @@ class PublicUserFollowAPIView(APIView):
         validation_response = self._validate_target(request, user)
         if validation_response is not None:
             return validation_response
-        follower_count = set_user_following(user, request.user, True)
+        follower_count = follow_user(request.user, user)
         return Response(self._response_payload(user, True, follower_count), status=status.HTTP_200_OK)
 
     def delete(self, request, user_id):
@@ -2955,7 +2967,7 @@ class PublicUserFollowAPIView(APIView):
         validation_response = self._validate_target(request, user)
         if validation_response is not None:
             return validation_response
-        follower_count = set_user_following(user, request.user, False)
+        follower_count = unfollow_user(request.user, user)
         return Response(self._response_payload(user, False, follower_count), status=status.HTTP_200_OK)
 
     def _validate_target(self, request, user):
@@ -2970,6 +2982,8 @@ class PublicUserFollowAPIView(APIView):
             'viewer_is_following': is_following,
             'follower_count': follower_count,
             'subscriber_count': follower_count,
+            'is_subscribed': is_following,
+            'viewer_is_subscribed': is_following,
         }
 
 

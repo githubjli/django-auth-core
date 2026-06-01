@@ -26,6 +26,7 @@ from django.utils.text import slugify
 from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKEN_SYMBOL
 from apps.accounts.models import (
     ChainReceipt,
+    ChannelSubscription,
     LiveStream,
     Video,
     Gift,
@@ -68,6 +69,49 @@ from apps.accounts.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def follower_count_for_user(target_user):
+    if target_user is None:
+        return 0
+    return ChannelSubscription.objects.filter(channel=target_user).count()
+
+
+def sync_user_follower_count(target_user):
+    follower_count = follower_count_for_user(target_user)
+    type(target_user).objects.filter(pk=target_user.pk).update(subscriber_count=follower_count)
+    target_user.subscriber_count = follower_count
+    return follower_count
+
+
+def is_following(viewer, target_user):
+    if target_user is None or viewer is None or not getattr(viewer, 'is_authenticated', False):
+        return False
+    if viewer.pk == target_user.pk:
+        return False
+    return ChannelSubscription.objects.filter(channel=target_user, subscriber=viewer).exists()
+
+
+def follow_user(viewer, target_user):
+    if target_user is None:
+        raise ValidationError('Target user not found.')
+    if viewer is None or not getattr(viewer, 'is_authenticated', False):
+        raise ValidationError('Authentication is required to follow a user.')
+    if viewer.pk == target_user.pk:
+        raise ValidationError('You cannot follow yourself.')
+    ChannelSubscription.objects.get_or_create(channel=target_user, subscriber=viewer)
+    return sync_user_follower_count(target_user)
+
+
+def unfollow_user(viewer, target_user):
+    if target_user is None:
+        raise ValidationError('Target user not found.')
+    if viewer is None or not getattr(viewer, 'is_authenticated', False):
+        raise ValidationError('Authentication is required to unfollow a user.')
+    if viewer.pk == target_user.pk:
+        raise ValidationError('You cannot follow yourself.')
+    ChannelSubscription.objects.filter(channel=target_user, subscriber=viewer).delete()
+    return sync_user_follower_count(target_user)
 
 
 def generate_unique_store_slug(store_name):

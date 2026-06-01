@@ -295,6 +295,10 @@ Based on current short-drama contract:
 ### Series
 - **Status**: Current
 - `GET /api/dramas/` (paginated list), `GET /api/dramas/{id}/` (detail)
+- Drama owner follow state uses the same user follow relationship as public profiles/videos:
+  - New fields: `viewer_is_following`, `is_following_owner`, `follower_count`.
+  - Compatibility aliases: `viewer_is_subscribed == viewer_is_following`, `is_subscribed == viewer_is_following`, `subscriber_count == follower_count`.
+  - `/api/channels/{id}/subscribe/`, `/api/creators/{id}/follow/`, and `/api/public/users/{id}/follow/` all write to the same follow table.
 
 ### Episodes
 - **Status**: Current

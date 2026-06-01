@@ -95,9 +95,11 @@ class DramaSeriesListAPIView(generics.ListAPIView):
         progress_items = DramaWatchProgress.objects.filter(user=user, series_id__in=series_ids).select_related('episode')
         context['progress_by_series_id'] = {item.series_id: item for item in progress_items}
         owner_ids = [owner_id for owner_id in self.get_queryset().values_list('owner_id', flat=True) if owner_id]
-        context['subscribed_owner_ids'] = set(
+        followed_owner_ids = set(
             ChannelSubscription.objects.filter(subscriber=user, channel_id__in=owner_ids).values_list('channel_id', flat=True)
         )
+        context['followed_owner_ids'] = followed_owner_ids
+        context['subscribed_owner_ids'] = followed_owner_ids
         return context
 
 
@@ -122,9 +124,11 @@ class DramaSeriesDetailAPIView(generics.RetrieveAPIView):
         progress_items = DramaWatchProgress.objects.filter(user=user, series_id=series_id).select_related('episode')
         context['progress_by_series_id'] = {item.series_id: item for item in progress_items}
         owner_id = DramaSeries.objects.filter(pk=series_id).values_list('owner_id', flat=True).first()
-        context['subscribed_owner_ids'] = set(
+        followed_owner_ids = set(
             ChannelSubscription.objects.filter(subscriber=user, channel_id=owner_id).values_list('channel_id', flat=True)
         ) if owner_id else set()
+        context['followed_owner_ids'] = followed_owner_ids
+        context['subscribed_owner_ids'] = followed_owner_ids
         return context
 
 
