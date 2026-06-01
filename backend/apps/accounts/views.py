@@ -4,6 +4,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from django.utils.text import slugify
 from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
 from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
@@ -233,6 +234,21 @@ def annotate_videos_for_request(queryset, request):
             ),
         )
     return queryset
+
+
+def sync_user_follower_count(user):
+    follower_count = ChannelSubscription.objects.filter(channel=user).count()
+    User.objects.filter(pk=user.pk).update(subscriber_count=follower_count)
+    user.subscriber_count = follower_count
+    return follower_count
+
+
+def set_user_following(target_user, viewer, is_following):
+    if is_following:
+        ChannelSubscription.objects.get_or_create(channel=target_user, subscriber=viewer)
+    else:
+        ChannelSubscription.objects.filter(channel=target_user, subscriber=viewer).delete()
+    return sync_user_follower_count(target_user)
 
 
 def annotate_comments(queryset, request):
