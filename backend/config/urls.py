@@ -11,6 +11,7 @@ urlpatterns = [
     path('api/admin/', include('apps.accounts.admin_urls')),
     path('api/videos/', include('apps.accounts.video_urls')),
     path('api/store/', include('apps.accounts.store_urls')),
+    path('api/seller-applications/', include('apps.accounts.seller_application_urls')),
     path('api/stores/', include('apps.accounts.public_store_urls')),
     path('api/channels/', include('apps.accounts.channel_urls')),
     path('api/creators/', include('apps.accounts.creators_urls')),
