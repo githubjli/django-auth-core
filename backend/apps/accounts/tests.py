@@ -12,7 +12,7 @@ from django.contrib import admin
 from django.core import management
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
-from django.test import override_settings
+from django.test import RequestFactory, override_settings
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone as django_timezone
 from rest_framework import status
@@ -47,6 +47,7 @@ from apps.accounts.models import (
     ProductShipment,
     Product,
     ProductCategory,
+    SellerApplication,
     SellerPayout,
     SavedProduct,
     PlatformAssetLedger,
@@ -63,6 +64,7 @@ from apps.accounts.models import (
     WalletAddress,
 )
 from apps.accounts.meow_points_serializers import MeowPointWalletSerializer
+from apps.accounts.admin import SellerApplicationAdmin
 from apps.accounts.serializers import LiveStreamSerializer
 from apps.accounts.services import (
     AntMediaLiveAdapter,
@@ -75,6 +77,7 @@ from apps.accounts.services import (
     ProductOrderService,
     ProductPaymentDetectionService,
     ProductPayoutService,
+    approve_seller_application,
     get_product_wallet_send_amount,
     sign_product_qr_payload,
 )
@@ -3074,6 +3077,193 @@ class LiveStreamAPITestCase(APITestCase):
         self.assertEqual(repeated_end.status_code, status.HTTP_409_CONFLICT)
 
 
+class SellerApplicationAPITestCase(APITestCase):
+    def create_user(self, email='seller-applicant@example.com', **extra_fields):
+        defaults = {'first_name': 'Seller', 'last_name': 'Applicant'}
+        defaults.update(extra_fields)
+        return User.objects.create_user(email=email, password='strong-pass-123', **defaults)
+
+    def application_payload(self, **overrides):
+        payload = {
+            'store_name': 'Applicant Store',
+            'business_type': 'individual',
+            'business_description': 'Handmade goods and curated products.',
+            'contact_phone': '+15551234567',
+            'contact_email': 'seller-applicant@example.com',
+            'business_license_url': '',
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_individual_application_submission_success(self):
+        user = self.create_user()
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(reverse('seller-application-create'), self.application_payload(), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], SellerApplication.STATUS_PENDING)
+        self.assertEqual(response.data['store_name'], 'Applicant Store')
+        self.assertTrue(SellerApplication.objects.filter(user=user, status=SellerApplication.STATUS_PENDING).exists())
+
+    def test_company_application_requires_business_license_url(self):
+        user = self.create_user(email='company@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('seller-application-create'),
+            self.application_payload(business_type='company', business_license_url=''),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('business_license_url', response.data)
+
+    def test_duplicate_pending_application_fails(self):
+        user = self.create_user(email='duplicate@example.com')
+        SellerApplication.objects.create(user=user, **self.application_payload(contact_email='duplicate@example.com'))
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('seller-application-create'),
+            self.application_payload(contact_email='duplicate@example.com'),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+    def test_service_approve_creates_seller_store(self):
+        user = self.create_user(email='service-approve@example.com')
+        staff = self.create_user(email='service-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Service Store', contact_email='service-approve@example.com'),
+        )
+
+        approved_application, store = approve_seller_application(application, reviewer=staff)
+
+        self.assertEqual(approved_application.status, SellerApplication.STATUS_APPROVED)
+        self.assertEqual(approved_application.reviewed_by, staff)
+        self.assertEqual(approved_application.rejection_reason, '')
+        self.assertEqual(store.owner, user)
+        self.assertEqual(store.name, 'Service Store')
+        self.assertTrue(SellerStore.objects.filter(owner=user).exists())
+
+    def test_approved_application_reapprove_does_not_duplicate_store(self):
+        user = self.create_user(email='reapprove@example.com')
+        staff = self.create_user(email='reapprove-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Reapprove Store', contact_email='reapprove@example.com'),
+        )
+
+        _, first_store = approve_seller_application(application, reviewer=staff)
+        application.refresh_from_db()
+        _, second_store = approve_seller_application(application, reviewer=staff)
+
+        self.assertEqual(first_store.id, second_store.id)
+        self.assertEqual(SellerStore.objects.filter(owner=user).count(), 1)
+
+    def test_admin_action_approve_creates_seller_store(self):
+        user = self.create_user(email='admin-action@example.com')
+        staff = self.create_user(email='admin-action-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Admin Action Store', contact_email='admin-action@example.com'),
+        )
+        request = RequestFactory().post('/admin/accounts/sellerapplication/')
+        request.user = staff
+        model_admin = SellerApplicationAdmin(SellerApplication, admin.site)
+        model_admin.message_user = lambda *args, **kwargs: None
+
+        model_admin.approve_applications(request, SellerApplication.objects.filter(pk=application.pk))
+
+        application.refresh_from_db()
+        self.assertEqual(application.status, SellerApplication.STATUS_APPROVED)
+        self.assertTrue(SellerStore.objects.filter(owner=user, name='Admin Action Store').exists())
+
+    def test_admin_manual_status_approval_creates_seller_store(self):
+        user = self.create_user(email='manual-admin@example.com')
+        staff = self.create_user(email='manual-admin-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Manual Admin Store', contact_email='manual-admin@example.com'),
+        )
+        request = RequestFactory().post('/admin/accounts/sellerapplication/')
+        request.user = staff
+        model_admin = SellerApplicationAdmin(SellerApplication, admin.site)
+        application.status = SellerApplication.STATUS_APPROVED
+
+        model_admin.save_model(request, application, form=None, change=True)
+
+        application.refresh_from_db()
+        self.assertEqual(application.status, SellerApplication.STATUS_APPROVED)
+        self.assertTrue(SellerStore.objects.filter(owner=user, name='Manual Admin Store').exists())
+
+    def test_staff_approve_creates_store_and_profile_is_seller(self):
+        user = self.create_user(email='approve@example.com')
+        staff = self.create_user(email='staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(store_name='Approved Store', contact_email='approve@example.com'),
+        )
+
+        self.client.force_authenticate(user=staff)
+        approve_response = self.client.post(reverse('admin-seller-application-approve', args=[application.id]), format='json')
+
+        self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_response.data['application']['status'], SellerApplication.STATUS_APPROVED)
+        self.assertEqual(approve_response.data['store']['name'], 'Approved Store')
+        self.assertTrue(SellerStore.objects.filter(owner=user, name='Approved Store').exists())
+
+        self.client.force_authenticate(user=user)
+        profile_response = self.client.get(reverse('account-profile'))
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(profile_response.data['is_seller'])
+        self.assertTrue(profile_response.data['can_manage_store'])
+        self.assertEqual(profile_response.data['seller_store']['name'], 'Approved Store')
+
+    def test_staff_reject_allows_resubmission(self):
+        user = self.create_user(email='reject@example.com')
+        staff = self.create_user(email='reject-staff@example.com', is_staff=True)
+        application = SellerApplication.objects.create(
+            user=user,
+            **self.application_payload(contact_email='reject@example.com'),
+        )
+
+        self.client.force_authenticate(user=staff)
+        reject_response = self.client.post(
+            reverse('admin-seller-application-reject', args=[application.id]),
+            {'rejection_reason': 'Missing details.'},
+            format='json',
+        )
+        self.assertEqual(reject_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(reject_response.data['status'], SellerApplication.STATUS_REJECTED)
+
+        self.client.force_authenticate(user=user)
+        resubmit_response = self.client.post(
+            reverse('seller-application-create'),
+            self.application_payload(store_name='Resubmitted Store', contact_email='reject@example.com'),
+            format='json',
+        )
+        self.assertEqual(resubmit_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resubmit_response.data['status'], SellerApplication.STATUS_PENDING)
+        self.assertEqual(SellerApplication.objects.filter(user=user).count(), 2)
+
+    def test_unreviewed_user_cannot_directly_create_store(self):
+        user = self.create_user(email='direct-store@example.com')
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            reverse('store-me'),
+            {'name': 'Direct Store', 'slug': 'direct-store', 'description': 'Should fail'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(SellerStore.objects.filter(owner=user).exists())
+
+
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
 class SellerStoreProductAPITestCase(APITestCase):
     def create_user(self, email='seller@example.com', **extra_fields):
@@ -3086,17 +3276,9 @@ class SellerStoreProductAPITestCase(APITestCase):
         self.client.force_authenticate(user=user)
         return user
 
-    def test_owner_can_create_and_update_store(self):
+    def test_owner_can_update_existing_store(self):
         owner = self.authenticate()
-        create_response = self.client.post(
-            reverse('store-me'),
-            {'name': 'My Store', 'slug': 'my-store', 'description': 'First store'},
-            format='json',
-        )
-        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(create_response.data['owner_id'], owner.id)
-        self.assertEqual(create_response.data['owner_name'], owner.display_name)
-        self.assertEqual(create_response.data['slug'], 'my-store')
+        SellerStore.objects.create(owner=owner, name='My Store', slug='my-store', description='First store')
 
         patch_response = self.client.patch(
             reverse('store-me'),
@@ -3104,6 +3286,9 @@ class SellerStoreProductAPITestCase(APITestCase):
             format='json',
         )
         self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data['owner_id'], owner.id)
+        self.assertEqual(patch_response.data['owner_name'], owner.display_name)
+        self.assertEqual(patch_response.data['slug'], 'my-store')
         self.assertEqual(patch_response.data['description'], 'Updated description')
         self.assertFalse(patch_response.data['is_active'])
 

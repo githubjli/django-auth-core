@@ -44,6 +44,7 @@ from apps.accounts.models import (
     ProductCategory,
     ProductOrder,
     SavedProduct,
+    SellerApplication,
     SellerPayout,
     PlatformAssetLedger,
     SellerStore,
@@ -58,7 +59,7 @@ from apps.accounts.models import (
     VideoView,
     WalletAddress,
 )
-from apps.accounts.services import MeowCreditRechargeService, MeowCreditService
+from apps.accounts.services import MeowCreditRechargeService, MeowCreditService, approve_seller_application
 
 
 @admin.register(Category)
@@ -532,6 +533,48 @@ class SellerStoreAdmin(admin.ModelAdmin):
     ordering = ('-created_at', '-id')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('owner',)
+
+
+@admin.register(SellerApplication)
+class SellerApplicationAdmin(admin.ModelAdmin):
+    list_display = ('user', 'store_name', 'business_type', 'status', 'submitted_at', 'reviewed_at')
+    list_filter = ('status', 'business_type', 'submitted_at', 'reviewed_at')
+    search_fields = ('user__email', 'store_name', 'contact_email', 'contact_phone')
+    ordering = ('-submitted_at', '-id')
+    readonly_fields = ('status', 'reviewed_by', 'submitted_at', 'reviewed_at', 'created_at', 'updated_at')
+    autocomplete_fields = ('user', 'reviewed_by')
+    actions = ('approve_applications',)
+
+    @admin.action(description='Approve selected seller applications')
+    def approve_applications(self, request, queryset):
+        approved = 0
+        skipped = 0
+        for application in queryset:
+            try:
+                approve_seller_application(application, reviewer=request.user)
+            except ValueError:
+                skipped += 1
+            else:
+                approved += 1
+        self.message_user(request, f'Seller application approval completed: approved={approved}, skipped={skipped}.')
+
+    def save_model(self, request, obj, form, change):
+        original_status = None
+        if change and obj.pk:
+            original_status = SellerApplication.objects.filter(pk=obj.pk).values_list('status', flat=True).first()
+
+        manual_approval = (
+            change
+            and original_status != SellerApplication.STATUS_APPROVED
+            and obj.status == SellerApplication.STATUS_APPROVED
+        )
+        if manual_approval:
+            obj.status = original_status
+            super().save_model(request, obj, form, change)
+            approve_seller_application(obj, reviewer=request.user)
+            return
+
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(Product)
