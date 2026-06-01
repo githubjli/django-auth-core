@@ -4,6 +4,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from django.utils.text import slugify
 from django.utils.dateparse import parse_date
 from django.db import IntegrityError, transaction
 from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, Value, When
