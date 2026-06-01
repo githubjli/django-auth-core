@@ -1,6 +1,9 @@
 from django.urls import path
 
 from apps.accounts.views import (
+    AdminSellerApplicationApproveAPIView,
+    AdminSellerApplicationListAPIView,
+    AdminSellerApplicationRejectAPIView,
     AdminUserActivationAPIView,
     AdminUserDetailAPIView,
     AdminUserListAPIView,
@@ -20,6 +23,17 @@ urlpatterns = [
         'users/<int:pk>/deactivate/',
         AdminUserActivationAPIView.as_view(active=False),
         name='admin-user-deactivate',
+    ),
+    path('seller-applications/', AdminSellerApplicationListAPIView.as_view(), name='admin-seller-application-list'),
+    path(
+        'seller-applications/<int:pk>/approve/',
+        AdminSellerApplicationApproveAPIView.as_view(),
+        name='admin-seller-application-approve',
+    ),
+    path(
+        'seller-applications/<int:pk>/reject/',
+        AdminSellerApplicationRejectAPIView.as_view(),
+        name='admin-seller-application-reject',
     ),
     path('videos/', AdminVideoListAPIView.as_view(), name='admin-video-list'),
     path('videos/<int:pk>/', AdminVideoDetailAPIView.as_view(), name='admin-video-detail'),
