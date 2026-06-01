@@ -173,6 +173,7 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     counts = serializers.SerializerMethodField()
     follower_count = serializers.SerializerMethodField()
     subscriber_count = serializers.SerializerMethodField()
+    # Deprecated aggregate alias retained for older clients; new clients should read total_likes.
     like_count = serializers.SerializerMethodField()
     total_likes = serializers.SerializerMethodField()
     gift_count = serializers.SerializerMethodField()
@@ -185,6 +186,7 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     drama_total_views = serializers.SerializerMethodField()
     live_total_views = serializers.SerializerMethodField()
     total_views = serializers.SerializerMethodField()
+    # Deprecated aggregate alias retained for older clients; new clients should read total_views.
     view_count = serializers.SerializerMethodField()
     video_total_likes = serializers.SerializerMethodField()
     drama_total_likes = serializers.SerializerMethodField()
@@ -447,10 +449,12 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
     drama_total_views = serializers.SerializerMethodField()
     live_total_views = serializers.SerializerMethodField()
     total_views = serializers.SerializerMethodField()
+    # Deprecated aggregate alias retained for older clients; new clients should read total_views.
     view_count = serializers.SerializerMethodField()
     video_total_likes = serializers.SerializerMethodField()
     drama_total_likes = serializers.SerializerMethodField()
     live_total_likes = serializers.SerializerMethodField()
+    # Deprecated aggregate alias retained for older clients; new clients should read total_likes.
     like_count = serializers.SerializerMethodField()
     total_likes = serializers.SerializerMethodField()
     gift_count = serializers.SerializerMethodField()

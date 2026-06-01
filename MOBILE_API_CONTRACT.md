@@ -149,9 +149,13 @@ Status legend used throughout:
   - `drama_total_views` = total playback count for active published dramas/short series.
   - `live_total_views` = total live replay/history playback count; currently `0` until a stable live replay view-count field exists.
   - `total_views` = `video_total_views + drama_total_views + live_total_views`.
-  - `view_count` is a backward-compatible alias for `total_views` in profile payloads.
+  - `view_count` is a deprecated backward-compatible alias for `total_views` in profile payloads (`profile.view_count == profile.total_views`).
   - `total_likes` = `video_total_likes + drama_total_likes + live_total_likes`; drama/live likes are `0` until first-class like models/fields exist.
-  - `like_count` is a backward-compatible alias for `total_likes` in profile payloads.
+  - `like_count` is a deprecated backward-compatible alias for `total_likes` in profile payloads (`profile.like_count == profile.total_likes`).
+- **Recommended display**:
+  - My Profile / Creator Profile first screen should prioritize: `Followers / Videos / Total Views / Total Likes`.
+  - If showing breakdowns, use explicit split fields: `video_total_views`, `drama_total_views`, `live_total_views`.
+  - Do not directly display compatibility fields `view_count` / `like_count` in new UI; use `total_views` / `total_likes` to avoid confusion with single-content detail payloads.
 - **Mobile notes**:
   - Flutter should prefer capability booleans (`can_*`) over hardcoded role string logic.
   - Keep role labels/UI derived from booleans and explicit backend flags.
@@ -216,12 +220,12 @@ Status legend used throughout:
   - `drama_total_views`: total playback count for active published dramas/short series.
   - `live_total_views`: total live replay/history playback count; currently `0` until a stable live replay view-count field exists.
   - `total_views`: `video_total_views + drama_total_views + live_total_views`.
-  - `view_count`: backward-compatible alias for `total_views`; do not interpret as one video's view count in creator payloads.
+  - `view_count`: deprecated backward-compatible alias for `total_views` (`creator.view_count == creator.total_views`); do not interpret as one video's view count in creator payloads.
   - `video_total_likes`: total likes for public active videos.
   - `drama_total_likes`: `0` until a first-class drama like model/field exists.
   - `live_total_likes`: `0` until a first-class live like model/field exists.
   - `total_likes`: `video_total_likes + drama_total_likes + live_total_likes`.
-  - `like_count`: backward-compatible alias for `total_likes`.
+  - `like_count`: deprecated backward-compatible alias for `total_likes` (`creator.like_count == creator.total_likes`).
 - **Consistency**:
   - `creator.video_count` should match the `count` returned by `GET /api/public/creators/{id}/videos/` with no filters.
   - `video.view_count` remains single-video playback count in video list/detail payloads.
@@ -229,7 +233,9 @@ Status legend used throughout:
   - `live.viewer_count` remains current realtime viewers; `live.view_count`, if added later, should mean live replay/history playback count.
   - Single-video `like_count` remains current-video likes in video payloads.
 - **UX note**:
-  - Creator Profile header should show clearly labeled metrics such as `Videos / Followers / Total Views` or `Videos / Followers / Total Likes`.
+  - My Profile / Creator Profile first screen should prioritize clearly labeled `Followers / Videos / Total Views / Total Likes`.
+  - If displaying detailed playback breakdowns, use `video_total_views`, `drama_total_views`, and `live_total_views`.
+  - New frontend code should read `total_views` / `total_likes`; avoid directly displaying deprecated compatibility aliases `view_count` / `like_count`.
 
 ### GET `/api/public/creators/{id}/videos/`
 - **Status**: Current but needs mobile review

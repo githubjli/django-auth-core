@@ -328,6 +328,9 @@ class PublicCreatorAPITestCase(APITestCase):
             'total_likes': 1,
             'like_count': 1,
         }
+        aggregate_fields = set(expected)
+        self.assertTrue(aggregate_fields.issubset(public_response.data.keys()))
+        self.assertTrue(aggregate_fields.issubset(profile_response.data.keys()))
         for key, value in expected.items():
             self.assertEqual(public_response.data[key], value, key)
             self.assertEqual(profile_response.data[key], value, key)
