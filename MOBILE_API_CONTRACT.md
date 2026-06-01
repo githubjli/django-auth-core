@@ -39,6 +39,15 @@ Status legend used throughout:
 - **Proposed mobile normalization**:
   - `count`, `next`, `previous`, `results` unchanged, plus optional additive `page` and `page_size` metadata for easier Flutter state handling.
 
+### Identity and CreatorProfilePage navigation
+- **Canonical profile id**: every navigation into `CreatorProfilePage` must use `User.id`.
+- **Use these fields**:
+  - Followers / Following: `results[].id`.
+  - Video detail/list: `owner_id`; `creator.id` is retained for compatibility and must equal `owner_id`.
+  - Drama / Shorts: `owner_id`.
+- **Do not use as profile ids**: `channel_id`, `video_id`, `drama.id`, `episode.id`, `SellerStore.id`, or any future independent channel/resource id.
+- **Current drama channel compatibility**: this backend does not currently have an independent Drama Channel model. Drama `channel_id`, `channel_name`, and `channel_avatar_url` are compatibility aliases to the owner user fields; new Flutter code should still prefer `owner_id`, `owner_name`, and `owner_avatar_url`.
+
 ### Error response shape
 - **Current but needs mobile review**:
   - Error payloads are not fully uniform yet across all modules.
@@ -143,6 +152,19 @@ Status legend used throughout:
   - Role flags: `is_creator`, `is_seller`, `is_admin`
   - Capability flags: `can_create_live`, `can_manage_store`, `can_accept_payments`
   - Optional summaries: `seller_store`, `counts`
+  - Content aggregates: `video_count`, `drama_count`, `live_count`, `video_total_views`, `drama_total_views`, `live_total_views`, `total_views`, `view_count`, `video_total_likes`, `drama_total_likes`, `live_total_likes`, `total_likes`, `like_count`
+- **Aggregate semantics**:
+  - `video_total_views` = total playback count for public active videos.
+  - `drama_total_views` = total playback count for active published dramas/short series.
+  - `live_total_views` = total live replay/history playback count; currently `0` until a stable live replay view-count field exists.
+  - `total_views` = `video_total_views + drama_total_views + live_total_views`.
+  - `view_count` is a deprecated backward-compatible alias for `total_views` in profile payloads (`profile.view_count == profile.total_views`).
+  - `total_likes` = `video_total_likes + drama_total_likes + live_total_likes`; drama/live likes are `0` until first-class like models/fields exist.
+  - `like_count` is a deprecated backward-compatible alias for `total_likes` in profile payloads (`profile.like_count == profile.total_likes`).
+- **Recommended display**:
+  - My Profile / Creator Profile first screen should prioritize: `Followers / Videos / Total Views / Total Likes`.
+  - If showing breakdowns, use explicit split fields: `video_total_views`, `drama_total_views`, `live_total_views`.
+  - Do not directly display compatibility fields `view_count` / `like_count` in new UI; use `total_views` / `total_likes` to avoid confusion with single-content detail payloads.
 - **Mobile notes**:
   - Flutter should prefer capability booleans (`can_*`) over hardcoded role string logic.
   - Keep role labels/UI derived from booleans and explicit backend flags.
@@ -177,7 +199,7 @@ Status legend used throughout:
 - **Current canonical public fields (as currently documented/expected for app feed)**:
   - playback: `file_url`
   - thumbnail: `thumbnail_url`
-  - owner: `owner_id`, `owner_name`, `owner_avatar_url`
+  - owner: `owner_id` (`User.id`), `owner_name`, `owner_avatar_url`, `owner_is_creator`
   - category: `category`, `category_name`, `category_slug`
   - gating: `access_type`, `preview_seconds`, `can_watch`, `is_locked`, `lock_reason`
 - **Additional mobile-required fields**:
@@ -192,6 +214,80 @@ Status legend used throughout:
   - Public video detail route should be confirmed/standardized for Flutter detail page deep-linking.
 - **Proposed response**:
   - Same core fields as list item with richer creator/category/playback metadata.
+  - `view_count` is the single video's playback/view count, not the creator's total views.
+  - `owner_id` is `User.id` and is the preferred CreatorProfilePage navigation id.
+  - `creator.id` and `owner_id` are required for normal videos and must match; if historical data has no owner, both may be null.
+  - `creator.follower_count`, `creator.subscriber_count`, `owner_follower_count`, and `owner_subscriber_count` all come from the unified follow table and must be equal for the same response.
+  - `creator.is_following` and `is_following_owner` use the same viewer relationship; anonymous users receive `false`.
+  - `video_url` is a compatibility alias for playable `file_url` when the viewer can watch.
+- **Compatibility routes**:
+  - Legacy like route remains `POST/DELETE /api/videos/{id}/like/`.
+  - Public alias is available as `POST/DELETE /api/public/videos/{id}/like/` and uses the same implementation.
+  - Public recommendations are available as `GET /api/public/videos/{id}/recommendations/` and return the same creator/owner payload fields as video detail/list cards.
+- **UX note**:
+  - Do not show `video.view_count` in the video detail author row; it can be misunderstood as creator total views. Use explicit labels near video stats only.
+
+
+### GET `/api/public/users/{id}/`
+- **Status**: Current; preferred public profile endpoint for all user profile pages.
+- **Auth**: Public; when authenticated, `viewer_is_following` reflects the request user.
+- **Purpose**: unified public user profile for both creators and non-creators. New frontend profile pages should use this endpoint instead of `/api/public/creators/{id}/` for stats.
+- **Core public fields**: `id`, `display_name`, `username`, `email`, `avatar_url`, `bio`, `is_creator`, `is_seller`.
+- **Relationship fields**:
+  - `follower_count`: number of users following this profile user.
+  - `following_count`: number of users this profile user follows.
+  - `viewer_is_following`: `false` when anonymous; otherwise whether the viewer follows this user.
+- **Unified stats fields**:
+  - `video_count`, `drama_count`, `live_count`
+  - `video_total_views`, `drama_total_views`, `live_total_views`, `total_views`
+  - `video_total_likes`, `drama_total_likes`, `live_total_likes`, `total_likes`
+  - `total_gifts`: current backend gift value total received by this user's public creator content.
+  - Deprecated aliases are retained for compatibility: `view_count == total_views`, `like_count == total_likes`. New code should prefer `total_views` / `total_likes`.
+- **Non-creator users**: return `is_creator=false`; content stats such as `video_count`, `total_views`, `total_likes`, and `total_gifts` are `0`.
+- **Recommended display**: My Profile / Creator Profile first screen should prioritize `Followers / Videos / Total Views / Total Likes`; use split fields only for detailed breakdowns.
+- **Follow routes**:
+  - Legacy creator follow route remains `POST/DELETE /api/creators/{id}/follow/`.
+  - Public user follow route is available as `POST/DELETE /api/public/users/{id}/follow/`; both routes write to the same follow table, so `follower_count` updates are reflected in public user and video creator payloads.
+- **Relationship lists**:
+  - `GET /api/public/users/{id}/followers/` and `GET /api/public/users/{id}/following/` are DRF-paginated lists.
+  - Each `results[]` item uses the public user summary fields: `id`, `display_name`, `nickname`, `username`, `avatar_url`, `avatar`, `bio`, `description`, `is_creator`, `follower_count`, `followers_count`, `viewer_is_following`.
+  - New Flutter code should prefer `display_name`, `avatar_url`, `bio`, and `follower_count`; `nickname`, `avatar`, `description`, and `followers_count` are compatibility aliases.
+
+### GET `/api/public/creators/{id}/`
+- **Status**: Current but compatibility-oriented; new public profile UI should prefer `GET /api/public/users/{id}/`.
+- **Auth**: Public
+- **Creator aggregate fields**:
+  - `video_count`: number of the creator's videos where `visibility=public` and `status=active`.
+  - `drama_count`: number of active published dramas/short series.
+  - `live_count`: number of non-private live streams (`public` or `unlisted`).
+  - `video_total_views`: total playback count for public active videos.
+  - `drama_total_views`: total playback count for active published dramas/short series.
+  - `live_total_views`: total live replay/history playback count; currently `0` until a stable live replay view-count field exists.
+  - `total_views`: `video_total_views + drama_total_views + live_total_views`.
+  - `view_count`: deprecated backward-compatible alias for `total_views` (`creator.view_count == creator.total_views`); do not interpret as one video's view count in creator payloads.
+  - `video_total_likes`: total likes for public active videos.
+  - `drama_total_likes`: `0` until a first-class drama like model/field exists.
+  - `live_total_likes`: `0` until a first-class live like model/field exists.
+  - `total_likes`: `video_total_likes + drama_total_likes + live_total_likes`.
+  - `total_gifts`: current backend gift value total received by this creator's content.
+  - `like_count`: deprecated backward-compatible alias for `total_likes` (`creator.like_count == creator.total_likes`).
+- **Consistency**:
+  - `creator.video_count` should match the `count` returned by `GET /api/public/creators/{id}/videos/` with no filters.
+  - `video.view_count` remains single-video playback count in video list/detail payloads.
+  - `drama.view_count` remains single-drama/series playback count in drama detail payloads.
+  - `live.viewer_count` remains current realtime viewers; `live.view_count`, if added later, should mean live replay/history playback count.
+  - Single-video `like_count` remains current-video likes in video payloads.
+- **UX note**:
+  - My Profile / Creator Profile first screen should prioritize clearly labeled `Followers / Videos / Total Views / Total Likes`.
+  - If displaying detailed playback breakdowns, use `video_total_views`, `drama_total_views`, and `live_total_views`.
+  - New frontend code should read `total_views` / `total_likes`; avoid directly displaying deprecated compatibility aliases `view_count` / `like_count`.
+
+### GET `/api/public/creators/{id}/videos/`
+- **Status**: Current but needs mobile review
+- **Auth**: Public
+- **Semantics**:
+  - Returns only creator videos with `visibility=public` and `status=active`.
+  - Paginated `count` is the same public active video count exposed as `creator.video_count` on creator detail.
 
 ---
 
@@ -213,10 +309,17 @@ Based on current short-drama contract:
 ### Series
 - **Status**: Current
 - `GET /api/dramas/` (paginated list), `GET /api/dramas/{id}/` (detail)
+- Drama owner follow state uses the same user follow relationship as public profiles/videos:
+  - Owner identity fields: `owner_id` (`User.id`, preferred CreatorProfilePage navigation id), `owner_name`, `owner_avatar_url`, `owner_is_creator`.
+  - Legacy channel fields: `channel_id`, `channel_name`, `channel_avatar_url`; because no standalone Drama Channel model exists today, these currently alias owner/User fields and should not be used for CreatorProfilePage navigation.
+  - New fields: `viewer_is_following`, `is_following_owner`, `follower_count`.
+  - Compatibility aliases: `viewer_is_subscribed == viewer_is_following`, `is_subscribed == viewer_is_following`, `subscriber_count == follower_count`.
+  - `/api/channels/{id}/subscribe/`, `/api/creators/{id}/follow/`, and `/api/public/users/{id}/follow/` all write to the same follow table.
 
 ### Episodes
 - **Status**: Current
 - `GET /api/dramas/{id}/episodes/`, `GET /api/dramas/{id}/episodes/{episode_no}/`
+- Episode payloads include the parent drama owner user fields: `owner_id`, `owner_name`, `owner_avatar_url`, `owner_is_creator`; Flutter should use `owner_id` for CreatorProfilePage navigation.
 
 ### Locked / member-only content
 - **Status**: Current
@@ -282,6 +385,9 @@ Based on current short-drama contract:
 - **GET `/api/live/`** — **Status**: Current
 - **GET `/api/live/{id}/`** — **Status**: Current
 - **GET `/api/live/{id}/status/`** — **Status**: Current but needs mobile review (currently similar to detail payload; optimize later)
+- **Field semantics**:
+  - `viewer_count` is realtime/current audience.
+  - `view_count`, if introduced later, should mean replay/history playback count, not realtime viewers.
 
 ### Live products
 - **Status**: Current but needs mobile review
@@ -326,7 +432,94 @@ Based on current short-drama contract:
 
 - **Status**: Current but needs mobile review
 - Profile currently exposes seller/capability fields (`is_seller`, `can_manage_store`, `can_accept_payments`, `seller_store`).
+- `SellerStore` remains the source of truth for seller capability; approved applications create a `SellerStore` automatically.
 - Related store/product/order surfaces are present in backend route inventory but mobile contract shape needs consolidation.
+
+### Seller application endpoints
+
+#### POST `/api/seller-applications/`
+- **Status**: Current
+- **Auth**: Bearer access token required
+- **Purpose**: submit an application to become a seller without directly creating a store.
+- **Request body**:
+  ```json
+  {
+    "store_name": "Alice Handmade",
+    "business_type": "individual",
+    "business_description": "Handmade goods and accessories.",
+    "contact_phone": "+15551234567",
+    "contact_email": "alice@example.com",
+    "business_license_url": ""
+  }
+  ```
+- **Validation**:
+  - `business_type` must be `individual` or `company`.
+  - `business_license_url` is required when `business_type=company`.
+  - A user with an existing pending application receives `409`.
+  - A user who already has a `SellerStore` receives `409` (`already seller`).
+- **Success response**: `201`
+  ```json
+  {
+    "id": 12,
+    "store_name": "Alice Handmade",
+    "business_type": "individual",
+    "business_description": "Handmade goods and accessories.",
+    "contact_phone": "+15551234567",
+    "contact_email": "alice@example.com",
+    "business_license_url": "",
+    "status": "pending",
+    "rejection_reason": "",
+    "submitted_at": "2026-05-31T12:00:00Z",
+    "reviewed_at": null
+  }
+  ```
+
+#### GET `/api/seller-applications/me/`
+- **Status**: Current
+- **Auth**: Bearer access token required
+- **Purpose**: return the current user's latest seller application.
+- **Success response**: `200`, same fields as `POST /api/seller-applications/`.
+- **No application response**: `404` with `{ "detail": "Seller application not found." }`.
+
+#### GET `/api/admin/seller-applications/`
+- **Status**: Current
+- **Auth**: staff/superuser only
+- **Purpose**: list seller applications for review. Optional query param: `status=pending|approved|rejected`.
+
+#### POST `/api/admin/seller-applications/{id}/approve/`
+- **Status**: Current
+- **Auth**: staff/superuser only
+- **Purpose**: approve an application and create the user's `SellerStore` if one does not already exist.
+- **Success response**: `200`
+  ```json
+  {
+    "application": { "id": 12, "status": "approved", "reviewed_at": "2026-05-31T12:05:00Z" },
+    "store": { "id": 7, "name": "Alice Handmade", "slug": "alice-handmade" }
+  }
+  ```
+
+#### POST `/api/admin/seller-applications/{id}/reject/`
+- **Status**: Current
+- **Auth**: staff/superuser only
+- **Request body**: `{ "rejection_reason": "Please provide a valid business license." }`
+- **Success response**: `200`, application fields with `status=rejected` and `rejection_reason`.
+
+### Store endpoint protection
+
+#### POST `/api/store/me/`
+- **Status**: Current with seller-application gate
+- **Auth**: Bearer access token required
+- **Behavior**:
+  - Users with an existing `SellerStore` still receive `409`.
+  - Users without an approved seller application receive `403`.
+  - Approved applications normally create the store during staff approval, so mobile should treat `/api/store/me/` primarily as read/edit for the current store.
+
+### Mobile ACCOUNT block logic
+- `is_seller=true`: show Seller Studio.
+- `is_seller=false` and `GET /api/seller-applications/me/` returns `404`: show "Apply to open a store".
+- Latest application `status=pending`: show "Under review".
+- Latest application `status=rejected`: show "Application rejected, apply again" and display `rejection_reason`.
+- Latest application `status=approved` but profile still has no `seller_store`: refresh profile, then retry/show a transient retry prompt.
 
 ### Mobile notes
 - First mobile phase can keep seller management hidden/read-only.

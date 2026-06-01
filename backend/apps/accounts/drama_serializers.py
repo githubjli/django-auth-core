@@ -1,6 +1,8 @@
 from rest_framework import serializers
 
-from apps.accounts.models import ChannelSubscription, DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress
+from apps.accounts.models import DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress
+from apps.accounts.serializers import build_public_user_summary
+from apps.accounts.services import follower_count_for_user, is_following
 
 
 class DramaSeriesSerializer(serializers.ModelSerializer):
@@ -13,7 +15,16 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(read_only=True, allow_null=True)
     owner_name = serializers.SerializerMethodField()
     owner_avatar_url = serializers.SerializerMethodField()
+    owner_is_creator = serializers.SerializerMethodField()
+    # No independent Channel model exists for dramas today; channel_* fields are legacy aliases to owner/User.
+    channel_id = serializers.SerializerMethodField()
+    channel_name = serializers.SerializerMethodField()
+    channel_avatar_url = serializers.SerializerMethodField()
+    viewer_is_following = serializers.SerializerMethodField()
+    is_following_owner = serializers.SerializerMethodField()
     viewer_is_subscribed = serializers.SerializerMethodField()
+    is_subscribed = serializers.SerializerMethodField()
+    follower_count = serializers.SerializerMethodField()
     subscriber_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -39,7 +50,15 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_is_creator',
+            'channel_id',
+            'channel_name',
+            'channel_avatar_url',
+            'viewer_is_following',
+            'is_following_owner',
             'viewer_is_subscribed',
+            'is_subscribed',
+            'follower_count',
             'subscriber_count',
         )
 
@@ -60,34 +79,63 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
         return _obj.id in favorite_series_ids
 
 
-    def get_owner_name(self, obj):
+    def _owner_summary(self, obj):
         if obj.owner_id is None or obj.owner is None:
             return None
-        return obj.owner.display_name
+        if hasattr(obj, 'owner_follower_count'):
+            obj.owner.follower_count_value = obj.owner_follower_count
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None) if request is not None else None
+        return build_public_user_summary(obj.owner, viewer=viewer, request=request)
+
+    def get_owner_name(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['display_name'] if summary is not None else None
 
     def get_owner_avatar_url(self, obj):
-        if obj.owner_id is None or obj.owner is None or not obj.owner.avatar:
-            return None
-        request = self.context.get('request')
-        if request is None:
-            return obj.owner.avatar.url
-        return request.build_absolute_uri(obj.owner.avatar.url)
+        summary = self._owner_summary(obj)
+        return summary['avatar_url'] if summary is not None else None
 
-    def get_viewer_is_subscribed(self, obj):
+    def get_owner_is_creator(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['is_creator'] if summary is not None else False
+
+    def get_channel_id(self, obj):
+        # Legacy compatibility: no standalone Channel model exists for drama, so this aliases owner_id.
+        return obj.owner_id
+
+    def get_channel_name(self, obj):
+        return self.get_owner_name(obj)
+
+    def get_channel_avatar_url(self, obj):
+        return self.get_owner_avatar_url(obj)
+
+    def get_viewer_is_following(self, obj):
         if obj.owner_id is None:
             return False
-        subscribed_owner_ids = self.context.get('subscribed_owner_ids')
-        if subscribed_owner_ids is not None:
-            return obj.owner_id in subscribed_owner_ids
+        followed_owner_ids = self.context.get('followed_owner_ids') or self.context.get('subscribed_owner_ids')
+        if followed_owner_ids is not None:
+            return obj.owner_id in followed_owner_ids
         request = self.context.get('request')
         if request is None or not request.user.is_authenticated:
             return False
-        return ChannelSubscription.objects.filter(channel_id=obj.owner_id, subscriber=request.user).exists()
+        return is_following(request.user, obj.owner)
+
+    def get_is_following_owner(self, obj):
+        return self.get_viewer_is_following(obj)
+
+    def get_viewer_is_subscribed(self, obj):
+        return self.get_viewer_is_following(obj)
+
+    def get_is_subscribed(self, obj):
+        return self.get_viewer_is_following(obj)
+
+    def get_follower_count(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['follower_count'] if summary is not None else 0
 
     def get_subscriber_count(self, obj):
-        if obj.owner_id is None or obj.owner is None:
-            return 0
-        return obj.owner.subscriber_count
+        return self.get_follower_count(obj)
 
     def get_continue_episode_no(self, _obj):
         progress_by_series_id = self.context.get('progress_by_series_id')
@@ -110,6 +158,14 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
 
 class DramaEpisodeSerializer(serializers.ModelSerializer):
     series_id = serializers.IntegerField(source='series.id', read_only=True)
+    owner_id = serializers.IntegerField(source='series.owner.id', read_only=True, allow_null=True)
+    owner_name = serializers.SerializerMethodField()
+    owner_avatar_url = serializers.SerializerMethodField()
+    owner_is_creator = serializers.SerializerMethodField()
+    # Legacy compatibility: no standalone Channel model exists for drama, so channel_* aliases owner/User.
+    channel_id = serializers.SerializerMethodField()
+    channel_name = serializers.SerializerMethodField()
+    channel_avatar_url = serializers.SerializerMethodField()
     can_watch = serializers.SerializerMethodField()
     is_locked = serializers.SerializerMethodField()
     is_unlocked = serializers.SerializerMethodField()
@@ -126,6 +182,13 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
         fields = (
             'id',
             'series_id',
+            'owner_id',
+            'owner_name',
+            'owner_avatar_url',
+            'owner_is_creator',
+            'channel_id',
+            'channel_name',
+            'channel_avatar_url',
             'episode_no',
             'title',
             'duration_seconds',
@@ -144,6 +207,35 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
             'is_locked',
             'is_unlocked',
         )
+
+    def _owner_summary(self, obj):
+        owner = getattr(getattr(obj, 'series', None), 'owner', None)
+        if owner is None:
+            return None
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None) if request is not None else None
+        return build_public_user_summary(owner, viewer=viewer, request=request)
+
+    def get_owner_name(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['display_name'] if summary is not None else None
+
+    def get_owner_avatar_url(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['avatar_url'] if summary is not None else None
+
+    def get_owner_is_creator(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['is_creator'] if summary is not None else False
+
+    def get_channel_id(self, obj):
+        return obj.series.owner_id if getattr(obj, 'series', None) is not None else None
+
+    def get_channel_name(self, obj):
+        return self.get_owner_name(obj)
+
+    def get_channel_avatar_url(self, obj):
+        return self.get_owner_avatar_url(obj)
 
     def _can_watch(self, obj):
         if obj.is_free:
@@ -267,8 +359,12 @@ class DramaInteractionSummarySerializer(serializers.Serializer):
     gift_amount_total = serializers.IntegerField(read_only=True)
     view_count = serializers.IntegerField(read_only=True)
     viewer_is_favorited = serializers.SerializerMethodField()
+    viewer_is_following = serializers.SerializerMethodField()
+    is_following_owner = serializers.SerializerMethodField()
     viewer_is_subscribed = serializers.SerializerMethodField()
+    is_subscribed = serializers.SerializerMethodField()
     owner_id = serializers.IntegerField(read_only=True, allow_null=True)
+    follower_count = serializers.SerializerMethodField()
     subscriber_count = serializers.SerializerMethodField()
 
     def get_viewer_is_favorited(self, obj):
@@ -277,16 +373,28 @@ class DramaInteractionSummarySerializer(serializers.Serializer):
             return False
         return DramaFavorite.objects.filter(series=obj, user=request.user).exists()
 
-    def get_viewer_is_subscribed(self, obj):
+    def get_viewer_is_following(self, obj):
         request = self.context.get('request')
         if obj.owner_id is None or request is None or not request.user.is_authenticated:
             return False
-        return ChannelSubscription.objects.filter(channel_id=obj.owner_id, subscriber=request.user).exists()
+        return is_following(request.user, obj.owner)
 
-    def get_subscriber_count(self, obj):
+    def get_is_following_owner(self, obj):
+        return self.get_viewer_is_following(obj)
+
+    def get_viewer_is_subscribed(self, obj):
+        return self.get_viewer_is_following(obj)
+
+    def get_is_subscribed(self, obj):
+        return self.get_viewer_is_following(obj)
+
+    def get_follower_count(self, obj):
         if obj.owner_id is None or obj.owner is None:
             return 0
-        return obj.owner.subscriber_count
+        return follower_count_for_user(obj.owner)
+
+    def get_subscriber_count(self, obj):
+        return self.get_follower_count(obj)
 
 
 class DramaGiftSendSerializer(serializers.Serializer):
@@ -416,6 +524,7 @@ class CreatorDramaSeriesSerializer(serializers.ModelSerializer):
     cover_url = serializers.SerializerMethodField(read_only=True)
     category_name = serializers.CharField(source='category.name', read_only=True)
     category_slug = serializers.CharField(source='category.slug', read_only=True)
+    follower_count = serializers.SerializerMethodField(read_only=True)
     subscriber_count = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -423,9 +532,9 @@ class CreatorDramaSeriesSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'owner_id', 'title', 'description', 'cover', 'cover_url', 'category', 'category_name',
             'category_slug', 'tags', 'total_episodes', 'status', 'is_active', 'view_count', 'favorite_count',
-            'comment_count', 'share_count', 'gift_count', 'gift_amount_total', 'subscriber_count', 'created_at', 'updated_at',
+            'comment_count', 'share_count', 'gift_count', 'gift_amount_total', 'follower_count', 'subscriber_count', 'created_at', 'updated_at',
         )
-        read_only_fields = ('id', 'owner_id', 'view_count', 'favorite_count', 'comment_count', 'share_count', 'gift_count', 'gift_amount_total', 'subscriber_count', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'owner_id', 'view_count', 'favorite_count', 'comment_count', 'share_count', 'gift_count', 'gift_amount_total', 'follower_count', 'subscriber_count', 'created_at', 'updated_at')
 
     def get_cover_url(self, obj):
         request = self.context.get('request')
@@ -433,10 +542,13 @@ class CreatorDramaSeriesSerializer(serializers.ModelSerializer):
             return None
         return request.build_absolute_uri(obj.cover.url) if request else obj.cover.url
 
-    def get_subscriber_count(self, obj):
+    def get_follower_count(self, obj):
         if obj.owner_id is None or obj.owner is None:
             return 0
-        return obj.owner.subscriber_count
+        return follower_count_for_user(obj.owner)
+
+    def get_subscriber_count(self, obj):
+        return self.get_follower_count(obj)
 
     def validate_tags(self, value):
         if isinstance(value, str):
