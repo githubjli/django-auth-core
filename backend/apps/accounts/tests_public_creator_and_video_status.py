@@ -248,6 +248,105 @@ class PublicCreatorAPITestCase(APITestCase):
         self.assertEqual(response.data['like_count'], 3)
         self.assertEqual(response.data['total_likes'], 3)
 
+
+    def test_account_profile_and_public_creator_profile_share_content_aggregates(self):
+        active_video = self._create_video(owner=self.creator, title='active-aggregate')
+        private_video = self._create_video(
+            owner=self.creator,
+            title='private-aggregate',
+            visibility=Video.VISIBILITY_PRIVATE,
+        )
+        inactive_video = self._create_video(
+            owner=self.creator,
+            title='inactive-aggregate',
+            status_value=Video.STATUS_ARCHIVED,
+        )
+        VideoView.objects.create(video=active_video, viewer=self.viewer)
+        VideoView.objects.create(video=active_video, viewer=None)
+        VideoView.objects.create(video=private_video, viewer=self.viewer)
+        VideoView.objects.create(video=inactive_video, viewer=self.viewer)
+        VideoLike.objects.create(video=active_video, user=self.viewer)
+        VideoLike.objects.create(video=private_video, user=self.viewer)
+        VideoLike.objects.create(video=inactive_video, user=self.viewer)
+        published_drama = DramaSeries.objects.create(
+            owner=self.creator,
+            title='published-aggregate',
+            is_active=True,
+            status=DramaSeries.STATUS_PUBLISHED,
+            view_count=5,
+        )
+        DramaSeries.objects.create(
+            owner=self.creator,
+            title='draft-aggregate',
+            is_active=True,
+            status=DramaSeries.STATUS_DRAFT,
+            view_count=7,
+        )
+        DramaSeries.objects.create(
+            owner=self.creator,
+            title='inactive-drama-aggregate',
+            is_active=False,
+            status=DramaSeries.STATUS_PUBLISHED,
+            view_count=11,
+        )
+        LiveStream.objects.create(
+            owner=self.creator,
+            title='public-live-aggregate',
+            visibility=LiveStream.VISIBILITY_PUBLIC,
+        )
+        LiveStream.objects.create(
+            owner=self.creator,
+            title='unlisted-live-aggregate',
+            visibility=LiveStream.VISIBILITY_UNLISTED,
+        )
+        LiveStream.objects.create(
+            owner=self.creator,
+            title='private-live-aggregate',
+            visibility=LiveStream.VISIBILITY_PRIVATE,
+        )
+
+        public_response = self.client.get(reverse('public-creator-detail', kwargs={'creator_id': self.creator.id}))
+        self.client.force_authenticate(user=self.creator)
+        profile_response = self.client.get(reverse('account-profile'))
+        video_detail_response = self.client.get(reverse('public-video-detail', kwargs={'pk': active_video.pk}))
+
+        self.assertEqual(public_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(video_detail_response.status_code, status.HTTP_200_OK)
+        expected = {
+            'video_count': 1,
+            'drama_count': 1,
+            'live_count': 2,
+            'video_total_views': 2,
+            'drama_total_views': published_drama.view_count,
+            'live_total_views': 0,
+            'total_views': 7,
+            'view_count': 7,
+            'video_total_likes': 1,
+            'drama_total_likes': 0,
+            'live_total_likes': 0,
+            'total_likes': 1,
+            'like_count': 1,
+        }
+        for key, value in expected.items():
+            self.assertEqual(public_response.data[key], value, key)
+            self.assertEqual(profile_response.data[key], value, key)
+
+        self.assertEqual(
+            public_response.data['total_views'],
+            public_response.data['video_total_views']
+            + public_response.data['drama_total_views']
+            + public_response.data['live_total_views'],
+        )
+        self.assertEqual(
+            profile_response.data['total_views'],
+            profile_response.data['video_total_views']
+            + profile_response.data['drama_total_views']
+            + profile_response.data['live_total_views'],
+        )
+        self.assertEqual(video_detail_response.data['view_count'], 2)
+        self.assertNotEqual(video_detail_response.data['view_count'], profile_response.data['view_count'])
+
     def test_creator_videos_returns_only_creator_public_active(self):
         expected = self._create_video(owner=self.creator, title='creator-active')
         self._create_video(owner=self.creator, title='creator-archived', status_value=Video.STATUS_ARCHIVED)

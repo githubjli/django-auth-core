@@ -143,6 +143,15 @@ Status legend used throughout:
   - Role flags: `is_creator`, `is_seller`, `is_admin`
   - Capability flags: `can_create_live`, `can_manage_store`, `can_accept_payments`
   - Optional summaries: `seller_store`, `counts`
+  - Content aggregates: `video_count`, `drama_count`, `live_count`, `video_total_views`, `drama_total_views`, `live_total_views`, `total_views`, `view_count`, `video_total_likes`, `drama_total_likes`, `live_total_likes`, `total_likes`, `like_count`
+- **Aggregate semantics**:
+  - `video_total_views` = total playback count for public active videos.
+  - `drama_total_views` = total playback count for active published dramas/short series.
+  - `live_total_views` = total live replay/history playback count; currently `0` until a stable live replay view-count field exists.
+  - `total_views` = `video_total_views + drama_total_views + live_total_views`.
+  - `view_count` is a backward-compatible alias for `total_views` in profile payloads.
+  - `total_likes` = `video_total_likes + drama_total_likes + live_total_likes`; drama/live likes are `0` until first-class like models/fields exist.
+  - `like_count` is a backward-compatible alias for `total_likes` in profile payloads.
 - **Mobile notes**:
   - Flutter should prefer capability booleans (`can_*`) over hardcoded role string logic.
   - Keep role labels/UI derived from booleans and explicit backend flags.
@@ -201,13 +210,23 @@ Status legend used throughout:
 - **Auth**: Public
 - **Creator aggregate fields**:
   - `video_count`: number of the creator's videos where `visibility=public` and `status=active`.
-  - `total_views`: sum of `view_count` across the creator's public active videos.
+  - `drama_count`: number of active published dramas/short series.
+  - `live_count`: number of non-private live streams (`public` or `unlisted`).
+  - `video_total_views`: total playback count for public active videos.
+  - `drama_total_views`: total playback count for active published dramas/short series.
+  - `live_total_views`: total live replay/history playback count; currently `0` until a stable live replay view-count field exists.
+  - `total_views`: `video_total_views + drama_total_views + live_total_views`.
   - `view_count`: backward-compatible alias for `total_views`; do not interpret as one video's view count in creator payloads.
-  - `like_count`: sum of likes across the creator's public active videos.
-  - `total_likes`: backward-compatible/explicit alias for creator total likes.
+  - `video_total_likes`: total likes for public active videos.
+  - `drama_total_likes`: `0` until a first-class drama like model/field exists.
+  - `live_total_likes`: `0` until a first-class live like model/field exists.
+  - `total_likes`: `video_total_likes + drama_total_likes + live_total_likes`.
+  - `like_count`: backward-compatible alias for `total_likes`.
 - **Consistency**:
   - `creator.video_count` should match the `count` returned by `GET /api/public/creators/{id}/videos/` with no filters.
   - `video.view_count` remains single-video playback count in video list/detail payloads.
+  - `drama.view_count` remains single-drama/series playback count in drama detail payloads.
+  - `live.viewer_count` remains current realtime viewers; `live.view_count`, if added later, should mean live replay/history playback count.
   - Single-video `like_count` remains current-video likes in video payloads.
 - **UX note**:
   - Creator Profile header should show clearly labeled metrics such as `Videos / Followers / Total Views` or `Videos / Followers / Total Likes`.
@@ -308,6 +327,9 @@ Based on current short-drama contract:
 - **GET `/api/live/`** — **Status**: Current
 - **GET `/api/live/{id}/`** — **Status**: Current
 - **GET `/api/live/{id}/status/`** — **Status**: Current but needs mobile review (currently similar to detail payload; optimize later)
+- **Field semantics**:
+  - `viewer_count` is realtime/current audience.
+  - `view_count`, if introduced later, should mean replay/history playback count, not realtime viewers.
 
 ### Live products
 - **Status**: Current but needs mobile review

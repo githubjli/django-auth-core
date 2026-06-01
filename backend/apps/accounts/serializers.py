@@ -17,6 +17,7 @@ from apps.accounts.models import (
     Category,
     ChannelSubscription,
     GiftTransaction,
+    DramaSeries,
     LiveChatMessage,
     LiveChatRoom,
     LiveStream,
@@ -49,6 +50,60 @@ User = get_user_model()
 LEGACY_CATEGORY_SLUG_ALIASES = {
     'tech': 'technology',
 }
+
+
+def public_active_videos_for_user(user):
+    return Video.objects.filter(
+        owner=user,
+        visibility=Video.VISIBILITY_PUBLIC,
+        status=Video.STATUS_ACTIVE,
+    )
+
+
+def published_dramas_for_user(user):
+    return DramaSeries.objects.filter(
+        owner=user,
+        is_active=True,
+        status=DramaSeries.STATUS_PUBLISHED,
+    )
+
+
+def non_private_lives_for_user(user):
+    return LiveStream.objects.filter(owner=user).exclude(visibility=LiveStream.VISIBILITY_PRIVATE)
+
+
+def content_aggregate_summary(user):
+    public_videos = public_active_videos_for_user(user)
+    published_dramas = published_dramas_for_user(user)
+    non_private_lives = non_private_lives_for_user(user)
+
+    video_count = public_videos.count()
+    drama_count = published_dramas.count()
+    live_count = non_private_lives.count()
+    video_total_views = public_videos.aggregate(total=Count('views')).get('total') or 0
+    drama_total_views = published_dramas.aggregate(total=Sum('view_count')).get('total') or 0
+    live_total_views = 0
+    video_total_likes = VideoLike.objects.filter(video__in=public_videos).count()
+    drama_total_likes = 0
+    live_total_likes = 0
+    total_views = video_total_views + drama_total_views + live_total_views
+    total_likes = video_total_likes + drama_total_likes + live_total_likes
+
+    return {
+        'video_count': video_count,
+        'drama_count': drama_count,
+        'live_count': live_count,
+        'video_total_views': video_total_views,
+        'drama_total_views': drama_total_views,
+        'live_total_views': live_total_views,
+        'total_views': total_views,
+        'view_count': total_views,
+        'video_total_likes': video_total_likes,
+        'drama_total_likes': drama_total_likes,
+        'live_total_likes': live_total_likes,
+        'total_likes': total_likes,
+        'like_count': total_likes,
+    }
 
 
 class OptionalSlugRelatedField(serializers.SlugRelatedField):
@@ -123,7 +178,17 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     gift_count = serializers.SerializerMethodField()
     total_gifts = serializers.SerializerMethodField()
     video_count = serializers.SerializerMethodField()
+    drama_count = serializers.SerializerMethodField()
+    live_count = serializers.SerializerMethodField()
     total_videos = serializers.SerializerMethodField()
+    video_total_views = serializers.SerializerMethodField()
+    drama_total_views = serializers.SerializerMethodField()
+    live_total_views = serializers.SerializerMethodField()
+    total_views = serializers.SerializerMethodField()
+    view_count = serializers.SerializerMethodField()
+    video_total_likes = serializers.SerializerMethodField()
+    drama_total_likes = serializers.SerializerMethodField()
+    live_total_likes = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -155,7 +220,17 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'gift_count',
             'total_gifts',
             'video_count',
+            'drama_count',
+            'live_count',
             'total_videos',
+            'video_total_views',
+            'drama_total_views',
+            'live_total_views',
+            'total_views',
+            'view_count',
+            'video_total_likes',
+            'drama_total_likes',
+            'live_total_likes',
             'counts',
         )
         read_only_fields = (
@@ -176,7 +251,17 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'gift_count',
             'total_gifts',
             'video_count',
+            'drama_count',
+            'live_count',
             'total_videos',
+            'video_total_views',
+            'drama_total_views',
+            'live_total_views',
+            'total_views',
+            'view_count',
+            'video_total_likes',
+            'drama_total_likes',
+            'live_total_likes',
             'counts',
         )
 
@@ -219,7 +304,16 @@ class AccountProfileSerializer(serializers.ModelSerializer):
         return self._summary(obj)['like_count']
 
     def get_total_likes(self, obj):
-        return self._summary(obj)['like_count']
+        return self._summary(obj)['total_likes']
+
+    def get_video_total_likes(self, obj):
+        return self._summary(obj)['video_total_likes']
+
+    def get_drama_total_likes(self, obj):
+        return self._summary(obj)['drama_total_likes']
+
+    def get_live_total_likes(self, obj):
+        return self._summary(obj)['live_total_likes']
 
     def get_gift_count(self, obj):
         return self._summary(obj)['gift_count']
@@ -230,8 +324,29 @@ class AccountProfileSerializer(serializers.ModelSerializer):
     def get_video_count(self, obj):
         return self._summary(obj)['video_count']
 
+    def get_drama_count(self, obj):
+        return self._summary(obj)['drama_count']
+
+    def get_live_count(self, obj):
+        return self._summary(obj)['live_count']
+
     def get_total_videos(self, obj):
         return self._summary(obj)['video_count']
+
+    def get_video_total_views(self, obj):
+        return self._summary(obj)['video_total_views']
+
+    def get_drama_total_views(self, obj):
+        return self._summary(obj)['drama_total_views']
+
+    def get_live_total_views(self, obj):
+        return self._summary(obj)['live_total_views']
+
+    def get_total_views(self, obj):
+        return self._summary(obj)['total_views']
+
+    def get_view_count(self, obj):
+        return self._summary(obj)['view_count']
 
     def _summary(self, obj):
         summary = getattr(obj, '_account_profile_summary_cache', None)
@@ -239,17 +354,18 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             return summary
 
         seller_store = SellerStore.objects.filter(owner=obj).only('id', 'name', 'slug', 'is_active').first()
-        video_count = Video.objects.filter(owner=obj).count()
+        content_summary = content_aggregate_summary(obj)
+        video_count = content_summary['video_count']
         follower_count = ChannelSubscription.objects.filter(channel=obj).count()
-        like_count = VideoLike.objects.filter(video__owner=obj).count()
         gift_count = GiftTransaction.objects.filter(receiver=obj).count()
         product_count = Product.objects.filter(store__owner=obj).count()
         payment_method_count = StreamPaymentMethod.objects.filter(stream__owner=obj).count()
         summary = {
             'follower_count': follower_count,
-            'like_count': like_count,
+            'like_count': content_summary['total_likes'],
+            'total_likes': content_summary['total_likes'],
             'gift_count': gift_count,
-            'video_count': video_count,
+            **content_summary,
             'is_seller': seller_store is not None,
             'is_admin': bool(obj.is_staff or obj.is_superuser),
             'can_create_live': bool(obj.is_creator),
@@ -268,9 +384,9 @@ class AccountProfileSerializer(serializers.ModelSerializer):
                 'videos': video_count,
                 'followers': follower_count,
                 'subscribers': follower_count,
-                'likes': like_count,
+                'likes': content_summary['total_likes'],
                 'gifts': gift_count,
-                'live_streams': LiveStream.objects.filter(owner=obj).count(),
+                'live_streams': content_summary['live_count'],
                 'products': product_count,
                 'payment_methods': payment_method_count,
                 'orders': PaymentOrder.objects.filter(user=obj).count(),
@@ -325,8 +441,16 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
     subscriber_count = serializers.SerializerMethodField()
     follower_count = serializers.SerializerMethodField()
     video_count = serializers.SerializerMethodField()
+    drama_count = serializers.SerializerMethodField()
+    live_count = serializers.SerializerMethodField()
+    video_total_views = serializers.SerializerMethodField()
+    drama_total_views = serializers.SerializerMethodField()
+    live_total_views = serializers.SerializerMethodField()
     total_views = serializers.SerializerMethodField()
     view_count = serializers.SerializerMethodField()
+    video_total_likes = serializers.SerializerMethodField()
+    drama_total_likes = serializers.SerializerMethodField()
+    live_total_likes = serializers.SerializerMethodField()
     like_count = serializers.SerializerMethodField()
     total_likes = serializers.SerializerMethodField()
     gift_count = serializers.SerializerMethodField()
@@ -344,8 +468,16 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
             'subscriber_count',
             'follower_count',
             'video_count',
+            'drama_count',
+            'live_count',
+            'video_total_views',
+            'drama_total_views',
+            'live_total_views',
             'total_views',
             'view_count',
+            'video_total_likes',
+            'drama_total_likes',
+            'live_total_likes',
             'like_count',
             'total_likes',
             'gift_count',
@@ -367,29 +499,51 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
     def get_follower_count(self, obj):
         return self.get_subscriber_count(obj)
 
-    def get_video_count(self, obj):
-        return self._public_active_videos(obj).count()
+    def _content_summary(self, obj):
+        summary = getattr(obj, '_public_creator_content_summary_cache', None)
+        if summary is None:
+            summary = content_aggregate_summary(obj)
+            obj._public_creator_content_summary_cache = summary
+        return summary
 
-    def _public_active_videos(self, obj):
-        return Video.objects.filter(
-            owner=obj,
-            visibility=Video.VISIBILITY_PUBLIC,
-            status=Video.STATUS_ACTIVE,
-        )
+    def get_video_count(self, obj):
+        return self._content_summary(obj)['video_count']
+
+    def get_drama_count(self, obj):
+        return self._content_summary(obj)['drama_count']
+
+    def get_live_count(self, obj):
+        return self._content_summary(obj)['live_count']
+
+    def get_video_total_views(self, obj):
+        return self._content_summary(obj)['video_total_views']
+
+    def get_drama_total_views(self, obj):
+        return self._content_summary(obj)['drama_total_views']
+
+    def get_live_total_views(self, obj):
+        return self._content_summary(obj)['live_total_views']
 
     def get_total_views(self, obj):
-        aggregate = self._public_active_videos(obj).aggregate(total=Count('views'))
-        return aggregate.get('total') or 0
+        return self._content_summary(obj)['total_views']
 
     def get_view_count(self, obj):
-        return self.get_total_views(obj)
+        return self._content_summary(obj)['view_count']
+
+    def get_video_total_likes(self, obj):
+        return self._content_summary(obj)['video_total_likes']
+
+    def get_drama_total_likes(self, obj):
+        return self._content_summary(obj)['drama_total_likes']
+
+    def get_live_total_likes(self, obj):
+        return self._content_summary(obj)['live_total_likes']
 
     def get_like_count(self, obj):
-        aggregate = self._public_active_videos(obj).aggregate(total=Sum('like_count'))
-        return aggregate.get('total') or 0
+        return self._content_summary(obj)['like_count']
 
     def get_total_likes(self, obj):
-        return self.get_like_count(obj)
+        return self._content_summary(obj)['total_likes']
 
     def get_gift_count(self, obj):
         return GiftTransaction.objects.filter(
