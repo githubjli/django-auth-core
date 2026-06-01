@@ -21,6 +21,7 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
+from django.utils.text import slugify
 
 from apps.accounts.constants import BLOCKCHAIN_NAME, TOKEN_NAME, TOKEN_PEG, TOKEN_SYMBOL
 from apps.accounts.models import (
@@ -53,8 +54,10 @@ from apps.accounts.models import (
     ProductShipment,
     ProductRefundRequest,
     PlatformAssetLedger,
+    SellerApplication,
     SellerPayout,
     SellerPayoutAddress,
+    SellerStore,
     UserAssetBalance,
     UserAssetTransaction,
     UserShippingAddress,
@@ -65,6 +68,44 @@ from apps.accounts.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def generate_unique_store_slug(store_name):
+    base_slug = slugify(store_name)[:100].strip('-') or 'store'
+    slug = base_slug
+    suffix = 2
+    while SellerStore.objects.filter(slug=slug).exists():
+        suffix_text = f'-{suffix}'
+        slug = f'{base_slug[:120 - len(suffix_text)]}{suffix_text}'
+        suffix += 1
+    return slug
+
+
+@transaction.atomic
+def approve_seller_application(application, reviewer=None):
+    application = (
+        SellerApplication.objects.select_for_update()
+        .select_related('user', 'reviewed_by')
+        .get(pk=application.pk)
+    )
+    if application.status == SellerApplication.STATUS_REJECTED:
+        raise ValueError('Rejected seller application cannot be approved.')
+
+    store = SellerStore.objects.filter(owner=application.user).select_related('owner').first()
+    if store is None:
+        store = SellerStore.objects.create(
+            owner=application.user,
+            name=application.store_name,
+            slug=generate_unique_store_slug(application.store_name),
+        )
+
+    application.status = SellerApplication.STATUS_APPROVED
+    application.rejection_reason = ''
+    if reviewer is not None:
+        application.reviewed_by = reviewer
+    application.reviewed_at = timezone.now()
+    application.save(update_fields=['status', 'rejection_reason', 'reviewed_by', 'reviewed_at', 'updated_at'])
+    return application, store
 
 
 def get_membership_payment_asset_rate(payment_asset: str) -> Decimal:
