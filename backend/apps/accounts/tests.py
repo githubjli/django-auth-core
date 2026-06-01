@@ -514,7 +514,7 @@ class AccountMenuAPITestCase(APITestCase):
         self.assertEqual(response.data['like_count'], 2)
         self.assertEqual(response.data['total_likes'], 2)
         self.assertEqual(response.data['gift_count'], 1)
-        self.assertEqual(response.data['total_gifts'], 1)
+        self.assertEqual(response.data['total_gifts'], 30)
         self.assertEqual(response.data['video_count'], 2)
         self.assertEqual(response.data['total_videos'], 2)
         self.assertEqual(response.data['counts']['videos'], 2)

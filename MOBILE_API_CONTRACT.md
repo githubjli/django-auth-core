@@ -206,11 +206,41 @@ Status legend used throughout:
 - **Proposed response**:
   - Same core fields as list item with richer creator/category/playback metadata.
   - `view_count` is the single video's playback/view count, not the creator's total views.
+  - `creator.id` and `owner_id` are required for normal videos and must match; if historical data has no owner, both may be null.
+  - `creator.follower_count`, `creator.subscriber_count`, `owner_follower_count`, and `owner_subscriber_count` all come from the unified follow table and must be equal for the same response.
+  - `creator.is_following` and `is_following_owner` use the same viewer relationship; anonymous users receive `false`.
+  - `video_url` is a compatibility alias for playable `file_url` when the viewer can watch.
+- **Compatibility routes**:
+  - Legacy like route remains `POST/DELETE /api/videos/{id}/like/`.
+  - Public alias is available as `POST/DELETE /api/public/videos/{id}/like/` and uses the same implementation.
+  - Public recommendations are available as `GET /api/public/videos/{id}/recommendations/` and return the same creator/owner payload fields as video detail/list cards.
 - **UX note**:
   - Do not show `video.view_count` in the video detail author row; it can be misunderstood as creator total views. Use explicit labels near video stats only.
 
+
+### GET `/api/public/users/{id}/`
+- **Status**: Current; preferred public profile endpoint for all user profile pages.
+- **Auth**: Public; when authenticated, `viewer_is_following` reflects the request user.
+- **Purpose**: unified public user profile for both creators and non-creators. New frontend profile pages should use this endpoint instead of `/api/public/creators/{id}/` for stats.
+- **Core public fields**: `id`, `display_name`, `username`, `email`, `avatar_url`, `bio`, `is_creator`, `is_seller`.
+- **Relationship fields**:
+  - `follower_count`: number of users following this profile user.
+  - `following_count`: number of users this profile user follows.
+  - `viewer_is_following`: `false` when anonymous; otherwise whether the viewer follows this user.
+- **Unified stats fields**:
+  - `video_count`, `drama_count`, `live_count`
+  - `video_total_views`, `drama_total_views`, `live_total_views`, `total_views`
+  - `video_total_likes`, `drama_total_likes`, `live_total_likes`, `total_likes`
+  - `total_gifts`: current backend gift value total received by this user's public creator content.
+  - Deprecated aliases are retained for compatibility: `view_count == total_views`, `like_count == total_likes`. New code should prefer `total_views` / `total_likes`.
+- **Non-creator users**: return `is_creator=false`; content stats such as `video_count`, `total_views`, `total_likes`, and `total_gifts` are `0`.
+- **Recommended display**: My Profile / Creator Profile first screen should prioritize `Followers / Videos / Total Views / Total Likes`; use split fields only for detailed breakdowns.
+- **Follow routes**:
+  - Legacy creator follow route remains `POST/DELETE /api/creators/{id}/follow/`.
+  - Public user follow route is available as `POST/DELETE /api/public/users/{id}/follow/`; both routes write to the same follow table, so `follower_count` updates are reflected in public user and video creator payloads.
+
 ### GET `/api/public/creators/{id}/`
-- **Status**: Current but needs mobile review
+- **Status**: Current but compatibility-oriented; new public profile UI should prefer `GET /api/public/users/{id}/`.
 - **Auth**: Public
 - **Creator aggregate fields**:
   - `video_count`: number of the creator's videos where `visibility=public` and `status=active`.
@@ -225,6 +255,7 @@ Status legend used throughout:
   - `drama_total_likes`: `0` until a first-class drama like model/field exists.
   - `live_total_likes`: `0` until a first-class live like model/field exists.
   - `total_likes`: `video_total_likes + drama_total_likes + live_total_likes`.
+  - `total_gifts`: current backend gift value total received by this creator's content.
   - `like_count`: deprecated backward-compatible alias for `total_likes` (`creator.like_count == creator.total_likes`).
 - **Consistency**:
   - `creator.video_count` should match the `count` returned by `GET /api/public/creators/{id}/videos/` with no filters.

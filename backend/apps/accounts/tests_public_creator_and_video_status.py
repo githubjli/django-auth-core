@@ -3,7 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import ChannelSubscription, DramaSeries, LiveStream, Video, VideoLike, VideoView
+from apps.accounts.models import ChannelSubscription, DramaSeries, GiftTransaction, LiveStream, Video, VideoLike, VideoView
 
 
 User = get_user_model()
@@ -110,7 +110,6 @@ class PublicCreatorAPITestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         sensitive_fields = {
-            'email',
             'phone',
             'first_name',
             'last_name',
@@ -123,7 +122,7 @@ class PublicCreatorAPITestCase(APITestCase):
             'wallet_link_status',
         }
         self.assertTrue(sensitive_fields.isdisjoint(response.data.keys()))
-        self.assertNotIn(self.non_creator.email, str(response.data))
+        self.assertEqual(response.data['email'], self.non_creator.email)
 
     def test_public_user_followers_returns_creator_followers(self):
         ChannelSubscription.objects.create(channel=self.creator, subscriber=self.viewer)
@@ -161,6 +160,71 @@ class PublicCreatorAPITestCase(APITestCase):
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['id'], self.creator.id)
 
+
+    def test_public_user_detail_non_creator_returns_zero_public_stats(self):
+        response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.non_creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_creator'])
+        self.assertEqual(response.data['follower_count'], 0)
+        self.assertEqual(response.data['following_count'], 0)
+        self.assertFalse(response.data['viewer_is_following'])
+        self.assertEqual(response.data['video_count'], 0)
+        self.assertEqual(response.data['drama_count'], 0)
+        self.assertEqual(response.data['live_count'], 0)
+        self.assertEqual(response.data['total_views'], 0)
+        self.assertEqual(response.data['total_likes'], 0)
+        self.assertEqual(response.data['total_gifts'], 0)
+
+    def test_public_user_detail_creator_returns_unified_public_stats(self):
+        followers = [User.objects.create_user(email=f'follower-{idx}@example.com', password='pass1234') for idx in range(5)]
+        for follower in followers:
+            ChannelSubscription.objects.create(channel=self.creator, subscriber=follower)
+
+        videos = [self._create_video(owner=self.creator, title=f'published-{idx}') for idx in range(8)]
+        self._create_video(owner=self.creator, title='private', visibility=Video.VISIBILITY_PRIVATE)
+        self._create_video(owner=self.creator, title='inactive', status_value=Video.STATUS_ARCHIVED)
+        for idx in range(9):
+            VideoView.objects.create(video=videos[idx % len(videos)], viewer=None)
+        likers = [User.objects.create_user(email=f'liker-{idx}@example.com', password='pass1234') for idx in range(7)]
+        for idx, liker in enumerate(likers):
+            VideoLike.objects.create(video=videos[idx % len(videos)], user=liker)
+        GiftTransaction.objects.create(
+            sender=self.viewer,
+            receiver=self.creator,
+            video=videos[0],
+            target_type=GiftTransaction.TARGET_VIDEO,
+            target_id=videos[0].id,
+            amount=51,
+        )
+
+        response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['email'], self.creator.email)
+        self.assertTrue(response.data['is_creator'])
+        self.assertEqual(response.data['follower_count'], 5)
+        self.assertEqual(response.data['followers_count'], 5)
+        self.assertEqual(response.data['following_count'], 0)
+        self.assertFalse(response.data['viewer_is_following'])
+        self.assertEqual(response.data['video_count'], 8)
+        self.assertEqual(response.data['video_total_views'], 9)
+        self.assertEqual(response.data['total_views'], 9)
+        self.assertEqual(response.data['video_total_likes'], 7)
+        self.assertEqual(response.data['total_likes'], 7)
+        self.assertEqual(response.data['total_gifts'], 51)
+        self.assertEqual(response.data['view_count'], response.data['total_views'])
+        self.assertEqual(response.data['like_count'], response.data['total_likes'])
+
+    def test_public_user_detail_viewer_is_following_for_authenticated_viewer(self):
+        ChannelSubscription.objects.create(channel=self.creator, subscriber=self.viewer)
+        self.client.force_authenticate(user=self.viewer)
+
+        response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['viewer_is_following'])
+
     def test_public_user_relationship_lists_return_404_for_missing_user(self):
         followers_response = self.client.get(reverse('public-user-followers', kwargs={'user_id': 999999}))
         following_response = self.client.get(reverse('public-user-following', kwargs={'user_id': 999999}))
@@ -189,7 +253,6 @@ class PublicCreatorAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         item = response.data['results'][0]
         sensitive_fields = {
-            'email',
             'phone',
             'real_name',
             'password',
@@ -514,3 +577,85 @@ class PublicVideoViewTrackingTestCase(APITestCase):
         flagged_response = self.client.post(reverse('public-video-view', kwargs={'pk': flagged_video.id}))
         self.assertEqual(archived_response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(flagged_response.status_code, status.HTTP_404_NOT_FOUND)
+
+class PublicVideoCreatorPayloadTestCase(APITestCase):
+    def setUp(self):
+        self.creator = User.objects.create_user(
+            email='video-creator@example.com',
+            password='pass1234',
+            first_name='Video',
+            last_name='Creator',
+            is_creator=True,
+        )
+        self.viewer = User.objects.create_user(email='video-viewer@example.com', password='pass1234')
+        self.video = Video.objects.create(
+            owner=self.creator,
+            title='creator payload video',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+        )
+
+    def test_public_video_detail_returns_creator_id_and_consistent_follow_counts_for_anonymous(self):
+        for idx in range(5):
+            follower = User.objects.create_user(email=f'video-follower-{idx}@example.com', password='pass1234')
+            ChannelSubscription.objects.create(channel=self.creator, subscriber=follower)
+
+        response = self.client.get(reverse('public-video-detail', kwargs={'pk': self.video.id}))
+        profile_response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['creator']['id'], self.creator.id)
+        self.assertEqual(response.data['owner_id'], self.creator.id)
+        self.assertEqual(response.data['creator']['name'], self.creator.display_name)
+        self.assertEqual(response.data['owner_name'], self.creator.display_name)
+        self.assertEqual(response.data['creator']['avatar_url'], response.data['owner_avatar_url'])
+        self.assertEqual(response.data['creator']['follower_count'], 5)
+        self.assertEqual(response.data['creator']['subscriber_count'], 5)
+        self.assertEqual(response.data['owner_follower_count'], 5)
+        self.assertEqual(response.data['owner_subscriber_count'], 5)
+        self.assertEqual(profile_response.data['follower_count'], 5)
+        self.assertFalse(response.data['creator']['is_following'])
+        self.assertFalse(response.data['is_following_owner'])
+        self.assertFalse(response.data['is_liked'])
+
+    def test_public_video_detail_following_and_like_state_for_authenticated_viewer(self):
+        self.client.force_authenticate(user=self.viewer)
+
+        follow_response = self.client.post(reverse('public-user-follow', kwargs={'user_id': self.creator.id}))
+        like_response = self.client.post(reverse('public-video-like', kwargs={'pk': self.video.id}))
+        detail_response = self.client.get(reverse('public-video-detail', kwargs={'pk': self.video.id}))
+
+        self.assertEqual(follow_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(follow_response.data['follower_count'], 1)
+        self.assertEqual(like_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(detail_response.data['creator']['is_following'])
+        self.assertTrue(detail_response.data['is_following_owner'])
+        self.assertTrue(detail_response.data['is_liked'])
+        self.assertEqual(detail_response.data['like_count'], 1)
+
+    def test_public_video_recommendations_include_creator_owner_payload(self):
+        ChannelSubscription.objects.create(channel=self.creator, subscriber=self.viewer)
+        recommended = Video.objects.create(
+            owner=self.creator,
+            title='recommended payload video',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+        )
+        self.client.force_authenticate(user=self.viewer)
+
+        response = self.client.get(reverse('public-video-recommendations', kwargs={'pk': self.video.id}), {'limit': 1})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        item = response.data[0]
+        self.assertEqual(item['id'], recommended.id)
+        self.assertEqual(item['creator']['id'], self.creator.id)
+        self.assertEqual(item['owner_id'], self.creator.id)
+        self.assertEqual(item['creator']['follower_count'], 1)
+        self.assertEqual(item['creator']['subscriber_count'], 1)
+        self.assertEqual(item['owner_follower_count'], 1)
+        self.assertEqual(item['owner_subscriber_count'], 1)
+        self.assertTrue(item['creator']['is_following'])
+        self.assertTrue(item['is_following_owner'])
