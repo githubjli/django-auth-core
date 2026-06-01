@@ -761,6 +761,12 @@ class PublicUserListItemSerializer(serializers.ModelSerializer):
     def get_follower_count(self, obj):
         return self._summary(obj)['follower_count']
 
+    def get_follower_count(self, obj):
+        annotated = getattr(obj, 'follower_count_value', None)
+        if annotated is not None:
+            return annotated
+        return follower_count_for_user(obj)
+
     def get_followers_count(self, obj):
         return self._summary(obj)['followers_count']
 
