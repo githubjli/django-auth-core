@@ -2,7 +2,7 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -325,7 +325,10 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
     subscriber_count = serializers.SerializerMethodField()
     follower_count = serializers.SerializerMethodField()
     video_count = serializers.SerializerMethodField()
+    total_views = serializers.SerializerMethodField()
+    view_count = serializers.SerializerMethodField()
     like_count = serializers.SerializerMethodField()
+    total_likes = serializers.SerializerMethodField()
     gift_count = serializers.SerializerMethodField()
     gift_amount_total = serializers.SerializerMethodField()
     viewer_is_following = serializers.SerializerMethodField()
@@ -341,7 +344,10 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
             'subscriber_count',
             'follower_count',
             'video_count',
+            'total_views',
+            'view_count',
             'like_count',
+            'total_likes',
             'gift_count',
             'gift_amount_total',
             'viewer_is_following',
@@ -362,18 +368,28 @@ class PublicCreatorSerializer(serializers.ModelSerializer):
         return self.get_subscriber_count(obj)
 
     def get_video_count(self, obj):
+        return self._public_active_videos(obj).count()
+
+    def _public_active_videos(self, obj):
         return Video.objects.filter(
             owner=obj,
             visibility=Video.VISIBILITY_PUBLIC,
             status=Video.STATUS_ACTIVE,
-        ).count()
+        )
+
+    def get_total_views(self, obj):
+        aggregate = self._public_active_videos(obj).aggregate(total=Count('views'))
+        return aggregate.get('total') or 0
+
+    def get_view_count(self, obj):
+        return self.get_total_views(obj)
 
     def get_like_count(self, obj):
-        return VideoLike.objects.filter(
-            video__owner=obj,
-            video__visibility=Video.VISIBILITY_PUBLIC,
-            video__status=Video.STATUS_ACTIVE,
-        ).count()
+        aggregate = self._public_active_videos(obj).aggregate(total=Sum('like_count'))
+        return aggregate.get('total') or 0
+
+    def get_total_likes(self, obj):
+        return self.get_like_count(obj)
 
     def get_gift_count(self, obj):
         return GiftTransaction.objects.filter(

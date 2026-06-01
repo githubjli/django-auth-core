@@ -3,7 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import ChannelSubscription, DramaSeries, LiveStream, Video
+from apps.accounts.models import ChannelSubscription, DramaSeries, LiveStream, Video, VideoLike, VideoView
 
 
 User = get_user_model()
@@ -204,16 +204,49 @@ class PublicCreatorAPITestCase(APITestCase):
         self.assertTrue(sensitive_fields.isdisjoint(item.keys()))
         self.assertNotIn(self.viewer.email, str(item))
 
-    def test_creator_detail_video_count_counts_public_active_only(self):
+    def test_creator_detail_video_count_matches_public_active_video_list_count(self):
         self._create_video(owner=self.creator, title='active-1')
         self._create_video(owner=self.creator, title='active-2')
         self._create_video(owner=self.creator, title='private', visibility=Video.VISIBILITY_PRIVATE)
         self._create_video(owner=self.creator, title='flagged', status_value=Video.STATUS_FLAGGED)
 
+        detail_response = self.client.get(reverse('public-creator-detail', kwargs={'creator_id': self.creator.id}))
+        videos_response = self.client.get(reverse('public-creator-videos', kwargs={'creator_id': self.creator.id}))
+
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(videos_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['video_count'], 2)
+        self.assertEqual(detail_response.data['video_count'], videos_response.data['count'])
+        self.assertEqual(len(videos_response.data['results']), 2)
+
+    def test_creator_detail_totals_count_public_active_video_views_and_likes_only(self):
+        active_one = self._create_video(owner=self.creator, title='active-1')
+        active_two = self._create_video(owner=self.creator, title='active-2')
+        private_video = self._create_video(owner=self.creator, title='private', visibility=Video.VISIBILITY_PRIVATE)
+        flagged_video = self._create_video(owner=self.creator, title='flagged', status_value=Video.STATUS_FLAGGED)
+
+        Video.objects.filter(pk=active_one.pk).update(like_count=2)
+        Video.objects.filter(pk=active_two.pk).update(like_count=1)
+        Video.objects.filter(pk=private_video.pk).update(like_count=4)
+        Video.objects.filter(pk=flagged_video.pk).update(like_count=8)
+        VideoLike.objects.create(video=active_one, user=self.viewer)
+        VideoLike.objects.create(video=active_one, user=self.non_creator)
+        VideoLike.objects.create(video=active_two, user=self.creator)
+        VideoLike.objects.create(video=private_video, user=self.viewer)
+        VideoLike.objects.create(video=flagged_video, user=self.viewer)
+        VideoView.objects.create(video=active_one, viewer=self.viewer)
+        VideoView.objects.create(video=active_one, viewer=None)
+        VideoView.objects.create(video=active_two, viewer=self.viewer)
+        VideoView.objects.create(video=private_video, viewer=self.viewer)
+        VideoView.objects.create(video=flagged_video, viewer=self.viewer)
+
         response = self.client.get(reverse('public-creator-detail', kwargs={'creator_id': self.creator.id}))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['video_count'], 2)
+        self.assertEqual(response.data['total_views'], 3)
+        self.assertEqual(response.data['view_count'], 3)
+        self.assertEqual(response.data['like_count'], 3)
+        self.assertEqual(response.data['total_likes'], 3)
 
     def test_creator_videos_returns_only_creator_public_active(self):
         expected = self._create_video(owner=self.creator, title='creator-active')

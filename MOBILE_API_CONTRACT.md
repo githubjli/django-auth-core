@@ -192,6 +192,32 @@ Status legend used throughout:
   - Public video detail route should be confirmed/standardized for Flutter detail page deep-linking.
 - **Proposed response**:
   - Same core fields as list item with richer creator/category/playback metadata.
+  - `view_count` is the single video's playback/view count, not the creator's total views.
+- **UX note**:
+  - Do not show `video.view_count` in the video detail author row; it can be misunderstood as creator total views. Use explicit labels near video stats only.
+
+### GET `/api/public/creators/{id}/`
+- **Status**: Current but needs mobile review
+- **Auth**: Public
+- **Creator aggregate fields**:
+  - `video_count`: number of the creator's videos where `visibility=public` and `status=active`.
+  - `total_views`: sum of `view_count` across the creator's public active videos.
+  - `view_count`: backward-compatible alias for `total_views`; do not interpret as one video's view count in creator payloads.
+  - `like_count`: sum of likes across the creator's public active videos.
+  - `total_likes`: backward-compatible/explicit alias for creator total likes.
+- **Consistency**:
+  - `creator.video_count` should match the `count` returned by `GET /api/public/creators/{id}/videos/` with no filters.
+  - `video.view_count` remains single-video playback count in video list/detail payloads.
+  - Single-video `like_count` remains current-video likes in video payloads.
+- **UX note**:
+  - Creator Profile header should show clearly labeled metrics such as `Videos / Followers / Total Views` or `Videos / Followers / Total Likes`.
+
+### GET `/api/public/creators/{id}/videos/`
+- **Status**: Current but needs mobile review
+- **Auth**: Public
+- **Semantics**:
+  - Returns only creator videos with `visibility=public` and `status=active`.
+  - Paginated `count` is the same public active video count exposed as `creator.video_count` on creator detail.
 
 ---
 
