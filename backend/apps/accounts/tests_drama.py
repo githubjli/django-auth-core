@@ -407,9 +407,13 @@ class DramaInteractionAPITestCase(APITestCase):
         self.assertEqual(response.data['gift_amount_total'], 60)
         self.assertEqual(response.data['view_count'], 4)
         self.assertFalse(response.data['viewer_is_favorited'])
+        self.assertFalse(response.data['viewer_is_following'])
+        self.assertFalse(response.data['is_following_owner'])
         self.assertFalse(response.data['viewer_is_subscribed'])
+        self.assertFalse(response.data['is_subscribed'])
         self.assertEqual(response.data['owner_id'], self.owner.id)
-        self.assertEqual(response.data['subscriber_count'], self.owner.subscriber_count)
+        self.assertEqual(response.data['follower_count'], 0)
+        self.assertEqual(response.data['subscriber_count'], 0)
 
     def test_interaction_summary_authenticated_favorite_and_subscribed(self):
         DramaFavorite.objects.create(user=self.user, series=self.series)
@@ -422,7 +426,11 @@ class DramaInteractionAPITestCase(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['viewer_is_favorited'])
+        self.assertTrue(response.data['viewer_is_following'])
+        self.assertTrue(response.data['is_following_owner'])
         self.assertTrue(response.data['viewer_is_subscribed'])
+        self.assertTrue(response.data['is_subscribed'])
+        self.assertEqual(response.data['follower_count'], 1)
         self.assertEqual(response.data['subscriber_count'], 1)
 
 
@@ -448,8 +456,12 @@ class DramaOwnerInfoAPITestCase(APITestCase):
         self.assertEqual(item['owner_id'], self.owner.id)
         self.assertEqual(item['owner_name'], self.owner.display_name)
         self.assertIsNone(item['owner_avatar_url'])
+        self.assertFalse(item['viewer_is_following'])
+        self.assertFalse(item['is_following_owner'])
         self.assertFalse(item['viewer_is_subscribed'])
-        self.assertEqual(item['subscriber_count'], 3)
+        self.assertFalse(item['is_subscribed'])
+        self.assertEqual(item['follower_count'], 0)
+        self.assertEqual(item['subscriber_count'], 0)
 
     def test_viewer_is_subscribed_true_for_followed_owner(self):
         ChannelSubscription.objects.create(channel=self.owner, subscriber=self.viewer)
@@ -458,7 +470,12 @@ class DramaOwnerInfoAPITestCase(APITestCase):
         response = self.client.get(reverse('drama-series-detail', args=[self.series.id]))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['viewer_is_following'])
+        self.assertTrue(response.data['is_following_owner'])
         self.assertTrue(response.data['viewer_is_subscribed'])
+        self.assertTrue(response.data['is_subscribed'])
+        self.assertEqual(response.data['follower_count'], 1)
+        self.assertEqual(response.data['subscriber_count'], 1)
 
     def test_owner_null_does_not_crash(self):
         self.series.owner = None
@@ -470,7 +487,11 @@ class DramaOwnerInfoAPITestCase(APITestCase):
         self.assertIsNone(response.data['owner_id'])
         self.assertIsNone(response.data['owner_name'])
         self.assertIsNone(response.data['owner_avatar_url'])
+        self.assertFalse(response.data['viewer_is_following'])
+        self.assertFalse(response.data['is_following_owner'])
         self.assertFalse(response.data['viewer_is_subscribed'])
+        self.assertFalse(response.data['is_subscribed'])
+        self.assertEqual(response.data['follower_count'], 0)
         self.assertEqual(response.data['subscriber_count'], 0)
 
 
