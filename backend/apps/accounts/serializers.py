@@ -144,21 +144,47 @@ def public_profile_display_name(user):
     return f'User {user.id}'
 
 
-def build_public_creator_summary(user, viewer=None, request=None):
+def build_public_user_summary(user, viewer=None, request=None, include_is_seller=False):
     if user is None:
         return None
     follower_count = getattr(user, 'follower_count_value', None)
     if follower_count is None:
         follower_count = follower_count_for_user(user)
-    viewer_is_following = is_following(viewer, user)
+    viewer_is_following = getattr(user, 'viewer_is_following_value', None)
+    if viewer_is_following is None:
+        viewer_is_following = is_following(viewer, user)
+    display_name = public_profile_display_name(user)
+    avatar_url = build_absolute_avatar_url(user, request=request)
     return {
         'id': user.id,
-        'name': public_display_name(user),
-        'avatar_url': build_absolute_avatar_url(user, request=request),
+        'display_name': display_name,
+        'nickname': display_name,
+        'username': display_name,
+        'email': getattr(user, 'email', ''),
+        'avatar_url': avatar_url,
+        'avatar': avatar_url,
+        'bio': getattr(user, 'bio', ''),
+        'description': getattr(user, 'bio', ''),
         'is_creator': getattr(user, 'is_creator', False),
+        'is_seller': SellerStore.objects.filter(owner=user).exists() if include_is_seller else False,
         'follower_count': follower_count,
-        'subscriber_count': follower_count,
-        'is_following': viewer_is_following,
+        'followers_count': follower_count,
+        'viewer_is_following': bool(viewer_is_following),
+    }
+
+
+def build_public_creator_summary(user, viewer=None, request=None):
+    summary = build_public_user_summary(user, viewer=viewer, request=request)
+    if summary is None:
+        return None
+    return {
+        'id': summary['id'],
+        'name': summary['display_name'],
+        'avatar_url': summary['avatar_url'],
+        'is_creator': summary['is_creator'],
+        'follower_count': summary['follower_count'],
+        'subscriber_count': summary['follower_count'],
+        'is_following': summary['viewer_is_following'],
     }
 
 
@@ -708,31 +734,32 @@ class PublicUserListItemSerializer(serializers.ModelSerializer):
             'viewer_is_following',
         )
 
-    def _public_display_name(self, obj):
-        return public_profile_display_name(obj)
-
-    def _build_file_url(self, file_field):
-        if not file_field:
-            return None
-        request = self.context.get('request')
-        if request is None:
-            return file_field.url
-        return request.build_absolute_uri(file_field.url)
+    def _summary(self, obj):
+        summary = getattr(obj, '_public_user_list_summary_cache', None)
+        if summary is None:
+            request = self.context.get('request')
+            viewer = getattr(request, 'user', None) if request is not None else None
+            summary = build_public_user_summary(obj, viewer=viewer, request=request)
+            obj._public_user_list_summary_cache = summary
+        return summary
 
     def get_username(self, obj):
-        return self._public_display_name(obj)
+        return self._summary(obj)['username']
 
     def get_nickname(self, obj):
-        return self._public_display_name(obj)
+        return self._summary(obj)['nickname']
 
     def get_display_name(self, obj):
-        return self._public_display_name(obj)
+        return self._summary(obj)['display_name']
 
     def get_avatar(self, obj):
-        return self._build_file_url(obj.avatar)
+        return self._summary(obj)['avatar']
 
     def get_avatar_url(self, obj):
-        return self.get_avatar(obj)
+        return self._summary(obj)['avatar_url']
+
+    def get_follower_count(self, obj):
+        return self._summary(obj)['follower_count']
 
     def get_follower_count(self, obj):
         annotated = getattr(obj, 'follower_count_value', None)
@@ -741,15 +768,10 @@ class PublicUserListItemSerializer(serializers.ModelSerializer):
         return follower_count_for_user(obj)
 
     def get_followers_count(self, obj):
-        return self.get_follower_count(obj)
+        return self._summary(obj)['followers_count']
 
     def get_viewer_is_following(self, obj):
-        annotated = getattr(obj, 'viewer_is_following_value', None)
-        if annotated is not None:
-            return bool(annotated)
-        request = self.context.get('request')
-        viewer = getattr(request, 'user', None) if request is not None else None
-        return is_following(viewer, obj)
+        return self._summary(obj)['viewer_is_following']
 
 
 class PublicUserProfileSerializer(serializers.ModelSerializer):
@@ -1056,6 +1078,7 @@ class VideoSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source='owner.id', read_only=True)
     owner_name = serializers.SerializerMethodField()
     owner_avatar_url = serializers.SerializerMethodField()
+    owner_is_creator = serializers.SerializerMethodField()
     owner_follower_count = serializers.SerializerMethodField()
     owner_subscriber_count = serializers.SerializerMethodField()
     is_following_owner = serializers.SerializerMethodField()
@@ -1097,6 +1120,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_is_creator',
             'owner_follower_count',
             'owner_subscriber_count',
             'is_following_owner',
@@ -1131,6 +1155,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_is_creator',
             'owner_follower_count',
             'owner_subscriber_count',
             'is_following_owner',
@@ -1167,6 +1192,10 @@ class VideoSerializer(serializers.ModelSerializer):
     def get_owner_avatar_url(self, obj):
         summary = self._creator_summary(obj)
         return summary['avatar_url'] if summary is not None else None
+
+    def get_owner_is_creator(self, obj):
+        summary = self._creator_summary(obj)
+        return summary['is_creator'] if summary is not None else False
 
     def get_owner_follower_count(self, obj):
         summary = self._creator_summary(obj)

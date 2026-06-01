@@ -20,6 +20,17 @@ The internal unified content mapping layer is not part of this public contract y
 
 ---
 
+## Global identity semantics
+
+- `User.id` is the only id frontend should pass to `CreatorProfilePage`.
+- Followers/following list `results[].id` is `User.id`.
+- Video `owner_id` is `User.id`; `creator.id` is a compatibility alias and must equal `owner_id`.
+- Drama/shorts `owner_id` is `User.id` and is the recommended CreatorProfilePage navigation id.
+- There is no independent Drama Channel model in this backend today; drama `channel_id`, `channel_name`, and `channel_avatar_url` are legacy compatibility aliases to owner/User fields and must not be treated as a separate CreatorProfile id.
+- Compatibility aliases retained for clients include `nickname`, `avatar`, `description`, `subscriber_count`, `owner_subscriber_count`, `viewer_is_subscribed`, and `is_subscribed`. New code should prefer `display_name`, `avatar_url`, `bio`, `follower_count`, `owner_id`, `viewer_is_following`, and `is_following_owner`.
+
+---
+
 ## 1) Endpoint Inventory + Contract
 
 ## A. Auth endpoints (`/api/auth`)
@@ -168,7 +179,8 @@ The internal unified content mapping layer is not part of this public contract y
 ### `POST /api/videos/{id}/like/`
 - Auth: required
 - Response (200): interaction summary object
-  - `video_id`, `like_count`, `comment_count`, `viewer_has_liked`, `viewer_is_subscribed`, `channel_id`, `subscriber_count`
+  - `video_id`, `like_count`, `comment_count`, `viewer_has_liked`, `viewer_is_following`, `viewer_is_subscribed`, `channel_id`, `follower_count`, `subscriber_count`
+  - `channel_id` is a legacy user-channel id for this endpoint; use video `owner_id` / public user ids for CreatorProfilePage navigation.
 
 ### `DELETE /api/videos/{id}/like/`
 - Auth: required
@@ -189,13 +201,14 @@ The internal unified content mapping layer is not part of this public contract y
 ### `POST /api/channels/{channelUserId}/subscribe/`
 - Auth: required
 - Response:
-  - `channel_id`, `subscriber_count`, `viewer_is_subscribed: true`
+  - `channel_id`, `follower_count`, `subscriber_count`, `is_following`, `viewer_is_following`, `is_subscribed`, `viewer_is_subscribed: true`
+  - `channel_id` here is the target `User.id` for the legacy channel subscribe route; new UI should prefer `/api/public/users/{id}/follow/`.
 - Error 400 when subscribing to self.
 
 ### `DELETE /api/channels/{channelUserId}/subscribe/`
 - Auth: required
 - Response:
-  - `channel_id`, `subscriber_count`, `viewer_is_subscribed: false`
+  - `channel_id`, `follower_count`, `subscriber_count`, `is_following`, `viewer_is_following`, `is_subscribed`, `viewer_is_subscribed: false`
 
 ---
 
@@ -487,18 +500,23 @@ Admin video object fields:
 - Response: full video object with updated counts.
 
 Common public video object fields:
-- `id`, `owner_id`, `owner_name`, `owner_avatar_url`, `title`, `description`, `description_preview`, `category`, `category_name`, `category_slug`,
-- `like_count`, `comment_count`, `view_count`, `is_liked`, `file`, `file_url`, `thumbnail`, `thumbnail_url`, `created_at`
-- avatar notes:
-  - `owner_avatar_url` is the preferred uploader avatar display field (nullable)
-  - when present, URL is directly usable by frontend image components
+- `id`, `owner_id`, `owner_name`, `owner_avatar_url`, `owner_is_creator`, `creator`, `title`, `description`, `description_preview`, `category`, `category_name`, `category_slug`,
+- `owner_follower_count`, `owner_subscriber_count`, `is_following_owner`, `like_count`, `comment_count`, `view_count`, `is_liked`, `file`, `file_url`, `video_url`, `thumbnail`, `thumbnail_url`, `created_at`
+- identity notes:
+  - `owner_id` is `User.id` and is the preferred CreatorProfilePage navigation id.
+  - `creator.id` is a compatibility alias and must equal `owner_id`.
+  - `owner_name` and `creator.name` are same-source user display names.
+  - `owner_avatar_url` and `creator.avatar_url` are same-source user avatars.
+  - `owner_subscriber_count` / `creator.subscriber_count` are deprecated aliases for follower counts.
 
 ---
 
 ## 2) Stable vs Optional/Unstable Fields
 
 ## Likely Stable (safe for frontend assumptions)
-- Primary ids: `id`, `video_id`, `channel_id`, `owner_id`
+- Primary content ids: `id`, `video_id`
+- CreatorProfilePage navigation ids: followers/following `results[].id`, video `owner_id`, drama `owner_id` (all are `User.id`)
+- Compatibility ids: `channel_id` where documented; do not use for CreatorProfilePage unless the endpoint explicitly says it aliases `User.id`.
 - Core identities: `email`, `first_name`, `last_name`, `owner_name`
 - Core counters: `like_count`, `comment_count`, `subscriber_count`
 - Core timestamps: `created_at` (videos/live/comments), `updated_at` (comments/videos where exposed)

@@ -39,6 +39,15 @@ Status legend used throughout:
 - **Proposed mobile normalization**:
   - `count`, `next`, `previous`, `results` unchanged, plus optional additive `page` and `page_size` metadata for easier Flutter state handling.
 
+### Identity and CreatorProfilePage navigation
+- **Canonical profile id**: every navigation into `CreatorProfilePage` must use `User.id`.
+- **Use these fields**:
+  - Followers / Following: `results[].id`.
+  - Video detail/list: `owner_id`; `creator.id` is retained for compatibility and must equal `owner_id`.
+  - Drama / Shorts: `owner_id`.
+- **Do not use as profile ids**: `channel_id`, `video_id`, `drama.id`, `episode.id`, `SellerStore.id`, or any future independent channel/resource id.
+- **Current drama channel compatibility**: this backend does not currently have an independent Drama Channel model. Drama `channel_id`, `channel_name`, and `channel_avatar_url` are compatibility aliases to the owner user fields; new Flutter code should still prefer `owner_id`, `owner_name`, and `owner_avatar_url`.
+
 ### Error response shape
 - **Current but needs mobile review**:
   - Error payloads are not fully uniform yet across all modules.
@@ -190,7 +199,7 @@ Status legend used throughout:
 - **Current canonical public fields (as currently documented/expected for app feed)**:
   - playback: `file_url`
   - thumbnail: `thumbnail_url`
-  - owner: `owner_id`, `owner_name`, `owner_avatar_url`
+  - owner: `owner_id` (`User.id`), `owner_name`, `owner_avatar_url`, `owner_is_creator`
   - category: `category`, `category_name`, `category_slug`
   - gating: `access_type`, `preview_seconds`, `can_watch`, `is_locked`, `lock_reason`
 - **Additional mobile-required fields**:
@@ -206,6 +215,7 @@ Status legend used throughout:
 - **Proposed response**:
   - Same core fields as list item with richer creator/category/playback metadata.
   - `view_count` is the single video's playback/view count, not the creator's total views.
+  - `owner_id` is `User.id` and is the preferred CreatorProfilePage navigation id.
   - `creator.id` and `owner_id` are required for normal videos and must match; if historical data has no owner, both may be null.
   - `creator.follower_count`, `creator.subscriber_count`, `owner_follower_count`, and `owner_subscriber_count` all come from the unified follow table and must be equal for the same response.
   - `creator.is_following` and `is_following_owner` use the same viewer relationship; anonymous users receive `false`.
@@ -300,6 +310,8 @@ Based on current short-drama contract:
 - **Status**: Current
 - `GET /api/dramas/` (paginated list), `GET /api/dramas/{id}/` (detail)
 - Drama owner follow state uses the same user follow relationship as public profiles/videos:
+  - Owner identity fields: `owner_id` (`User.id`, preferred CreatorProfilePage navigation id), `owner_name`, `owner_avatar_url`, `owner_is_creator`.
+  - Legacy channel fields: `channel_id`, `channel_name`, `channel_avatar_url`; because no standalone Drama Channel model exists today, these currently alias owner/User fields and should not be used for CreatorProfilePage navigation.
   - New fields: `viewer_is_following`, `is_following_owner`, `follower_count`.
   - Compatibility aliases: `viewer_is_subscribed == viewer_is_following`, `is_subscribed == viewer_is_following`, `subscriber_count == follower_count`.
   - `/api/channels/{id}/subscribe/`, `/api/creators/{id}/follow/`, and `/api/public/users/{id}/follow/` all write to the same follow table.
@@ -307,6 +319,7 @@ Based on current short-drama contract:
 ### Episodes
 - **Status**: Current
 - `GET /api/dramas/{id}/episodes/`, `GET /api/dramas/{id}/episodes/{episode_no}/`
+- Episode payloads include the parent drama owner user fields: `owner_id`, `owner_name`, `owner_avatar_url`, `owner_is_creator`; Flutter should use `owner_id` for CreatorProfilePage navigation.
 
 ### Locked / member-only content
 - **Status**: Current

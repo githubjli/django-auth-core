@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from apps.accounts.models import DramaComment, DramaEpisode, DramaFavorite, DramaSeries, DramaWatchProgress
+from apps.accounts.serializers import build_public_user_summary
 from apps.accounts.services import follower_count_for_user, is_following
 
 
@@ -14,6 +15,11 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(read_only=True, allow_null=True)
     owner_name = serializers.SerializerMethodField()
     owner_avatar_url = serializers.SerializerMethodField()
+    owner_is_creator = serializers.SerializerMethodField()
+    # No independent Channel model exists for dramas today; channel_* fields are legacy aliases to owner/User.
+    channel_id = serializers.SerializerMethodField()
+    channel_name = serializers.SerializerMethodField()
+    channel_avatar_url = serializers.SerializerMethodField()
     viewer_is_following = serializers.SerializerMethodField()
     is_following_owner = serializers.SerializerMethodField()
     viewer_is_subscribed = serializers.SerializerMethodField()
@@ -44,6 +50,10 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_is_creator',
+            'channel_id',
+            'channel_name',
+            'channel_avatar_url',
             'viewer_is_following',
             'is_following_owner',
             'viewer_is_subscribed',
@@ -69,18 +79,36 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
         return _obj.id in favorite_series_ids
 
 
-    def get_owner_name(self, obj):
+    def _owner_summary(self, obj):
         if obj.owner_id is None or obj.owner is None:
             return None
-        return obj.owner.display_name
+        if hasattr(obj, 'owner_follower_count'):
+            obj.owner.follower_count_value = obj.owner_follower_count
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None) if request is not None else None
+        return build_public_user_summary(obj.owner, viewer=viewer, request=request)
+
+    def get_owner_name(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['display_name'] if summary is not None else None
 
     def get_owner_avatar_url(self, obj):
-        if obj.owner_id is None or obj.owner is None or not obj.owner.avatar:
-            return None
-        request = self.context.get('request')
-        if request is None:
-            return obj.owner.avatar.url
-        return request.build_absolute_uri(obj.owner.avatar.url)
+        summary = self._owner_summary(obj)
+        return summary['avatar_url'] if summary is not None else None
+
+    def get_owner_is_creator(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['is_creator'] if summary is not None else False
+
+    def get_channel_id(self, obj):
+        # Legacy compatibility: no standalone Channel model exists for drama, so this aliases owner_id.
+        return obj.owner_id
+
+    def get_channel_name(self, obj):
+        return self.get_owner_name(obj)
+
+    def get_channel_avatar_url(self, obj):
+        return self.get_owner_avatar_url(obj)
 
     def get_viewer_is_following(self, obj):
         if obj.owner_id is None:
@@ -103,9 +131,8 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
         return self.get_viewer_is_following(obj)
 
     def get_follower_count(self, obj):
-        if obj.owner_id is None or obj.owner is None:
-            return 0
-        return follower_count_for_user(obj.owner)
+        summary = self._owner_summary(obj)
+        return summary['follower_count'] if summary is not None else 0
 
     def get_subscriber_count(self, obj):
         return self.get_follower_count(obj)
@@ -131,6 +158,14 @@ class DramaSeriesSerializer(serializers.ModelSerializer):
 
 class DramaEpisodeSerializer(serializers.ModelSerializer):
     series_id = serializers.IntegerField(source='series.id', read_only=True)
+    owner_id = serializers.IntegerField(source='series.owner.id', read_only=True, allow_null=True)
+    owner_name = serializers.SerializerMethodField()
+    owner_avatar_url = serializers.SerializerMethodField()
+    owner_is_creator = serializers.SerializerMethodField()
+    # Legacy compatibility: no standalone Channel model exists for drama, so channel_* aliases owner/User.
+    channel_id = serializers.SerializerMethodField()
+    channel_name = serializers.SerializerMethodField()
+    channel_avatar_url = serializers.SerializerMethodField()
     can_watch = serializers.SerializerMethodField()
     is_locked = serializers.SerializerMethodField()
     is_unlocked = serializers.SerializerMethodField()
@@ -147,6 +182,13 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
         fields = (
             'id',
             'series_id',
+            'owner_id',
+            'owner_name',
+            'owner_avatar_url',
+            'owner_is_creator',
+            'channel_id',
+            'channel_name',
+            'channel_avatar_url',
             'episode_no',
             'title',
             'duration_seconds',
@@ -165,6 +207,35 @@ class DramaEpisodeSerializer(serializers.ModelSerializer):
             'is_locked',
             'is_unlocked',
         )
+
+    def _owner_summary(self, obj):
+        owner = getattr(getattr(obj, 'series', None), 'owner', None)
+        if owner is None:
+            return None
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None) if request is not None else None
+        return build_public_user_summary(owner, viewer=viewer, request=request)
+
+    def get_owner_name(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['display_name'] if summary is not None else None
+
+    def get_owner_avatar_url(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['avatar_url'] if summary is not None else None
+
+    def get_owner_is_creator(self, obj):
+        summary = self._owner_summary(obj)
+        return summary['is_creator'] if summary is not None else False
+
+    def get_channel_id(self, obj):
+        return obj.series.owner_id if getattr(obj, 'series', None) is not None else None
+
+    def get_channel_name(self, obj):
+        return self.get_owner_name(obj)
+
+    def get_channel_avatar_url(self, obj):
+        return self.get_owner_avatar_url(obj)
 
     def _can_watch(self, obj):
         if obj.is_free:

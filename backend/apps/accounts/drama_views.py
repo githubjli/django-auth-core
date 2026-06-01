@@ -70,6 +70,7 @@ class DramaSeriesListAPIView(generics.ListAPIView):
             .annotate(
                 free_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=True)),
                 locked_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=False)),
+                owner_follower_count=Count('owner__subscriptions_received', distinct=True),
             )
             .order_by('-created_at', '-id')
         )
@@ -110,6 +111,7 @@ class DramaSeriesDetailAPIView(generics.RetrieveAPIView):
         return DramaSeries.objects.select_related('owner').filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED).annotate(
             free_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=True)),
             locked_episode_count=Count('episodes', filter=Q(episodes__is_active=True, episodes__is_free=False)),
+            owner_follower_count=Count('owner__subscriptions_received', distinct=True),
         )
 
     def get_serializer_context(self):
@@ -135,10 +137,14 @@ class DramaSeriesDetailAPIView(generics.RetrieveAPIView):
 class DramaEpisodeListAPIView(APIView):
     def get(self, request, pk):
         series = get_object_or_404(
-            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            DramaSeries.objects.select_related('owner').filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
             pk=pk,
         )
-        episodes = list(DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id'))
+        episodes = list(
+            DramaEpisode.objects.select_related('series', 'series__owner')
+            .filter(series=series, is_active=True)
+            .order_by('sort_order', 'episode_no', 'id')
+        )
         unlocked_episode_ids: set[int] = set()
         has_active_membership = False
         if request.user.is_authenticated:
@@ -162,11 +168,11 @@ class DramaEpisodeListAPIView(APIView):
 class DramaEpisodeDetailAPIView(APIView):
     def get(self, request, pk, episode_no):
         series = get_object_or_404(
-            DramaSeries.objects.filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
+            DramaSeries.objects.select_related('owner').filter(is_active=True, status=DramaSeries.STATUS_PUBLISHED),
             pk=pk,
         )
         episode = get_object_or_404(
-            DramaEpisode.objects.filter(series=series, is_active=True),
+            DramaEpisode.objects.select_related('series', 'series__owner').filter(series=series, is_active=True),
             episode_no=episode_no,
         )
         unlocked_episode_ids: set[int] = set()
@@ -176,7 +182,11 @@ class DramaEpisodeDetailAPIView(APIView):
                 DramaUnlock.objects.filter(user=request.user, series=series).values_list('episode_id', flat=True)
             )
             has_active_membership = DramaAccessService.has_active_membership(request.user)
-        series_episodes = list(DramaEpisode.objects.filter(series=series, is_active=True).order_by('sort_order', 'episode_no', 'id'))
+        series_episodes = list(
+            DramaEpisode.objects.select_related('series', 'series__owner')
+            .filter(series=series, is_active=True)
+            .order_by('sort_order', 'episode_no', 'id')
+        )
         serializer = DramaEpisodeSerializer(
             episode,
             context={
