@@ -106,6 +106,49 @@ def content_aggregate_summary(user):
     }
 
 
+def public_display_name(user):
+    if user is None:
+        return ''
+    display_name = getattr(user, 'display_name', '') or ''
+    if display_name:
+        return display_name
+    username = getattr(user, 'username', '') or ''
+    if username:
+        return username
+    email = getattr(user, 'email', '') or ''
+    if email:
+        return email
+    return f'User {user.id}'
+
+
+def build_absolute_avatar_url(user, request=None):
+    if user is None or not getattr(user, 'avatar', None):
+        return None
+    if request is None:
+        return user.avatar.url
+    return request.build_absolute_uri(user.avatar.url)
+
+
+def build_public_creator_summary(user, viewer=None, request=None):
+    if user is None:
+        return None
+    follower_count = getattr(user, 'follower_count_value', None)
+    if follower_count is None:
+        follower_count = ChannelSubscription.objects.filter(channel=user).count()
+    is_following = False
+    if viewer is not None and getattr(viewer, 'is_authenticated', False) and viewer.pk != user.pk:
+        is_following = ChannelSubscription.objects.filter(channel=user, subscriber=viewer).exists()
+    return {
+        'id': user.id,
+        'name': public_display_name(user),
+        'avatar_url': build_absolute_avatar_url(user, request=request),
+        'is_creator': getattr(user, 'is_creator', False),
+        'follower_count': follower_count,
+        'subscriber_count': follower_count,
+        'is_following': is_following,
+    }
+
+
 def empty_content_aggregate_summary():
     return {
         'video_count': 0,
@@ -988,12 +1031,14 @@ class PublicCategorySerializer(serializers.ModelSerializer):
 
 class VideoSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source='owner.id', read_only=True)
-    owner_name = serializers.CharField(source='owner.display_name', read_only=True)
+    owner_name = serializers.SerializerMethodField()
     owner_avatar_url = serializers.SerializerMethodField()
-    owner_subscriber_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
+    owner_follower_count = serializers.SerializerMethodField()
+    owner_subscriber_count = serializers.SerializerMethodField()
     is_following_owner = serializers.SerializerMethodField()
     creator = serializers.SerializerMethodField()
     file_url = serializers.SerializerMethodField()
+    video_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     description_preview = serializers.SerializerMethodField()
     category_name = serializers.CharField(read_only=True)
@@ -1007,6 +1052,7 @@ class VideoSerializer(serializers.ModelSerializer):
     preview_seconds = serializers.IntegerField(min_value=0, required=False)
     view_count = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
+    gift_count = serializers.SerializerMethodField()
     can_watch = serializers.SerializerMethodField()
     is_locked = serializers.SerializerMethodField()
     lock_reason = serializers.SerializerMethodField()
@@ -1028,6 +1074,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_follower_count',
             'owner_subscriber_count',
             'is_following_owner',
             'creator',
@@ -1043,6 +1090,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'can_watch',
             'is_locked',
             'lock_reason',
+            'gift_count',
             'like_count',
             'comment_count',
             'view_count',
@@ -1050,6 +1098,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'is_liked',
             'file',
             'file_url',
+            'video_url',
             'thumbnail',
             'thumbnail_url',
             'created_at',
@@ -1059,6 +1108,7 @@ class VideoSerializer(serializers.ModelSerializer):
             'owner_id',
             'owner_name',
             'owner_avatar_url',
+            'owner_follower_count',
             'owner_subscriber_count',
             'is_following_owner',
             'creator',
@@ -1070,44 +1120,52 @@ class VideoSerializer(serializers.ModelSerializer):
             'share_count',
             'is_liked',
             'file_url',
+            'video_url',
             'thumbnail_url',
             'can_watch',
             'is_locked',
             'lock_reason',
+            'gift_count',
             'created_at',
         )
 
-    def get_owner_avatar_url(self, obj):
+    def _creator_summary(self, obj):
+        owner = getattr(obj, 'owner', None)
+        if owner is not None and hasattr(obj, 'owner_follower_count'):
+            owner.follower_count_value = obj.owner_follower_count
         request = self.context.get('request')
-        if not obj.owner.avatar:
-            return None
-        if request is None:
-            return obj.owner.avatar.url
-        return request.build_absolute_uri(obj.owner.avatar.url)
+        viewer = getattr(request, 'user', None) if request is not None else None
+        return build_public_creator_summary(owner, viewer=viewer, request=request)
+
+    def get_owner_name(self, obj):
+        summary = self._creator_summary(obj)
+        return summary['name'] if summary is not None else ''
+
+    def get_owner_avatar_url(self, obj):
+        summary = self._creator_summary(obj)
+        return summary['avatar_url'] if summary is not None else None
+
+    def get_owner_follower_count(self, obj):
+        summary = self._creator_summary(obj)
+        return summary['follower_count'] if summary is not None else 0
+
+    def get_owner_subscriber_count(self, obj):
+        return self.get_owner_follower_count(obj)
 
     def get_is_following_owner(self, obj):
-        request = self.context.get('request')
-        if request is None or not getattr(request, 'user', None) or not request.user.is_authenticated:
-            return False
-        prefetched = getattr(obj, 'is_subscribed_value', None)
-        if prefetched is not None:
-            return bool(prefetched)
-        return ChannelSubscription.objects.filter(channel=obj.owner, subscriber=request.user).exists()
+        summary = self._creator_summary(obj)
+        return summary['is_following'] if summary is not None else False
 
     def get_creator(self, obj):
-        return {
-            'id': obj.owner_id,
-            'name': obj.owner.display_name,
-            'avatar_url': self.get_owner_avatar_url(obj),
-            'is_creator': obj.owner.is_creator,
-            'is_following': self.get_is_following_owner(obj),
-            'subscriber_count': obj.owner.subscriber_count,
-        }
+        return self._creator_summary(obj)
 
     def get_file_url(self, obj):
         if not self._can_watch(obj):
             return None
         return self._build_absolute_file_url(obj.file)
+
+    def get_video_url(self, obj):
+        return self.get_file_url(obj)
 
     def get_thumbnail_url(self, obj):
         return self._build_absolute_file_url(obj.thumbnail)
@@ -1126,6 +1184,13 @@ class VideoSerializer(serializers.ModelSerializer):
         if prefetched is not None:
             return bool(prefetched)
         return VideoLike.objects.filter(video=obj, user=request.user).exists()
+
+    def get_gift_count(self, obj):
+        prefetched = getattr(obj, 'gift_count', None)
+        if prefetched is not None:
+            return prefetched
+        value = GiftTransaction.objects.filter(video=obj).aggregate(total=Sum('quantity')).get('total')
+        return value or 0
 
     def get_description_preview(self, obj):
         if not obj.description:
@@ -2786,11 +2851,11 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     is_liked = serializers.SerializerMethodField()
     viewer_has_liked = serializers.SerializerMethodField()
     viewer_is_following = serializers.SerializerMethodField()
-    follower_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
+    follower_count = serializers.SerializerMethodField()
     # Backward-compatible aliases; keep for existing frontend payload consumers.
     viewer_is_subscribed = serializers.SerializerMethodField()
     channel_id = serializers.IntegerField(source='owner.id', read_only=True)
-    subscriber_count = serializers.IntegerField(source='owner.subscriber_count', read_only=True)
+    subscriber_count = serializers.SerializerMethodField()
 
     def get_view_count(self, obj):
         prefetched = getattr(obj, 'view_count', None)
@@ -2832,6 +2897,15 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
         if prefetched is not None:
             return bool(prefetched)
         return ChannelSubscription.objects.filter(channel=obj.owner, subscriber=request.user).exists()
+
+    def get_follower_count(self, obj):
+        prefetched = getattr(obj.owner, 'follower_count_value', None)
+        if prefetched is not None:
+            return prefetched
+        return ChannelSubscription.objects.filter(channel=obj.owner).count()
+
+    def get_subscriber_count(self, obj):
+        return self.get_follower_count(obj)
 
     def get_viewer_is_subscribed(self, obj):
         return self.get_viewer_is_following(obj)

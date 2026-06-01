@@ -9,12 +9,16 @@ from apps.accounts.views import (
     PublicVideoListAPIView,
     PublicVideoShareTrackAPIView,
     PublicVideoViewTrackAPIView,
+    VideoLikeAPIView,
+    VideoRecommendationsAPIView,
 )
 
 urlpatterns = [
     path('', PublicVideoListAPIView.as_view(), name='public-video-list'),
     path('<int:pk>/', PublicVideoDetailAPIView.as_view(), name='public-video-detail'),
     path('<int:pk>/related/', PublicRelatedVideoListAPIView.as_view(), name='public-video-related'),
+    path('<int:pk>/recommendations/', VideoRecommendationsAPIView.as_view(), name='public-video-recommendations'),
+    path('<int:pk>/like/', VideoLikeAPIView.as_view(), name='public-video-like'),
     path('<int:pk>/interaction-summary/', PublicVideoInteractionSummaryAPIView.as_view(), name='public-video-interaction-summary'),
     path('<int:pk>/share/', PublicVideoShareTrackAPIView.as_view(), name='public-video-share'),
     path('<int:pk>/gifts/send/', PublicVideoGiftSendAPIView.as_view(), name='public-video-gift-send'),

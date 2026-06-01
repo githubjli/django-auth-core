@@ -218,6 +218,7 @@ def get_client_ip(request):
 def annotate_videos_for_request(queryset, request):
     queryset = queryset.select_related('owner', 'category').annotate(
         view_count=Count('views', distinct=True),
+        owner_follower_count=Count('owner__subscriptions_received', distinct=True),
     )
     user = getattr(request, 'user', None)
     if user and user.is_authenticated:
@@ -230,6 +231,21 @@ def annotate_videos_for_request(queryset, request):
             ),
         )
     return queryset
+
+
+def sync_user_follower_count(user):
+    follower_count = ChannelSubscription.objects.filter(channel=user).count()
+    User.objects.filter(pk=user.pk).update(subscriber_count=follower_count)
+    user.subscriber_count = follower_count
+    return follower_count
+
+
+def set_user_following(target_user, viewer, is_following):
+    if is_following:
+        ChannelSubscription.objects.get_or_create(channel=target_user, subscriber=viewer)
+    else:
+        ChannelSubscription.objects.filter(channel=target_user, subscriber=viewer).delete()
+    return sync_user_follower_count(target_user)
 
 
 def annotate_comments(queryset, request):
@@ -2836,14 +2852,11 @@ class ChannelSubscriptionAPIView(APIView):
         if channel.pk == request.user.pk:
             return Response({'detail': 'You cannot subscribe to your own channel.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        _, created = ChannelSubscription.objects.get_or_create(channel=channel, subscriber=request.user)
-        if created:
-            User.objects.filter(pk=channel.pk).update(subscriber_count=F('subscriber_count') + 1)
-        channel.refresh_from_db(fields=['subscriber_count'])
+        subscriber_count = set_user_following(channel, request.user, True)
         return Response(
             {
                 'channel_id': channel.pk,
-                'subscriber_count': channel.subscriber_count,
+                'subscriber_count': subscriber_count,
                 'viewer_is_subscribed': True,
             },
             status=status.HTTP_200_OK,
@@ -2851,14 +2864,11 @@ class ChannelSubscriptionAPIView(APIView):
 
     def delete(self, request, pk):
         channel = generics.get_object_or_404(User, pk=pk)
-        deleted_count, _ = ChannelSubscription.objects.filter(channel=channel, subscriber=request.user).delete()
-        if deleted_count:
-            User.objects.filter(pk=channel.pk, subscriber_count__gt=0).update(subscriber_count=F('subscriber_count') - 1)
-        channel.refresh_from_db(fields=['subscriber_count'])
+        subscriber_count = set_user_following(channel, request.user, False)
         return Response(
             {
                 'channel_id': channel.pk,
-                'subscriber_count': channel.subscriber_count,
+                'subscriber_count': subscriber_count,
                 'viewer_is_subscribed': False,
             },
             status=status.HTTP_200_OK,
@@ -2874,8 +2884,7 @@ class CreatorFollowAPIView(APIView):
         if validation_response is not None:
             return validation_response
 
-        ChannelSubscription.objects.get_or_create(channel=creator, subscriber=request.user)
-        subscriber_count = self._sync_subscriber_count(creator)
+        subscriber_count = set_user_following(creator, request.user, True)
         return Response(
             self._response_payload(creator=creator, is_following=True, subscriber_count=subscriber_count),
             status=status.HTTP_200_OK,
@@ -2887,8 +2896,7 @@ class CreatorFollowAPIView(APIView):
         if validation_response is not None:
             return validation_response
 
-        ChannelSubscription.objects.filter(channel=creator, subscriber=request.user).delete()
-        subscriber_count = self._sync_subscriber_count(creator)
+        subscriber_count = set_user_following(creator, request.user, False)
         return Response(
             self._response_payload(creator=creator, is_following=False, subscriber_count=subscriber_count),
             status=status.HTTP_200_OK,
@@ -2900,12 +2908,6 @@ class CreatorFollowAPIView(APIView):
         if not creator.is_creator:
             return Response({'detail': 'Target user is not a creator.'}, status=status.HTTP_400_BAD_REQUEST)
         return None
-
-    def _sync_subscriber_count(self, creator) -> int:
-        subscriber_count = ChannelSubscription.objects.filter(channel=creator).count()
-        creator.subscriber_count = subscriber_count
-        creator.save(update_fields=['subscriber_count'])
-        return subscriber_count
 
     def _response_payload(self, *, creator, is_following: bool, subscriber_count: int) -> dict:
         return {
@@ -2934,6 +2936,40 @@ class PublicUserDetailAPIView(APIView):
         user = generics.get_object_or_404(User, pk=user_id)
         serializer = PublicUserProfileSerializer(user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PublicUserFollowAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, user_id):
+        user = generics.get_object_or_404(User, pk=user_id)
+        validation_response = self._validate_target(request, user)
+        if validation_response is not None:
+            return validation_response
+        follower_count = set_user_following(user, request.user, True)
+        return Response(self._response_payload(user, True, follower_count), status=status.HTTP_200_OK)
+
+    def delete(self, request, user_id):
+        user = generics.get_object_or_404(User, pk=user_id)
+        validation_response = self._validate_target(request, user)
+        if validation_response is not None:
+            return validation_response
+        follower_count = set_user_following(user, request.user, False)
+        return Response(self._response_payload(user, False, follower_count), status=status.HTTP_200_OK)
+
+    def _validate_target(self, request, user):
+        if user.pk == request.user.pk:
+            return Response({'detail': 'You cannot follow yourself.'}, status=status.HTTP_400_BAD_REQUEST)
+        return None
+
+    def _response_payload(self, user, is_following, follower_count):
+        return {
+            'user_id': user.pk,
+            'is_following': is_following,
+            'viewer_is_following': is_following,
+            'follower_count': follower_count,
+            'subscriber_count': follower_count,
+        }
 
 
 class PublicUserFollowersListAPIView(generics.ListAPIView):

@@ -577,3 +577,85 @@ class PublicVideoViewTrackingTestCase(APITestCase):
         flagged_response = self.client.post(reverse('public-video-view', kwargs={'pk': flagged_video.id}))
         self.assertEqual(archived_response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(flagged_response.status_code, status.HTTP_404_NOT_FOUND)
+
+class PublicVideoCreatorPayloadTestCase(APITestCase):
+    def setUp(self):
+        self.creator = User.objects.create_user(
+            email='video-creator@example.com',
+            password='pass1234',
+            first_name='Video',
+            last_name='Creator',
+            is_creator=True,
+        )
+        self.viewer = User.objects.create_user(email='video-viewer@example.com', password='pass1234')
+        self.video = Video.objects.create(
+            owner=self.creator,
+            title='creator payload video',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+        )
+
+    def test_public_video_detail_returns_creator_id_and_consistent_follow_counts_for_anonymous(self):
+        for idx in range(5):
+            follower = User.objects.create_user(email=f'video-follower-{idx}@example.com', password='pass1234')
+            ChannelSubscription.objects.create(channel=self.creator, subscriber=follower)
+
+        response = self.client.get(reverse('public-video-detail', kwargs={'pk': self.video.id}))
+        profile_response = self.client.get(reverse('public-user-detail', kwargs={'user_id': self.creator.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['creator']['id'], self.creator.id)
+        self.assertEqual(response.data['owner_id'], self.creator.id)
+        self.assertEqual(response.data['creator']['name'], self.creator.display_name)
+        self.assertEqual(response.data['owner_name'], self.creator.display_name)
+        self.assertEqual(response.data['creator']['avatar_url'], response.data['owner_avatar_url'])
+        self.assertEqual(response.data['creator']['follower_count'], 5)
+        self.assertEqual(response.data['creator']['subscriber_count'], 5)
+        self.assertEqual(response.data['owner_follower_count'], 5)
+        self.assertEqual(response.data['owner_subscriber_count'], 5)
+        self.assertEqual(profile_response.data['follower_count'], 5)
+        self.assertFalse(response.data['creator']['is_following'])
+        self.assertFalse(response.data['is_following_owner'])
+        self.assertFalse(response.data['is_liked'])
+
+    def test_public_video_detail_following_and_like_state_for_authenticated_viewer(self):
+        self.client.force_authenticate(user=self.viewer)
+
+        follow_response = self.client.post(reverse('public-user-follow', kwargs={'user_id': self.creator.id}))
+        like_response = self.client.post(reverse('public-video-like', kwargs={'pk': self.video.id}))
+        detail_response = self.client.get(reverse('public-video-detail', kwargs={'pk': self.video.id}))
+
+        self.assertEqual(follow_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(follow_response.data['follower_count'], 1)
+        self.assertEqual(like_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(detail_response.data['creator']['is_following'])
+        self.assertTrue(detail_response.data['is_following_owner'])
+        self.assertTrue(detail_response.data['is_liked'])
+        self.assertEqual(detail_response.data['like_count'], 1)
+
+    def test_public_video_recommendations_include_creator_owner_payload(self):
+        ChannelSubscription.objects.create(channel=self.creator, subscriber=self.viewer)
+        recommended = Video.objects.create(
+            owner=self.creator,
+            title='recommended payload video',
+            visibility=Video.VISIBILITY_PUBLIC,
+            status=Video.STATUS_ACTIVE,
+        )
+        self.client.force_authenticate(user=self.viewer)
+
+        response = self.client.get(reverse('public-video-recommendations', kwargs={'pk': self.video.id}), {'limit': 1})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        item = response.data[0]
+        self.assertEqual(item['id'], recommended.id)
+        self.assertEqual(item['creator']['id'], self.creator.id)
+        self.assertEqual(item['owner_id'], self.creator.id)
+        self.assertEqual(item['creator']['follower_count'], 1)
+        self.assertEqual(item['creator']['subscriber_count'], 1)
+        self.assertEqual(item['owner_follower_count'], 1)
+        self.assertEqual(item['owner_subscriber_count'], 1)
+        self.assertTrue(item['creator']['is_following'])
+        self.assertTrue(item['is_following_owner'])
