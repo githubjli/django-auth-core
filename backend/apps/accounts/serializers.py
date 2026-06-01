@@ -2909,6 +2909,15 @@ class VideoInteractionSummarySerializer(serializers.Serializer):
     def get_subscriber_count(self, obj):
         return self.get_follower_count(obj)
 
+    def get_follower_count(self, obj):
+        prefetched = getattr(obj.owner, 'follower_count_value', None)
+        if prefetched is not None:
+            return prefetched
+        return ChannelSubscription.objects.filter(channel=obj.owner).count()
+
+    def get_subscriber_count(self, obj):
+        return self.get_follower_count(obj)
+
     def get_viewer_is_subscribed(self, obj):
         return self.get_viewer_is_following(obj)
 
